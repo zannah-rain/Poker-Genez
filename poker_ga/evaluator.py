@@ -96,25 +96,43 @@ def category_name(cat: int) -> str:
     return names[cat]
 
 
+def flush_draw_suit(cards: list[Card]) -> int | None:
+    """Returns the suit with exactly 4 cards among `cards` (a live one-card
+    flush draw), or None if there isn't one."""
+    suits = Counter(c.suit for c in cards)
+    for suit, count in suits.items():
+        if count == 4:
+            return suit
+    return None
+
+
 def has_flush_draw(cards: list[Card]) -> bool:
     """True if there are exactly 4 cards of one suit (a live flush draw)."""
-    suits = Counter(c.suit for c in cards)
-    return any(count == 4 for count in suits.values())
+    return flush_draw_suit(cards) is not None
+
+
+def count_straight_draw_outs(cards: list[Card]) -> int:
+    """Number of distinct ranks that would complete a straight if added to
+    these cards. Returns 0 if a straight is already made (that's not a draw).
+    Only real ranks (2-14) are tried as candidates -- 14 (Ace) already covers
+    the wheel via _straight_high's own low-ace handling, so trying a
+    standalone "1" as well would double-count the same missing card."""
+    ranks = {c.rank for c in cards}
+    if _straight_high(sorted(ranks, reverse=True)):
+        return 0
+    outs = 0
+    for candidate in range(2, 15):
+        if candidate in ranks:
+            continue
+        if _straight_high(sorted(ranks | {candidate}, reverse=True)):
+            outs += 1
+    return outs
 
 
 def has_straight_draw(cards: list[Card]) -> bool:
     """True if adding one more rank could complete a straight
     (open-ended or gutshot) given the current distinct ranks."""
-    ranks = set(c.rank for c in cards)
-    if 14 in ranks:
-        ranks.add(1)
-    for candidate in range(1, 15):
-        if candidate in ranks:
-            continue
-        trial = ranks | {candidate}
-        if _straight_high(sorted(trial, reverse=True)):
-            return True
-    return False
+    return count_straight_draw_outs(cards) > 0
 
 
 def best_hand_from_available(hole: list[Card], board: list[Card]) -> dict:
@@ -136,15 +154,21 @@ def best_hand_from_available(hole: list[Card], board: list[Card]) -> dict:
             "tiebreak": tiebreak,
             "high_card": high_card,
             "flush_draw": False,
+            "flush_draw_suit": None,
             "straight_draw": False,
+            "straight_draw_outs": 0,
         }
 
     category, *tiebreak = evaluate_best(all_cards)
     high_card = max(c.rank for c in all_cards)
+    draw_suit = flush_draw_suit(all_cards)
+    straight_outs = count_straight_draw_outs(all_cards)
     return {
         "category": category,
         "tiebreak": tuple(tiebreak),
         "high_card": high_card,
-        "flush_draw": has_flush_draw(all_cards),
-        "straight_draw": has_straight_draw(all_cards),
+        "flush_draw": draw_suit is not None,
+        "flush_draw_suit": draw_suit,
+        "straight_draw": straight_outs > 0,
+        "straight_draw_outs": straight_outs,
     }

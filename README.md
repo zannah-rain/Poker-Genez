@@ -11,18 +11,22 @@ A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
   sized at `(score - 1) x pot` (e.g. 2.0 = a pot-sized raise). Those weights
   *are* the genes the GA evolves; `NUM_FEATURES` drives their shape
   automatically, whatever `features.py` defines.
-- **Features** (`poker_ga/features.py`): 12 basic situation characteristics
-  (made-hand category, high card, hole card connectivity, street, pot odds,
-  SPR, action-order position, starting seat position, stack depth, players
-  in hand, raises this street) each get *two* representations: one
-  generalized 0-1 feature so the genome can learn a linear trend across its
-  values, and one exact indicator feature per specific value (e.g. one
-  boolean each for Preflop/Flop/Turn/River, one for every card rank 2-Ace,
-  one for each of UTG/HJ/CO/BTN/SB/BB) so the genome can also learn a
-  non-linear, value-specific override. Plus a handful of standalone 0/1
-  flags (facing a bet, suited hole cards, etc). That's 91 features total,
-  each with a human-readable label and a precise definition (see
-  `FEATURE_SPECS`).
+- **Features** (`poker_ga/features.py`): 16 basic situation characteristics
+  (made-hand category, hole/shared-cards high card, hole card connectivity,
+  street, pot odds, SPR, action-order position, starting seat position,
+  stack depth, players in hand, raises this street, and 3 flop-texture
+  dimensions) each get *two* representations: one generalized 0-1 feature so
+  the genome can learn a linear trend across its values, and one exact
+  indicator feature per specific value (e.g. one boolean each for
+  Preflop/Flop/Turn/River, one for every card rank 2-Ace, one for each of
+  UTG/HJ/CO/BTN/SB/BB, one for Rainbow/Flush-Draw-Flop/Monotone) so the
+  genome can also learn a non-linear, value-specific override. Plus ~20
+  standalone 0/1 heuristic flags that don't reduce to a clean one-hot family
+  (top pair, overpair, combo draw, backdoor flush draws, connected flop,
+  etc — some, like Low Pair, are subsets of others, like Underpair, so
+  forcing them into a single mutually-exclusive category would be wrong).
+  That's 131 features total, each with a human-readable label and a precise
+  definition (see `FEATURE_SPECS`).
 - **Seating** (`poker_ga/seating.py`): pure seat-arithmetic shared by the
   game engine and feature extraction — blind positions, preflop action
   order, and standard seat-role naming (UTG/HJ/CO/BTN/SB/BB) that correctly
@@ -98,10 +102,10 @@ After the last generation, `<out-dir>/final/` contains:
   feature (e.g. Betting Street broken into Preflop/Flop/Turn/River, High
   Card Rank into 2 through Ace, Pot Odds into named risk ratios). Each
   breakdown row combines that value's general (linear) contribution with its
-  own exact indicator feature's contribution into one number, so the ~80
+  own exact indicator feature's contribution into one number, so the ~100
   underlying indicator features never clutter the report as separate
   entries. A reference section defines each generalized/standalone feature
-  precisely (17 entries, not 91).
+  precisely (36 entries, not 131).
 - `rankNN_playerID_genome.npy` — the raw weights, loadable via `Genome.load`.
 - `population.npy` — the entire final generation, ranked best-first, saved
   via `genome.save_population`. This is what `--reload-previous` picks up

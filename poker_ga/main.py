@@ -21,10 +21,10 @@ from tournament import export_top_n, rank_players, run_final_tournament
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evolve poker strategies with a genetic algorithm.")
-    p.add_argument("--generations", type=int, default=30)
-    p.add_argument("--population", type=int, default=30, help="Must be a multiple of 6.")
+    p.add_argument("--generations", type=int, default=50)
+    p.add_argument("--population", type=int, default=300, help="Must be a multiple of 6.")
     p.add_argument("--rounds", type=int, default=50, help="Random re-seatings per generation.")
-    p.add_argument("--max-hands", type=int, default=50, help="Hand cap per table session.")
+    p.add_argument("--max-hands", type=int, default=100, help="Hand cap per table session.")
     p.add_argument("--starting-stack", type=float, default=200.0)
     p.add_argument("--small-blind", type=float, default=1.0)
     p.add_argument("--big-blind", type=float, default=2.0)
