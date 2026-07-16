@@ -125,11 +125,10 @@ def rank_players(players: list[Player], stats: dict[int, PlayerStats]) -> list[P
     return sorted(players, key=lambda p: stats[p.player_id].mean_net_chips, reverse=True)
 
 
-def _ranked_features(weights: np.ndarray) -> list[tuple]:
-    """All features paired with their weight, most influential (by
-    magnitude) first."""
-    order = np.argsort(-np.abs(weights))
-    return [(FEATURE_SPECS[i], float(weights[i])) for i in order]
+def _ranked_feature_weights(weights: np.ndarray) -> list[tuple]:
+    """All (spec, weight) pairs, most influential (by magnitude) first."""
+    pairs = list(zip(FEATURE_SPECS, (float(w) for w in weights)))
+    return sorted(pairs, key=lambda sw: -abs(sw[1]))
 
 
 def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig, rank: int) -> str:
@@ -167,15 +166,41 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
     )
     lines.append("")
 
-    lines.append("### Feature weights")
-    lines.append("All features, most influential first:")
+    all_weights = _ranked_feature_weights(g.weights)
+    boolean_weights = [(s, w) for s, w in all_weights if s.kind == "boolean"]
+    multi_weights = [(s, w) for s, w in all_weights if s.kind != "boolean"]
+
+    lines.append("### Boolean feature weights")
+    lines.append(
+        "These features are simple yes/no flags (0 or 1), so one weight fully "
+        "describes each one's effect. Most influential first:"
+    )
     lines.append("")
     lines.append("| feature | weight | effect |")
     lines.append("|---|---|---|")
-    for spec, w in _ranked_features(g.weights):
+    for spec, w in boolean_weights:
         effect = "raises the score (more aggressive)" if w > 0 else "lowers the score (more passive)"
         lines.append(f"| {spec.label} | {w:+.3f} | {effect} |")
     lines.append("")
+
+    lines.append("### Multi-value feature breakdowns")
+    lines.append(
+        "These features take a range of values rather than just 0/1, so a single "
+        "weight number is hard to picture. Each one gets its own table below, "
+        "showing the score contribution (weight x value) at every value it can "
+        "take -- for continuous features, at representative sample points along "
+        "its range -- ordered from most to least influential feature."
+    )
+    lines.append("")
+    for spec, w in multi_weights:
+        note = " (continuous — illustrative sample points)" if spec.kind == "continuous" else ""
+        lines.append(f"#### {spec.label} — weight {w:+.3f}{note}")
+        lines.append("")
+        lines.append("| value | normalized value | score contribution |")
+        lines.append("|---|---|---|")
+        for value, value_label in spec.value_table:
+            lines.append(f"| {value_label} | {value:.3f} | {w * value:+.3f} |")
+        lines.append("")
 
     lines.append("## Feature Reference")
     lines.append("Precise definition of every feature named above:")

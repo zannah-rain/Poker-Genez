@@ -84,8 +84,11 @@ After the last generation, `<out-dir>/final/` contains:
 - `leaderboard.md` — a ranked table (mean net chips/session, win rate, bust
   rate, bb/100) for the top N genomes.
 - `rankNN_playerID_strategy.md` — one report per top genome: performance
-  stats, its bias and noise level, every feature's weight (sorted by
-  magnitude), and a reference section defining each feature precisely.
+  stats, its bias and noise level, a weight table for the boolean (0/1)
+  features, a per-feature value-contribution table for every multi-value
+  feature (e.g. Betting Street broken into Preflop/Flop/Turn/River, High
+  Card Rank into 2 through Ace, Pot Odds into named risk ratios), and a
+  reference section defining each feature precisely.
 - `rankNN_playerID_genome.npy` — the raw weights, loadable via `Genome.load`.
 - `population.npy` — the entire final generation, ranked best-first, saved
   via `genome.save_population`. This is what `--reload-previous` picks up
