@@ -14,6 +14,7 @@ import numpy as np
 
 from ga import GAConfig, Population
 from game import GameConfig
+from genome import load_population, save_population
 from simulate import SimConfig, run_generation
 from tournament import export_top_n, rank_players, run_final_tournament
 
@@ -45,6 +46,15 @@ def parse_args() -> argparse.Namespace:
         "--final-out-dir", type=str, default=None,
         help="Where to write the final leaderboard + strategy reports. Defaults to <out-dir>/final.",
     )
+    p.add_argument(
+        "--reload-previous", action=argparse.BooleanOptionalAction, default=True,
+        help="Seed generation 0 from the previous run's final population, if one is found "
+        "(pass --no-reload-previous to always start from a fresh random population).",
+    )
+    p.add_argument(
+        "--reload-path", type=str, default=None,
+        help="Population file to reload. Defaults to <final-out-dir>/population.npy.",
+    )
     return p.parse_args()
 
 
@@ -70,7 +80,21 @@ def main() -> None:
     sim_config = SimConfig(rounds_per_generation=args.rounds)
 
     os.makedirs(args.out_dir, exist_ok=True)
-    population = Population(ga_config, rng)
+    final_out_dir = args.final_out_dir or os.path.join(args.out_dir, "final")
+    reload_path = args.reload_path or os.path.join(final_out_dir, "population.npy")
+
+    seed_genomes = None
+    if args.reload_previous:
+        if os.path.exists(reload_path):
+            try:
+                seed_genomes = load_population(reload_path)
+                print(f"Reloaded {len(seed_genomes)} genomes from previous run at {reload_path}")
+            except Exception as exc:
+                print(f"Warning: could not reload population from {reload_path} ({exc}); starting from scratch.")
+        else:
+            print(f"No previous population found at {reload_path}; starting from scratch.")
+
+    population = Population(ga_config, rng, seed_genomes=seed_genomes)
 
     for gen in range(args.generations):
         t0 = time.time()
@@ -89,7 +113,6 @@ def main() -> None:
 
         population.evolve(fitness)
 
-    final_out_dir = args.final_out_dir or os.path.join(args.out_dir, "final")
     print(
         f"\nRunning final tournament: {len(population.players)} genomes from generation "
         f"{population.generation}, {args.final_rounds} rounds, up to {args.final_max_hands} hands/session..."
@@ -105,6 +128,9 @@ def main() -> None:
     final_stats = run_final_tournament(population.players, final_game_config, final_sim_config, rng)
     ranked = rank_players(population.players, final_stats)
     export_top_n(ranked, final_stats, final_game_config, args.top_n, final_out_dir)
+
+    population_path = os.path.join(final_out_dir, "population.npy")
+    save_population([p.genome for p in ranked], population_path)
     elapsed = time.time() - t0
 
     print(f"Final tournament complete in {elapsed:.1f}s. Top {args.top_n}:")
@@ -116,6 +142,7 @@ def main() -> None:
             f"win {s.win_rate:6.1%} | bust {s.bust_rate:6.1%} | {s.bb_per_100(args.big_blind):+7.2f} bb/100"
         )
     print(f"Strategy reports written to {final_out_dir}/")
+    print(f"Full ranked population ({len(ranked)} genomes) saved to {population_path} for --reload-previous.")
 
 
 if __name__ == "__main__":

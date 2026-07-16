@@ -48,12 +48,24 @@ def mutate(genome: Genome, rate: float, scale: float, rng: np.random.Generator) 
 
 
 class Population:
-    def __init__(self, config: GAConfig, rng: np.random.Generator):
+    def __init__(self, config: GAConfig, rng: np.random.Generator, seed_genomes: list[Genome] | None = None):
+        """`seed_genomes`, if given, seeds generation 0 (e.g. reloaded from a
+        previous run's final population) instead of starting fully random.
+        Best-first ordering matters if len(seed_genomes) > population_size,
+        since the list is truncated; any shortfall is filled with fresh
+        random genomes."""
         self.config = config
         self.rng = rng
         self.generation = 0
         self._next_id = 0
-        self.players: list[Player] = [self._new_random_player() for _ in range(config.population_size)]
+        self.players: list[Player] = []
+
+        if seed_genomes:
+            for genome in seed_genomes[: config.population_size]:
+                self.players.append(Player(player_id=self._next_id, genome=genome.copy(), generation=self.generation))
+                self._next_id += 1
+        while len(self.players) < config.population_size:
+            self.players.append(self._new_random_player())
 
     def _new_random_player(self) -> Player:
         genome = Genome.random(self.rng, scale=self.config.init_scale)

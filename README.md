@@ -57,6 +57,13 @@ Key flags (see `python main.py --help` for all of them):
   the default population of 96.
 - `--top-n` — how many top genomes to export.
 - `--final-out-dir` — where reports go (defaults to `<out-dir>/final`).
+- `--reload-previous` (default on) — seeds generation 0 from the previous
+  run's saved final population (`<final-out-dir>/population.npy`) instead of
+  starting from scratch, so consecutive runs against the same `--out-dir`
+  keep evolving where the last one left off. If population sizes differ,
+  the reloaded genomes (best-first) are truncated or padded with fresh
+  random genomes to fit. Pass `--no-reload-previous` to always start random,
+  or `--reload-path` to reload from a specific file.
 
 The best genome is saved after every generation to `<out-dir>/best_genome_latest.npy`.
 Load it back with:
@@ -77,6 +84,9 @@ After the last generation, `<out-dir>/final/` contains:
   by weight magnitude, bet-sizing tendencies, and its exploration/bluffing
   noise level.
 - `rankNN_playerID_genome.npy` — the raw weights, loadable via `Genome.load`.
+- `population.npy` — the entire final generation, ranked best-first, saved
+  via `genome.save_population`. This is what `--reload-previous` picks up
+  on the next run.
 
 ## Extending
 

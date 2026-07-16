@@ -125,3 +125,13 @@ class Genome:
             frac = self.bet_size_fraction(features)
             bet_size = frac * max(situation.pot, 1.0)
         return best_action, bet_size
+
+
+def save_population(genomes: list[Genome], path: str) -> None:
+    """Saves a whole generation (best-first, if the caller ranked it) as one
+    file so a later run can reload it wholesale as its starting population."""
+    np.save(path, np.stack([g.flatten() for g in genomes]))
+
+
+def load_population(path: str) -> list[Genome]:
+    return [Genome.unflatten(row) for row in np.load(path)]
