@@ -1,0 +1,89 @@
+# poker_ga
+
+A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
+
+## How it works
+
+- **Genome** (`poker_ga/genome.py`): each player is a linear scoring function.
+  For every decision, `fold`, `check/call`, and `bet/raise` each get a score
+  = `weights[action] . features + bias[action]`; the legal action with the
+  highest score is taken. A second small weight vector decides bet sizing
+  (as a pot fraction) when betting/raising wins. These weights *are* the
+  genes the GA evolves.
+- **Features** (`poker_ga/features.py`): ~26 basic situation characteristics
+  fed into that scoring function — made-hand category, explicit flags for
+  pair/straight/flush/etc., high card, flush/straight draws, hole card
+  texture, street, pot odds, SPR, position, whether I'm facing a bet, whether
+  I was the last aggressor, and more.
+- **Game engine** (`poker_ga/game.py`): a real 6-max NLHE implementation —
+  blinds, four streets, all-in handling with correct multi-way side pots,
+  and showdown.
+- **Simulation** (`poker_ga/simulate.py`): each generation, the population is
+  repeatedly reshuffled into random 6-max tables ("rounds"). Each table plays
+  a session of hands (starting stacks reset per session) until only one
+  player has chips left or a hand cap is hit; players are removed from the
+  table the instant they bust. A player's fitness is their net chip result
+  summed across all sessions they played that generation.
+- **GA** (`poker_ga/ga.py`): tournament selection + blend crossover + gaussian
+  mutation, with elitism carrying the top genomes forward unchanged.
+- **Final tournament** (`poker_ga/tournament.py`): once evolution finishes,
+  the last generation is re-evaluated with many more rounds and a higher
+  hand cap than the (deliberately cheap) per-generation fitness pass, for a
+  low-variance final ranking. The top N genomes are exported as
+  human-readable strategy reports plus performance stats.
+
+## Usage
+
+Modules use flat imports and are run directly from inside `poker_ga/`
+(not as a `-m` package):
+
+```bash
+pip install -r requirements.txt
+cd poker_ga
+python main.py --generations 50 --population 60 --rounds 3
+```
+
+Key flags (see `python main.py --help` for all of them):
+
+- `--population` — pool size, must be a multiple of 6.
+- `--rounds` — random table re-seatings per generation (more rounds = less
+  variance in the fitness signal, at the cost of speed).
+- `--max-hands` — hand cap per table session during evolution.
+- `--starting-stack`, `--small-blind`, `--big-blind` — table stakes.
+- `--elite`, `--mutation-rate`, `--mutation-scale` — GA hyperparameters.
+- `--final-rounds`, `--final-max-hands` — size of the final scoring
+  tournament run after evolution completes (bigger = lower-variance ranking,
+  slower). Defaults (200 rounds, 500-hand cap) take roughly 1-2 minutes at
+  the default population of 96.
+- `--top-n` — how many top genomes to export.
+- `--final-out-dir` — where reports go (defaults to `<out-dir>/final`).
+
+The best genome is saved after every generation to `<out-dir>/best_genome_latest.npy`.
+Load it back with:
+
+```python
+from genome import Genome
+best = Genome.load("runs/best_genome_latest.npy")
+```
+
+### Final tournament output
+
+After the last generation, `<out-dir>/final/` contains:
+
+- `leaderboard.md` — a ranked table (mean net chips/session, win rate, bust
+  rate, bb/100) for the top N genomes.
+- `rankNN_playerID_strategy.md` — one report per top genome: performance
+  stats, which features drive each action (fold/check-call/bet-raise) sorted
+  by weight magnitude, bet-sizing tendencies, and its exploration/bluffing
+  noise level.
+- `rankNN_playerID_genome.npy` — the raw weights, loadable via `Genome.load`.
+
+## Extending
+
+- Add a feature: append to `FEATURE_NAMES`/`extract_features` in `features.py`
+  (genomes auto-resize since `NUM_FEATURES` drives every weight shape).
+- Change fitness: edit `run_session`/`run_generation` in `simulate.py` — e.g.
+  blend in hands-survived, or weight later generations' sessions differently.
+- Pit two saved genomes against each other head-to-head by constructing
+  `Player` objects around loaded genomes and calling
+  `tournament.run_session_detailed` directly.
