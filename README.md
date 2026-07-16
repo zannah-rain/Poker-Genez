@@ -11,16 +11,23 @@ A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
   sized at `(score - 1) x pot` (e.g. 2.0 = a pot-sized raise). Those weights
   *are* the genes the GA evolves; `NUM_FEATURES` drives their shape
   automatically, whatever `features.py` defines.
-- **Features** (`poker_ga/features.py`): ~11 basic situation characteristics
+- **Features** (`poker_ga/features.py`): 12 basic situation characteristics
   (made-hand category, high card, hole card connectivity, street, pot odds,
-  SPR, position, stack depth, players in hand, raises this street) each get
-  *two* representations: one generalized 0-1 feature so the genome can learn
-  a linear trend across its values, and one exact indicator feature per
-  specific value (e.g. one boolean each for Preflop/Flop/Turn/River, one for
-  every card rank 2-Ace) so the genome can also learn a non-linear,
-  value-specific override. Plus a handful of standalone 0/1 flags (facing a
-  bet, on the button, suited hole cards, etc). That's 91 features total, each
-  with a human-readable label and a precise definition (see `FEATURE_SPECS`).
+  SPR, action-order position, starting seat position, stack depth, players
+  in hand, raises this street) each get *two* representations: one
+  generalized 0-1 feature so the genome can learn a linear trend across its
+  values, and one exact indicator feature per specific value (e.g. one
+  boolean each for Preflop/Flop/Turn/River, one for every card rank 2-Ace,
+  one for each of UTG/HJ/CO/BTN/SB/BB) so the genome can also learn a
+  non-linear, value-specific override. Plus a handful of standalone 0/1
+  flags (facing a bet, suited hole cards, etc). That's 97 features total,
+  each with a human-readable label and a precise definition (see
+  `FEATURE_SPECS`).
+- **Seating** (`poker_ga/seating.py`): pure seat-arithmetic shared by the
+  game engine and feature extraction — blind positions, preflop action
+  order, and standard seat-role naming (UTG/HJ/CO/BTN/SB/BB) that correctly
+  collapses at smaller table sizes (e.g. 4-handed only has UTG and BTN as
+  non-blind seats; heads-up the button is the small blind).
 - **Game engine** (`poker_ga/game.py`): a real 6-max NLHE implementation —
   blinds, four streets, all-in handling with correct multi-way side pots,
   and showdown.

@@ -15,6 +15,7 @@ from evaluator import evaluate_best
 from features import Situation
 from genome import BET_RAISE, CHECK_CALL, FOLD
 from player import Player
+from seating import blind_indices, preflop_order
 
 PREFLOP, FLOP, TURN, RIVER = 0, 1, 2, 3
 STREET_DEAL_COUNTS = {FLOP: 3, TURN: 1, RIVER: 1}
@@ -52,20 +53,11 @@ class HandResult:
     board: list
 
 
-def _blind_indices(button_idx: int, n: int) -> tuple[int, int]:
-    if n == 2:
-        return button_idx, (button_idx + 1) % n
-    return (button_idx + 1) % n, (button_idx + 2) % n
-
-
 def _street_order(button_idx: int, n: int, street: int) -> list[int]:
-    sb_idx, bb_idx = _blind_indices(button_idx, n)
     if street == PREFLOP:
-        start = (bb_idx + 1) % n
-    elif n == 2:
-        start = bb_idx
-    else:
-        start = sb_idx
+        return preflop_order(button_idx, n)
+    sb_idx, bb_idx = blind_indices(button_idx, n)
+    start = bb_idx if n == 2 else sb_idx
     return [(start + k) % n for k in range(n)]
 
 
@@ -123,7 +115,9 @@ def betting_round(
             effective_stack=_effective_stack(seats, i, non_folded),
             position=position,
             num_seats_this_street=len(order),
-            is_button=(i == button_idx),
+            seat_index=i,
+            button_idx=button_idx,
+            num_seats_total=len(seats),
             num_active=len(non_folded),
             num_raises_this_street=num_raises,
             is_aggressor=(last_aggressor == i),
@@ -231,7 +225,7 @@ def play_hand(
     for i in range(n):
         seats[i].hole = deck.deal(2)
 
-    sb_idx, bb_idx = _blind_indices(button_idx, n)
+    sb_idx, bb_idx = blind_indices(button_idx, n)
     sb_amt = min(config.small_blind, seats[sb_idx].stack)
     bb_amt = min(config.big_blind, seats[bb_idx].stack)
     for idx, amt in ((sb_idx, sb_amt), (bb_idx, bb_amt)):

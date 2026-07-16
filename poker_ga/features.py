@@ -26,6 +26,7 @@ from evaluator import (
     FULL_HOUSE, FLUSH, HIGH_CARD, PAIR, QUADS, STRAIGHT, STRAIGHT_FLUSH,
     TRIPS, TWO_PAIR, best_hand_from_available,
 )
+from seating import SEAT_ROLES, seat_role
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,11 @@ _STACK_DEPTH_VALUES = (
     (0.75, "1.5x the starting stack"),
     (1.0, "2x the starting stack or more (clipped)"),
 )
+_SEAT_ROLE_LABELS = {
+    "UTG": "Under The Gun (UTG)", "HJ": "Hijack (HJ)", "CO": "Cutoff (CO)",
+    "BTN": "Button (BTN)", "SB": "Small Blind (SB)", "BB": "Big Blind (BB)",
+}
+_SEAT_ROLE_VALUES = tuple((i / (len(SEAT_ROLES) - 1), _SEAT_ROLE_LABELS[role]) for i, role in enumerate(SEAT_ROLES))
 
 _HAND_CATEGORY_CHILDREN = [
     _linked_bool(
@@ -239,6 +245,19 @@ _RAISES_CHILDREN = [
     )
 ]
 
+_SEAT_ROLE_KEYS = {
+    "UTG": "is_utg", "HJ": "is_hijack", "CO": "is_cutoff",
+    "BTN": "is_button", "SB": "is_small_blind", "BB": "is_big_blind",
+}
+_SEAT_ROLE_CHILDREN = [
+    _linked_bool(
+        _SEAT_ROLE_KEYS[role], _SEAT_ROLE_LABELS[role],
+        f"1 if this player's starting seat this hand was {_SEAT_ROLE_LABELS[role]}, else 0.",
+        "starting_position_norm", i,
+    )
+    for i, role in enumerate(SEAT_ROLES)
+]
+
 
 # Grouped as parent-feature-then-its-children for readability; array order is
 # otherwise arbitrary since extract_features looks values up by key, not position.
@@ -310,6 +329,17 @@ FEATURE_SPECS: list[FeatureSpec] = [
     *_POSITION_CHILDREN,
 
     FeatureSpec(
+        "starting_position_norm", "Starting Seat Position",
+        "Which of the 6 standard preflop seat roles this player started the hand in, "
+        "ordered from first-to-act preflop through the blinds -- UTG, HJ, CO, BTN, SB, BB "
+        "-- normalized as role_index / 5. At smaller table sizes the earliest non-blind "
+        "roles collapse (e.g. 4-handed there's only UTG and BTN; heads-up the button and "
+        "small blind are the same seat, labeled SB).",
+        kind="categorical", value_table=_SEAT_ROLE_VALUES,
+    ),
+    *_SEAT_ROLE_CHILDREN,
+
+    FeatureSpec(
         "num_active_norm", "Players Still In Hand",
         "Number of players who have not folded yet this hand, divided by 6.",
         kind="categorical", value_table=_ACTIVE_PLAYERS_VALUES,
@@ -352,7 +382,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "is_aggressor", "Last Aggressor",
         "1 if this player made the most recent bet/raise on the current street, else 0.",
     ),
-    FeatureSpec("is_button", "On The Button", "1 if this player holds the dealer/button seat this hand, else 0."),
 ]
 
 FEATURE_NAMES = [spec.key for spec in FEATURE_SPECS]
@@ -372,7 +401,9 @@ class Situation:
     effective_stack: float  # min(my_stack, largest active opponent stack)
     position: int  # 0 = first to act this street ... n-1 = last to act
     num_seats_this_street: int
-    is_button: bool
+    seat_index: int  # this player's fixed seat this hand
+    button_idx: int  # the button's fixed seat this hand
+    num_seats_total: int  # seats dealt into this hand (constant all hand, unlike num_active)
     num_active: int  # players still in the hand (not folded)
     num_raises_this_street: int
     is_aggressor: bool  # did I make the last bet/raise this street?
@@ -405,6 +436,8 @@ def extract_features(sit: Situation) -> np.ndarray:
     num_raises_norm = _clip01(sit.num_raises_this_street / 4.0)
     stack_depth_norm = _clip01(sit.my_stack / max(sit.starting_stack, 1.0) / 2.0)
     high_card_norm = (hand["high_card"] - 2) / 12.0
+    role = seat_role(sit.seat_index, sit.button_idx, sit.num_seats_total)
+    role_index = SEAT_ROLES.index(role)
 
     values = {
         "hand_category_norm": cat / 8.0,
@@ -420,11 +453,13 @@ def extract_features(sit: Situation) -> np.ndarray:
         "call_amount_norm": call_amount_norm,
         "spr_norm": spr_norm,
         "position_norm": position_norm,
-        "is_button": float(sit.is_button),
+        "starting_position_norm": role_index / (len(SEAT_ROLES) - 1),
         "num_active_norm": num_active_norm,
         "num_raises_norm": num_raises_norm,
         "stack_depth_norm": stack_depth_norm,
     }
+    for i, seat_role_name in enumerate(SEAT_ROLES):
+        values[_SEAT_ROLE_KEYS[seat_role_name]] = float(role_index == i)
 
     # Exact one-hot indicators for enumerable categorical features.
     for category_value, key in (
