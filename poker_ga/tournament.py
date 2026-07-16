@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from features import FEATURE_SPECS
+from features import FEATURE_GROUPS, FEATURE_SPECS, group_of
 from game import GameConfig, SeatState, play_hand
 from player import Player
 from simulate import SimConfig
@@ -171,8 +171,9 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
     lines.append("## How this genome decides")
     lines.append(
         "Every decision computes one number: `score = bias + sum(weight x feature value)` "
-        "over the features below (91 total -- see the breakdown tables for how the count "
-        "gets that high while staying readable). The score is then thresholded:"
+        f"over the features below ({len(FEATURE_SPECS)} total, organized by theme below -- "
+        "see the group breakdowns for how the count gets that high while staying readable). "
+        "The score is then thresholded:"
     )
     lines.append("")
     lines.append("- `score <= 0` -> fold (or check, if there's nothing to call)")
@@ -199,72 +200,87 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
     parents_sorted = sorted(parents, key=parent_influence, reverse=True)
     standalone_sorted = sorted(standalone_booleans, key=lambda s: -abs(weight_by_key[s.key]))
 
-    lines.append("### Boolean feature weights")
+    lines.append("## Feature Groups")
     lines.append(
-        "These features are simple yes/no flags (0 or 1) that aren't tied to a specific "
-        "value of any other feature, so one weight fully describes each one's effect. "
-        "Most influential first:"
-    )
-    lines.append("")
-    lines.append("| feature | weight | effect |")
-    lines.append("|---|---|---|")
-    for spec in standalone_sorted:
-        w = weight_by_key[spec.key]
-        effect = "raises the score (more aggressive)" if w > 0 else "lowers the score (more passive)"
-        lines.append(f"| {spec.label} | {w:+.3f} | {effect} |")
-    lines.append("")
-
-    lines.append("### Multi-value feature breakdowns")
-    lines.append(
-        "These features take a range of values rather than just 0/1. Each one has both a "
+        "Features are grouped by theme so related ones sit together. Within each group: "
+        "boolean (yes/no) features first as a compact table, most influential first; then "
+        "one breakdown table per multi-value feature. Each multi-value feature has both a "
         "single \"general\" weight (a linear trend across its values) and an exact indicator "
-        "feature for every specific value (letting the genome learn a non-linear override just "
-        "for that value). The tables below combine both into one row per value:"
+        "feature for every specific value (letting the genome learn a non-linear override "
+        "just for that value) -- the breakdown table combines both into one row per value:"
     )
     lines.append("")
     lines.append("- **general trend** = general weight x this value (the linear component)")
     lines.append("- **specific adjustment** = the weight of this exact value's own indicator feature")
     lines.append("- **combined** = general trend + specific adjustment (what this value actually contributes)")
     lines.append("")
-    lines.append(
-        "Ordered by each feature's single biggest combined swing across its values, most influential first:"
-    )
-    lines.append("")
-    for spec in parents_sorted:
-        w = weight_by_key[spec.key]
-        children = children_by_parent.get(spec.key, {})
-        note = " (continuous -- bucketed to the nearest of 5 representative points)" if spec.kind == "continuous" else ""
-        lines.append(f"#### {spec.label} — general weight {w:+.3f}{note}")
+
+    for group in FEATURE_GROUPS:
+        group_booleans = [s for s in standalone_sorted if group_of(s) == group]
+        group_parents = [s for s in parents_sorted if group_of(s) == group]
+        if not group_booleans and not group_parents:
+            continue
+
+        lines.append(f"### {group}")
         lines.append("")
-        lines.append("| value | normalized value | general trend | specific adjustment | combined |")
-        lines.append("|---|---|---|---|---|")
-        for i, (point, label) in enumerate(spec.value_table):
-            general, specific, combined = _value_row_combined(weight_by_key, spec, children, i, point)
-            lines.append(f"| {label} | {point:.3f} | {general:+.3f} | {specific:+.3f} | {combined:+.3f} |")
-        lines.append("")
+
+        if group_booleans:
+            lines.append("| feature | weight | effect |")
+            lines.append("|---|---|---|")
+            for spec in group_booleans:
+                w = weight_by_key[spec.key]
+                effect = "raises the score (more aggressive)" if w > 0 else "lowers the score (more passive)"
+                lines.append(f"| {spec.label} | {w:+.3f} | {effect} |")
+            lines.append("")
+
+        for spec in group_parents:
+            w = weight_by_key[spec.key]
+            children = children_by_parent.get(spec.key, {})
+            note = (
+                " (continuous -- bucketed to the nearest of 5 representative points)"
+                if spec.kind == "continuous" else ""
+            )
+            lines.append(f"#### {spec.label} — general weight {w:+.3f}{note}")
+            lines.append("")
+            lines.append("| value | normalized value | general trend | specific adjustment | combined |")
+            lines.append("|---|---|---|---|---|")
+            for i, (point, label) in enumerate(spec.value_table):
+                general, specific, combined = _value_row_combined(weight_by_key, spec, children, i, point)
+                lines.append(f"| {label} | {point:.3f} | {general:+.3f} | {specific:+.3f} | {combined:+.3f} |")
+            lines.append("")
 
     lines.append("## Feature Reference")
     lines.append(
-        "Precise definition of every generalized/standalone feature above. Exact per-value "
-        "indicator features aren't re-listed individually here -- their meaning is exactly the "
-        "table row they're folded into above (the \"specific adjustment\" column)."
+        "Precise definition of every generalized/standalone feature above, grouped the same "
+        "way. Exact per-value indicator features aren't re-listed individually here -- their "
+        "meaning is exactly the table row they're folded into above (the \"specific "
+        "adjustment\" column)."
     )
     lines.append("")
-    for spec in standalone_sorted:
-        lines.append(f"- **{spec.label}** — {spec.description}")
-    for spec in parents_sorted:
-        if spec.kind == "categorical":
-            note = (
-                " Each value above also has its own exact indicator feature for a non-linear, "
-                "value-specific adjustment (the \"specific adjustment\" column above)."
-            )
-        else:
-            note = (
-                " Each representative value above also has an approximate \"nearest value\" "
-                "indicator feature for a non-linear adjustment (the \"specific adjustment\" column above)."
-            )
-        lines.append(f"- **{spec.label}** — {spec.description}{note}")
-    lines.append("")
+    for group in FEATURE_GROUPS:
+        group_booleans = [s for s in standalone_sorted if group_of(s) == group]
+        group_parents = [s for s in parents_sorted if group_of(s) == group]
+        if not group_booleans and not group_parents:
+            continue
+        lines.append(f"### {group}")
+        lines.append("")
+        for spec in group_booleans:
+            lines.append(f"- **{spec.label}** — {spec.description}")
+        for spec in group_parents:
+            if spec.kind == "categorical":
+                note = (
+                    " Each value above also has its own exact indicator feature for a "
+                    "non-linear, value-specific adjustment (the \"specific adjustment\" "
+                    "column above)."
+                )
+            else:
+                note = (
+                    " Each representative value above also has an approximate \"nearest "
+                    "value\" indicator feature for a non-linear adjustment (the \"specific "
+                    "adjustment\" column above)."
+                )
+            lines.append(f"- **{spec.label}** — {spec.description}{note}")
+        lines.append("")
 
     return "\n".join(lines)
 

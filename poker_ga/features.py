@@ -45,6 +45,25 @@ class FeatureSpec:
     # ("hand_category_norm", 1). None for features that stand on their own.
     linked_to: str | None = None
     linked_value_index: int | None = None
+    # High-level category for organizing exported reports (e.g. "Made Hand
+    # Features"). Only set on "top-level" specs -- parents of a value-table
+    # family, and standalone booleans; linked children inherit their
+    # parent's group instead of repeating it (see group_of() below).
+    group: str | None = None
+
+
+# Fixed, human-chosen reading order for report sections -- not derived from
+# influence, since the point of grouping is a consistent, thematic structure
+# a reader can learn once, not a ranking that shuffles per genome.
+FEATURE_GROUPS = [
+    "Hole Card Characteristics",
+    "Board / Flop Characteristics",
+    "Made Hand Features",
+    "Draw Features",
+    "Betting Behaviour Features",
+    "Stack & Pot Features",
+    "Table & Game State Features",
+]
 
 
 def _rank_label(rank: int) -> str:
@@ -136,13 +155,6 @@ _CONNECTIVITY_VALUES = tuple(
     (1.0 - gap / CONNECTIVITY_GAP_CAP, _connectivity_label(gap)) for gap in range(0, CONNECTIVITY_GAP_CAP + 1)
 )
 _STREET_VALUES = ((0.0, "Preflop"), (1 / 3, "Flop"), (2 / 3, "Turn"), (1.0, "River"))
-_POT_ODDS_VALUES = (
-    (0.0, "Nothing to call"),
-    (0.25, "3:1 pot odds (risk 1 to win 3) — e.g. facing a small bet"),
-    (0.5, "1:1 pot odds (risk 1 to win 1) — facing a pot-sized bet"),
-    (0.75, "1:3 pot odds (risk 3 to win 1) — facing a large overbet"),
-    (1.0, "Facing an enormous overbet (call far exceeds the pot)"),
-)
 _CALL_SIZE_VALUES = (
     (0.0, "No bet to call"),
     (0.25, "Call is 1/4 pot"),
@@ -270,7 +282,6 @@ _STREET_CHILDREN = [
     )
 ]
 
-_POT_ODDS_CHILDREN = _continuous_children("pot_odds", _POT_ODDS_VALUES)
 _CALL_SIZE_CHILDREN = _continuous_children("call_amount_norm", _CALL_SIZE_VALUES)
 _SPR_CHILDREN = _continuous_children("spr_norm", _SPR_VALUES)
 _POSITION_CHILDREN = _continuous_children("position_norm", _POSITION_VALUES)
@@ -380,7 +391,7 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "current board, normalized to 0-1 as category_index / 8 (0.0 = high card, "
         "0.125 = pair, 0.25 = two pair, 0.375 = trips, 0.5 = straight, 0.625 = flush, "
         "0.75 = full house, 0.875 = quads, 1.0 = straight flush).",
-        kind="categorical", value_table=_HAND_CATEGORY_VALUES,
+        kind="categorical", value_table=_HAND_CATEGORY_VALUES, group="Made Hand Features",
     ),
     *_HAND_CATEGORY_CHILDREN,
 
@@ -388,7 +399,7 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "hole_high_card_norm", "Hole High Card Rank",
         "Rank of the higher of this player's two hole cards, normalized to 0-1 via "
         "(rank - 2) / 12, so 0.0 = deuce and 1.0 = ace. Always defined, from preflop on.",
-        kind="categorical", value_table=_HOLE_HIGH_CARD_VALUES,
+        kind="categorical", value_table=_HOLE_HIGH_CARD_VALUES, group="Hole Card Characteristics",
     ),
     *_HOLE_HIGH_CARD_CHILDREN,
 
@@ -398,7 +409,7 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "(rank - 2) / 12. Defaults to 0.0 (the deuce value) preflop, before any shared "
         "cards are dealt -- pair with the street/is_preflop features to tell 'no board "
         "yet' apart from 'the board's high card really is a deuce'.",
-        kind="categorical", value_table=_SHARED_HIGH_CARD_VALUES,
+        kind="categorical", value_table=_SHARED_HIGH_CARD_VALUES, group="Board / Flop Characteristics",
     ),
     *_SHARED_HIGH_CARD_CHILDREN,
 
@@ -409,30 +420,22 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "whichever gives the smaller gap -- so A-K and A-2 are both gap 1) capped at 6, "
         "since anything 6+ apart is equally unable to share a straight. 1.0 means "
         "consecutive ranks (e.g. 9-T); 0.0 means 6 or more apart.",
-        kind="categorical", value_table=_CONNECTIVITY_VALUES,
+        kind="categorical", value_table=_CONNECTIVITY_VALUES, group="Hole Card Characteristics",
     ),
     *_CONNECTIVITY_CHILDREN,
 
     FeatureSpec(
         "street_norm", "Betting Street",
         "Current street normalized to 0-1: 0.0 = preflop, 0.33 = flop, 0.67 = turn, 1.0 = river.",
-        kind="categorical", value_table=_STREET_VALUES,
+        kind="categorical", value_table=_STREET_VALUES, group="Table & Game State Features",
     ),
     *_STREET_CHILDREN,
-
-    FeatureSpec(
-        "pot_odds", "Pot Odds",
-        "Fraction of the resulting pot that calling would represent: "
-        "call_amount / (pot + call_amount). 0 if there is nothing to call.",
-        kind="continuous", value_table=_POT_ODDS_VALUES,
-    ),
-    *_POT_ODDS_CHILDREN,
 
     FeatureSpec(
         "call_amount_norm", "Call Size Vs Pot",
         "Amount required to call, as a fraction of the current pot "
         "(call_amount / pot), clipped to 0-1.",
-        kind="continuous", value_table=_CALL_SIZE_VALUES,
+        kind="continuous", value_table=_CALL_SIZE_VALUES, group="Betting Behaviour Features",
     ),
     *_CALL_SIZE_CHILDREN,
 
@@ -441,7 +444,7 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "Effective stack (the smaller of this player's stack and the largest "
         "active opponent's stack) divided by the current pot, indicating how many "
         "pot-sized bets remain; divided by 20 and clipped to 0-1.",
-        kind="continuous", value_table=_SPR_VALUES,
+        kind="continuous", value_table=_SPR_VALUES, group="Stack & Pot Features",
     ),
     *_SPR_CHILDREN,
 
@@ -449,7 +452,7 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "position_norm", "Table Position",
         "How late this player acts in the current street's action order, from "
         "0.0 (acts first) to 1.0 (acts last).",
-        kind="continuous", value_table=_POSITION_VALUES,
+        kind="continuous", value_table=_POSITION_VALUES, group="Table & Game State Features",
     ),
     *_POSITION_CHILDREN,
 
@@ -460,21 +463,21 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "-- normalized as role_index / 5. At smaller table sizes the earliest non-blind "
         "roles collapse (e.g. 4-handed there's only UTG and BTN; heads-up the button and "
         "small blind are the same seat, labeled SB).",
-        kind="categorical", value_table=_SEAT_ROLE_VALUES,
+        kind="categorical", value_table=_SEAT_ROLE_VALUES, group="Table & Game State Features",
     ),
     *_SEAT_ROLE_CHILDREN,
 
     FeatureSpec(
         "num_active_norm", "Players Still In Hand",
         "Number of players who have not folded yet this hand, divided by 6.",
-        kind="categorical", value_table=_ACTIVE_PLAYERS_VALUES,
+        kind="categorical", value_table=_ACTIVE_PLAYERS_VALUES, group="Table & Game State Features",
     ),
     *_ACTIVE_PLAYERS_CHILDREN,
 
     FeatureSpec(
         "num_raises_norm", "Raises This Street",
         "Number of bets/raises made so far on the current street, divided by 4 and clipped to 0-1.",
-        kind="categorical", value_table=_RAISES_VALUES,
+        kind="categorical", value_table=_RAISES_VALUES, group="Betting Behaviour Features",
     ),
     *_RAISES_CHILDREN,
 
@@ -482,7 +485,7 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "stack_depth_norm", "Stack Depth",
         "This player's remaining stack as a fraction of the session's starting "
         "stack, divided by 2 and clipped to 0-1 (1.0 = double the starting stack or more).",
-        kind="continuous", value_table=_STACK_DEPTH_VALUES,
+        kind="continuous", value_table=_STACK_DEPTH_VALUES, group="Stack & Pot Features",
     ),
     *_STACK_DEPTH_CHILDREN,
 
@@ -491,21 +494,28 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "flush_draw", "Flush Draw",
         "1 if exactly 4 of the hole+board cards share one suit (a live one-card "
         "flush draw), else 0. Always 0 preflop, since a flush needs 5+ cards.",
+        group="Draw Features",
     ),
     FeatureSpec(
         "straight_draw", "Straight Draw",
         "1 if there exists a single rank which, if added to the hole+board cards, "
         "would complete a straight (open-ended or gutshot), else 0. Always 0 preflop.",
+        group="Draw Features",
     ),
-    FeatureSpec("hole_suited", "Suited Hole Cards", "1 if both hole cards share a suit, else 0."),
+    FeatureSpec(
+        "hole_suited", "Suited Hole Cards", "1 if both hole cards share a suit, else 0.",
+        group="Hole Card Characteristics",
+    ),
     FeatureSpec(
         "facing_bet", "Facing A Bet",
         "1 if a nonzero amount is required to call (someone has already bet or "
         "raised this street), else 0 (checking is free).",
+        group="Betting Behaviour Features",
     ),
     FeatureSpec(
         "is_aggressor", "Last Aggressor",
         "1 if this player made the most recent bet/raise on the current street, else 0.",
+        group="Betting Behaviour Features",
     ),
 
     FeatureSpec(
@@ -514,7 +524,7 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "different suits) < Flush Draw Flop (2 share a suit) < Monotone (all 3 share a "
         "suit), normalized as index / 2. Frozen once the flop is dealt (unaffected by "
         "the turn/river); defaults to 0.0 (Rainbow's value) before the flop.",
-        kind="categorical", value_table=_FLOP_SUIT_VALUES,
+        kind="categorical", value_table=_FLOP_SUIT_VALUES, group="Board / Flop Characteristics",
     ),
     *_FLOP_SUIT_CHILDREN,
 
@@ -523,7 +533,7 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "How rank-coordinated the flop is: Unpaired (3 different ranks) < Paired (2 "
         "share a rank) < Tripled (all 3 share a rank), normalized as index / 2. Frozen "
         "once the flop is dealt; defaults to 0.0 (Unpaired's value) before the flop.",
-        kind="categorical", value_table=_FLOP_PAIRING_VALUES,
+        kind="categorical", value_table=_FLOP_PAIRING_VALUES, group="Board / Flop Characteristics",
     ),
     *_FLOP_PAIRING_CHILDREN,
 
@@ -533,7 +543,7 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "are close enough together to easily make straights: Connected if their span "
         "(highest - lowest) is 4 or less, else Disconnected. Frozen once the flop is "
         "dealt; defaults to 0.0 (Disconnected's value) before the flop.",
-        kind="categorical", value_table=_FLOP_CONNECTIVITY_VALUES,
+        kind="categorical", value_table=_FLOP_CONNECTIVITY_VALUES, group="Board / Flop Characteristics",
     ),
     *_FLOP_CONNECTIVITY_CHILDREN,
 
@@ -544,6 +554,7 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "draw is possible for some hole cards -- else 0. A stricter subset of Connected "
         "Flop (not one of its Connected/Disconnected partition values), so it isn't "
         "folded into that table. 0 before the flop.",
+        group="Board / Flop Characteristics",
     ),
 
     # Hand-vs-board heuristics: not mutually exclusive as a group (e.g. Low
@@ -554,83 +565,110 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "1 if exactly one hole card ranks-matches the single highest board card (and "
         "the best overall hand is exactly a pair, i.e. this isn't also two pair/trips), "
         "else 0.",
+        group="Made Hand Features",
     ),
     FeatureSpec(
         "second_pair", "Second Pair",
         "1 if exactly one hole card rank-matches the second-highest distinct board "
         "rank (and the best overall hand is exactly a pair), else 0. Needs a board "
         "with at least 2 distinct ranks.",
+        group="Made Hand Features",
     ),
     FeatureSpec(
         "third_pair", "Third Pair",
         "1 if exactly one hole card rank-matches the third-highest distinct board rank "
         "(and the best overall hand is exactly a pair), else 0. Needs a board with at "
         "least 3 distinct ranks.",
+        group="Made Hand Features",
     ),
     FeatureSpec(
         "overpair", "Overpair",
         "1 if the hole cards are a pocket pair ranked higher than every board card, "
         "else 0.",
+        group="Made Hand Features",
     ),
     FeatureSpec(
         "underpair", "Underpair",
         "1 if the hole cards are a pocket pair ranked lower than the highest board "
         "card, else 0.",
+        group="Made Hand Features",
     ),
     FeatureSpec(
         "low_pair", "Low Pair",
         "1 if the hole cards are a pocket pair ranked lower than every board card (a "
         "stricter version of Underpair -- below the whole board, not just the top "
         "card), else 0.",
+        group="Made Hand Features",
     ),
     FeatureSpec(
         "ace_high_no_pair", "Ace High (No Made Hand)",
         "1 if the best overall hand is exactly High Card (no pair or better) and the "
         "highest card among hole+board is an Ace, else 0. Different from Hole/Shared "
         "High Card Rank, which report the highest rank regardless of made-hand status.",
+        group="Made Hand Features",
     ),
     FeatureSpec(
         "king_high_no_pair", "King High (No Made Hand)",
         "1 if the best overall hand is exactly High Card (no pair or better) and the "
         "highest card among hole+board is a King, else 0.",
+        group="Made Hand Features",
     ),
     FeatureSpec(
         "combo_draw", "Combo Draw",
         "1 if this player has both a flush draw and a straight draw (open-ended or "
         "gutshot) at the same time, else 0.",
+        group="Draw Features",
     ),
     FeatureSpec(
         "nuts_flush_draw", "Nuts Flush Draw",
         "1 if this player has a flush draw and holds the Ace of the drawing suit in "
         "their hole cards, else 0.",
+        group="Draw Features",
     ),
     FeatureSpec(
         "open_ended_straight_draw", "Open Ended Straight Draw",
         "1 if 2 or more distinct ranks would complete a straight (approximates a true "
         "open-ended draw; also covers double-gutshots, which have similar equity), "
         "else 0.",
+        group="Draw Features",
     ),
     FeatureSpec(
         "gutshot", "Gutshot",
         "1 if exactly 1 distinct rank would complete a straight (an inside/gutshot "
         "draw), else 0.",
+        group="Draw Features",
     ),
     FeatureSpec(
         "backdoor_flush_draw_2", "Backdoor Flush Draw (2 Cards)",
         "1 if, on the flop only, this player has exactly 3 cards of one suit (needing "
         "both the turn and river to complete a flush) and 2 of those 3 are hole cards, "
         "else 0.",
+        group="Draw Features",
     ),
     FeatureSpec(
         "backdoor_flush_draw_1", "Backdoor Flush Draw (1 Card)",
         "1 if, on the flop only, this player has exactly 3 cards of one suit (needing "
         "both the turn and river to complete a flush) and 1 of those 3 is a hole card, "
         "else 0.",
+        group="Draw Features",
     ),
 ]
 
 FEATURE_NAMES = [spec.key for spec in FEATURE_SPECS]
 NUM_FEATURES = len(FEATURE_SPECS)
+
+_SPECS_BY_KEY = {spec.key: spec for spec in FEATURE_SPECS}
+
+
+def group_of(spec: FeatureSpec) -> str:
+    """This spec's report-section group. Top-level specs (value-table
+    parents and standalone booleans) set `group` directly; linked children
+    inherit their parent's group instead of repeating it."""
+    if spec.group:
+        return spec.group
+    if spec.linked_to:
+        return group_of(_SPECS_BY_KEY[spec.linked_to])
+    return "Other"
 
 
 @dataclass
@@ -786,10 +824,6 @@ def extract_features(sit: Situation) -> np.ndarray:
     gap = _rank_gap(sit.hole[0].rank, sit.hole[1].rank)
     hole_connectivity = _clip01(1.0 - gap / CONNECTIVITY_GAP_CAP)
 
-    pot_odds = 0.0
-    if sit.call_amount > 0:
-        pot_odds = sit.call_amount / max(sit.pot + sit.call_amount, 1e-6)
-
     call_amount_norm = _clip01(sit.call_amount / max(sit.pot, 1.0))
     spr = sit.effective_stack / max(sit.pot, 1.0)
     spr_norm = _clip01(spr / 20.0)
@@ -815,7 +849,6 @@ def extract_features(sit: Situation) -> np.ndarray:
         "street_norm": sit.street / 3.0,
         "facing_bet": float(sit.call_amount > 0),
         "is_aggressor": float(sit.is_aggressor),
-        "pot_odds": pot_odds,
         "call_amount_norm": call_amount_norm,
         "spr_norm": spr_norm,
         "position_norm": position_norm,
@@ -856,7 +889,7 @@ def extract_features(sit: Situation) -> np.ndarray:
 
     # Nearest-representative-point bucket indicators for genuinely continuous features.
     for feature_key, raw_value in (
-        ("pot_odds", pot_odds), ("call_amount_norm", call_amount_norm), ("spr_norm", spr_norm),
+        ("call_amount_norm", call_amount_norm), ("spr_norm", spr_norm),
         ("position_norm", position_norm), ("stack_depth_norm", stack_depth_norm),
     ):
         nearest = _nearest_bucket_index(raw_value)
