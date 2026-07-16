@@ -4,17 +4,21 @@ A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
 
 ## How it works
 
-- **Genome** (`poker_ga/genome.py`): each player is a linear scoring function.
-  For every decision, `fold`, `check/call`, and `bet/raise` each get a score
-  = `weights[action] . features + bias[action]`; the legal action with the
-  highest score is taken. A second small weight vector decides bet sizing
-  (as a pot fraction) when betting/raising wins. These weights *are* the
-  genes the GA evolves.
+- **Genome** (`poker_ga/genome.py`): each player is one linear scoring
+  function, simple enough to hand-compute — `score = bias + sum(weight x
+  feature)` over ~26 features, thresholded into an action: `score <= 0` =
+  fold (check if nothing to call), `0 < score <= 1` = check/call, `score >
+  1` = bet/raise sized at `(score - 1) x pot` (e.g. 2.0 = a pot-sized raise).
+  A player is ~28 numbers total (one weight per feature, a bias, and a
+  noise-stddev for bluffing/exploration) — those numbers *are* the genes the
+  GA evolves.
 - **Features** (`poker_ga/features.py`): ~26 basic situation characteristics
   fed into that scoring function — made-hand category, explicit flags for
   pair/straight/flush/etc., high card, flush/straight draws, hole card
   texture, street, pot odds, SPR, position, whether I'm facing a bet, whether
-  I was the last aggressor, and more.
+  I was the last aggressor, and more. Each has a human-readable label and a
+  precise definition (see `FEATURE_SPECS`), which is what shows up in
+  exported strategy reports.
 - **Game engine** (`poker_ga/game.py`): a real 6-max NLHE implementation —
   blinds, four streets, all-in handling with correct multi-way side pots,
   and showdown.
@@ -80,9 +84,8 @@ After the last generation, `<out-dir>/final/` contains:
 - `leaderboard.md` — a ranked table (mean net chips/session, win rate, bust
   rate, bb/100) for the top N genomes.
 - `rankNN_playerID_strategy.md` — one report per top genome: performance
-  stats, which features drive each action (fold/check-call/bet-raise) sorted
-  by weight magnitude, bet-sizing tendencies, and its exploration/bluffing
-  noise level.
+  stats, its bias and noise level, every feature's weight (sorted by
+  magnitude), and a reference section defining each feature precisely.
 - `rankNN_playerID_genome.npy` — the raw weights, loadable via `Genome.load`.
 - `population.npy` — the entire final generation, ranked best-first, saved
   via `genome.save_population`. This is what `--reload-previous` picks up

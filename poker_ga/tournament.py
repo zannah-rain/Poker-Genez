@@ -11,9 +11,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from features import FEATURE_SPECS, NUM_FEATURES
+from features import FEATURE_SPECS
 from game import GameConfig, SeatState, play_hand
-from genome import ACTION_NAMES, BET_RAISE, Genome
 from player import Player
 from simulate import SimConfig
 
@@ -151,43 +150,31 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
     lines.append(f"- Worst single session: {min(stats.session_results, default=0.0):+.1f}")
     lines.append("")
 
-    lines.append("## Action tendencies")
+    lines.append("## How this genome decides")
     lines.append(
-        "Baseline tilt with no other information (bias term; positive favors "
-        "that action by default):"
+        "Every decision computes one number: `score = bias + sum(weight x feature value)` "
+        "over the features below. The score is then thresholded:"
     )
-    for a, name_a in enumerate(ACTION_NAMES):
-        lines.append(f"- {name_a}: {g.action_bias[a]:+.3f}")
     lines.append("")
-
-    for a, action_name in enumerate(ACTION_NAMES):
-        lines.append(f"### What drives \"{action_name}\"")
-        lines.append("All features, most influential first:")
-        lines.append("")
-        lines.append("| feature | weight | effect |")
-        lines.append("|---|---|---|")
-        for spec, w in _ranked_features(g.action_weights[a]):
-            effect = f"pushes toward {action_name}" if w > 0 else f"pushes away from {action_name}"
-            lines.append(f"| {spec.label} | {w:+.3f} | {effect} |")
-        lines.append("")
-
-    lines.append("## Bet sizing")
-    base_frac = g.bet_size_fraction(np.zeros(NUM_FEATURES))
-    lines.append(f"- Baseline bet size with neutral features: ~{base_frac:.2f}x pot")
+    lines.append("- `score <= 0` -> fold (or check, if there's nothing to call)")
+    lines.append("- `0 < score <= 1` -> check/call")
+    lines.append("- `score > 1` -> bet/raise, sized at `(score - 1) x pot` (e.g. score 2.0 = a pot-sized raise)")
     lines.append("")
-    lines.append("All features that move bet sizing, most influential first (positive = bets bigger):")
-    lines.append("")
-    lines.append("| feature | weight |")
-    lines.append("|---|---|")
-    for spec, w in _ranked_features(g.sizing_weights):
-        lines.append(f"| {spec.label} | {w:+.3f} |")
-    lines.append("")
-
-    lines.append("## Exploration / bluffing")
+    lines.append(f"- Bias (the score with all features at 0): {g.bias:+.3f}")
     lines.append(
-        f"- Decision noise (stddev added to action scores each decision): {g.noise_std:.3f}. "
+        f"- Decision noise (random amount added to the score each decision): {g.noise_std:.3f}. "
         "Higher values mean more unpredictable/bluffy play; near zero means fully deterministic."
     )
+    lines.append("")
+
+    lines.append("### Feature weights")
+    lines.append("All features, most influential first:")
+    lines.append("")
+    lines.append("| feature | weight | effect |")
+    lines.append("|---|---|---|")
+    for spec, w in _ranked_features(g.weights):
+        effect = "raises the score (more aggressive)" if w > 0 else "lowers the score (more passive)"
+        lines.append(f"| {spec.label} | {w:+.3f} | {effect} |")
     lines.append("")
 
     lines.append("## Feature Reference")
