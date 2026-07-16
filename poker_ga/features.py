@@ -54,6 +54,25 @@ def _rank_key(rank: int) -> str:
     return {11: "jack", 12: "queen", 13: "king", 14: "ace"}.get(rank, str(rank))
 
 
+# Gaps of 6+ are all equally "not going to make a straight together" (the
+# widest gap that can still share a straight is 5, e.g. A-6 via A-2-3-4-5...6
+# doesn't fit that one, but 2-7 can't either -- 5 apart is the practical
+# ceiling), so anything wider is lumped into one catch-all bucket.
+CONNECTIVITY_GAP_CAP = 6
+
+
+def _rank_gap(r1: int, r2: int) -> int:
+    """Rank distance for straight-connectivity purposes, treating the Ace as
+    playable high (A-K = 1 apart) or low (A-2 = 1 apart) -- whichever gives
+    the smaller gap -- then capped at CONNECTIVITY_GAP_CAP."""
+    gap = abs(r1 - r2)
+    if r1 == 14:
+        gap = min(gap, abs(1 - r2))
+    if r2 == 14:
+        gap = min(gap, abs(r1 - 1))
+    return min(gap, CONNECTIVITY_GAP_CAP)
+
+
 def _connectivity_label(gap: int) -> str:
     if gap == 0:
         return "Same rank (pocket pair)"
@@ -63,7 +82,9 @@ def _connectivity_label(gap: int) -> str:
         return "2 apart (one-gappers, e.g. 9-J)"
     if gap == 3:
         return "3 apart (two-gappers, e.g. 9-Q)"
-    return f"{gap} apart"
+    if gap < CONNECTIVITY_GAP_CAP:
+        return f"{gap} apart"
+    return f"{CONNECTIVITY_GAP_CAP} or more apart"
 
 
 def _linked_bool(key: str, label: str, description: str, linked_to: str, index: int) -> FeatureSpec:
@@ -97,7 +118,9 @@ _HAND_CATEGORY_VALUES = (
     (8 / 8, "Straight Flush"),
 )
 _HIGH_CARD_VALUES = tuple(((r - 2) / 12, _rank_label(r)) for r in range(2, 15))
-_CONNECTIVITY_VALUES = tuple((1.0 - gap / 12.0, _connectivity_label(gap)) for gap in range(0, 13))
+_CONNECTIVITY_VALUES = tuple(
+    (1.0 - gap / CONNECTIVITY_GAP_CAP, _connectivity_label(gap)) for gap in range(0, CONNECTIVITY_GAP_CAP + 1)
+)
 _STREET_VALUES = ((0.0, "Preflop"), (1 / 3, "Flop"), (2 / 3, "Turn"), (1.0, "River"))
 _POT_ODDS_VALUES = (
     (0.0, "Nothing to call"),
@@ -202,10 +225,18 @@ _CONNECTIVITY_CHILDREN = [
 ] + [
     _linked_bool(
         f"connectivity_gap_{gap}", _connectivity_label(gap),
-        f"1 if the two hole card ranks are exactly {gap} apart, else 0.",
+        f"1 if the two hole card ranks are exactly {gap} apart (treating the Ace as high or "
+        "low, whichever is closer), else 0.",
         "hole_connectivity", gap,
     )
-    for gap in range(1, 13)
+    for gap in range(1, CONNECTIVITY_GAP_CAP)
+] + [
+    _linked_bool(
+        f"connectivity_gap_{CONNECTIVITY_GAP_CAP}plus", _connectivity_label(CONNECTIVITY_GAP_CAP),
+        f"1 if the two hole card ranks are {CONNECTIVITY_GAP_CAP} or more apart (treating the "
+        "Ace as high or low, whichever is closer), else 0.",
+        "hole_connectivity", CONNECTIVITY_GAP_CAP,
+    )
 ]
 
 _STREET_CHILDREN = [
@@ -282,8 +313,11 @@ FEATURE_SPECS: list[FeatureSpec] = [
 
     FeatureSpec(
         "hole_connectivity", "Hole Card Connectivity",
-        "How close together the two hole card ranks are: 1 - |rank1 - rank2| / 12. "
-        "1.0 means consecutive ranks (e.g. 9-T); 0.0 means the widest possible gap (2-A).",
+        "How close together the two hole card ranks are for straight-making purposes: "
+        "1 - gap / 6, where gap is the rank distance (Ace counted as high or low, "
+        "whichever gives the smaller gap -- so A-K and A-2 are both gap 1) capped at 6, "
+        "since anything 6+ apart is equally unable to share a straight. 1.0 means "
+        "consecutive ranks (e.g. 9-T); 0.0 means 6 or more apart.",
         kind="categorical", value_table=_CONNECTIVITY_VALUES,
     ),
     *_CONNECTIVITY_CHILDREN,
@@ -419,8 +453,8 @@ def extract_features(sit: Situation) -> np.ndarray:
     cat = hand["category"]
 
     hole_suited = float(sit.hole[0].suit == sit.hole[1].suit)
-    gap = abs(sit.hole[0].rank - sit.hole[1].rank)
-    hole_connectivity = _clip01(1.0 - gap / 12.0)
+    gap = _rank_gap(sit.hole[0].rank, sit.hole[1].rank)
+    hole_connectivity = _clip01(1.0 - gap / CONNECTIVITY_GAP_CAP)
 
     pot_odds = 0.0
     if sit.call_amount > 0:
@@ -473,8 +507,9 @@ def extract_features(sit: Situation) -> np.ndarray:
         values[f"high_card_is_{_rank_key(r)}"] = float(hand["high_card"] == r)
 
     values["hole_paired"] = float(gap == 0)
-    for g in range(1, 13):
+    for g in range(1, CONNECTIVITY_GAP_CAP):
         values[f"connectivity_gap_{g}"] = float(gap == g)
+    values[f"connectivity_gap_{CONNECTIVITY_GAP_CAP}plus"] = float(gap == CONNECTIVITY_GAP_CAP)
 
     for i, key in enumerate(("is_preflop", "is_flop", "is_turn", "is_river")):
         values[key] = float(sit.street == i)

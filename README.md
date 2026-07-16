@@ -20,7 +20,7 @@ A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
   boolean each for Preflop/Flop/Turn/River, one for every card rank 2-Ace,
   one for each of UTG/HJ/CO/BTN/SB/BB) so the genome can also learn a
   non-linear, value-specific override. Plus a handful of standalone 0/1
-  flags (facing a bet, suited hole cards, etc). That's 97 features total,
+  flags (facing a bet, suited hole cards, etc). That's 91 features total,
   each with a human-readable label and a precise definition (see
   `FEATURE_SPECS`).
 - **Seating** (`poker_ga/seating.py`): pure seat-arithmetic shared by the
