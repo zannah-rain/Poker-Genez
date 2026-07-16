@@ -21,16 +21,22 @@ class SimConfig:
 
 
 def run_session(players: list[Player], game_config: GameConfig, rng: np.random.Generator) -> dict[int, float]:
-    """Plays one session at one table until only one player has chips left
+    """Plays one session at one table until enough players have busted
+    (game_config.busts_before_table_ends), only one player has chips left,
     or the hand cap is reached. A player is removed from the table the
     instant their stack hits zero (busted). Returns net chip result
     (final - starting) per player_id; busted players score -starting_stack."""
     seats = [SeatState(player=p, stack=game_config.starting_stack) for p in players]
     starting_ids = [p.player_id for p in players]
+    initial_seat_count = len(seats)
 
     button_idx = 0
     hands_played = 0
-    while len(seats) > 1 and hands_played < game_config.max_hands_per_session:
+    while (
+        len(seats) > 1
+        and hands_played < game_config.max_hands_per_session
+        and (initial_seat_count - len(seats)) < game_config.busts_before_table_ends
+    ):
         play_hand(seats, button_idx % len(seats), game_config, rng)
         hands_played += 1
         seats = [s for s in seats if s.stack > 1e-9]

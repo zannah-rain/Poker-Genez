@@ -58,12 +58,17 @@ def run_session_detailed(players: list[Player], game_config: GameConfig, rng: np
     who busted, and who ended the session on top (the "winner")."""
     seats = [SeatState(player=p, stack=game_config.starting_stack) for p in players]
     starting_ids = [p.player_id for p in players]
+    initial_seat_count = len(seats)
     hands_survived = {pid: 0 for pid in starting_ids}
     busted = {pid: False for pid in starting_ids}
 
     button_idx = 0
     hands_played = 0
-    while len(seats) > 1 and hands_played < game_config.max_hands_per_session:
+    while (
+        len(seats) > 1
+        and hands_played < game_config.max_hands_per_session
+        and (initial_seat_count - len(seats)) < game_config.busts_before_table_ends
+    ):
         alive_before = {s.player.player_id for s in seats}
         play_hand(seats, button_idx % len(seats), game_config, rng)
         hands_played += 1

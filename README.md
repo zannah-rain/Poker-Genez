@@ -66,6 +66,12 @@ Key flags (see `python main.py --help` for all of them):
 - `--rounds` — random table re-seatings per generation (more rounds = less
   variance in the fitness signal, at the cost of speed).
 - `--max-hands` — hand cap per table session during evolution.
+- `--busts-before-table-ends` (default 2) — a table's session ends once this
+  many of its original players have busted, instead of always playing down
+  to heads-up. Models real tables refilling empty seats with new players,
+  and keeps the GA from over-adapting to short-handed end-games (where
+  optimal play looks very different) that aren't representative of a normal
+  full/near-full table. Applies to both evolution and the final tournament.
 - `--starting-stack`, `--small-blind`, `--big-blind` — table stakes.
 - `--elite`, `--mutation-rate`, `--mutation-scale` — GA hyperparameters.
 - `--final-rounds`, `--final-max-hands` — size of the final scoring

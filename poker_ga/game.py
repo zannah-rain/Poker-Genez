@@ -45,6 +45,12 @@ class GameConfig:
     big_blind: float = 2.0
     starting_stack: float = 200.0  # in big blinds' worth of chips (== 100bb if bb=2)
     max_hands_per_session: int = 500
+    # Ends a table's session once this many of its original players have
+    # busted, rather than always playing down to heads-up. Real tables
+    # refill empty seats with new players, so short-handed end-games (where
+    # optimal play looks very different) are rare in practice -- this stops
+    # the GA from over-adapting to a scenario it won't mostly face.
+    busts_before_table_ends: int = 2
 
 
 @dataclass

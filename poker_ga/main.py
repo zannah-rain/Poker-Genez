@@ -25,6 +25,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--population", type=int, default=300, help="Must be a multiple of 6.")
     p.add_argument("--rounds", type=int, default=50, help="Random re-seatings per generation.")
     p.add_argument("--max-hands", type=int, default=100, help="Hand cap per table session.")
+    p.add_argument(
+        "--busts-before-table-ends", type=int, default=2,
+        help="End a table's session once this many of its original players have busted, "
+        "rather than always playing down to heads-up. Models real tables refilling empty "
+        "seats with new players, and keeps the GA from over-adapting to short-handed "
+        "end-games it won't mostly face.",
+    )
     p.add_argument("--starting-stack", type=float, default=200.0)
     p.add_argument("--small-blind", type=float, default=1.0)
     p.add_argument("--big-blind", type=float, default=2.0)
@@ -62,6 +69,8 @@ def main() -> None:
     args = parse_args()
     if args.population % 6 != 0:
         raise SystemExit("--population must be a multiple of 6 for clean 6-max seating.")
+    if args.busts_before_table_ends < 1:
+        raise SystemExit("--busts-before-table-ends must be at least 1.")
 
     rng = np.random.default_rng(args.seed)
 
@@ -76,6 +85,7 @@ def main() -> None:
         big_blind=args.big_blind,
         starting_stack=args.starting_stack,
         max_hands_per_session=args.max_hands,
+        busts_before_table_ends=args.busts_before_table_ends,
     )
     sim_config = SimConfig(rounds_per_generation=args.rounds)
 
@@ -123,6 +133,7 @@ def main() -> None:
         big_blind=args.big_blind,
         starting_stack=args.starting_stack,
         max_hands_per_session=args.final_max_hands,
+        busts_before_table_ends=args.busts_before_table_ends,
     )
     t0 = time.time()
     final_stats = run_final_tournament(population.players, final_game_config, final_sim_config, rng)
