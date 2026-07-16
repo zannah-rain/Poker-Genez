@@ -171,8 +171,10 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
     lines.append("## Bet sizing")
     base_frac = g.bet_size_fraction(np.zeros(NUM_FEATURES))
     lines.append(f"- Baseline bet size with neutral features: ~{base_frac:.2f}x pot")
+    lines.append("")
     top_sizing = _top_features(g.sizing_weights, FEATURE_NAMES, k=6)
-    lines.append("- Features that most move bet sizing (positive = bets bigger):")
+    lines.append("Features that most move bet sizing (positive = bets bigger):")
+    lines.append("")
     lines.append("| feature | weight |")
     lines.append("|---|---|")
     for feat, w in top_sizing:
