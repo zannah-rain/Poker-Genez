@@ -6,19 +6,21 @@ A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
 
 - **Genome** (`poker_ga/genome.py`): each player is one linear scoring
   function, simple enough to hand-compute — `score = bias + sum(weight x
-  feature)` over ~26 features, thresholded into an action: `score <= 0` =
-  fold (check if nothing to call), `0 < score <= 1` = check/call, `score >
-  1` = bet/raise sized at `(score - 1) x pot` (e.g. 2.0 = a pot-sized raise).
-  A player is ~28 numbers total (one weight per feature, a bias, and a
-  noise-stddev for bluffing/exploration) — those numbers *are* the genes the
-  GA evolves.
-- **Features** (`poker_ga/features.py`): ~26 basic situation characteristics
-  fed into that scoring function — made-hand category, explicit flags for
-  pair/straight/flush/etc., high card, flush/straight draws, hole card
-  texture, street, pot odds, SPR, position, whether I'm facing a bet, whether
-  I was the last aggressor, and more. Each has a human-readable label and a
-  precise definition (see `FEATURE_SPECS`), which is what shows up in
-  exported strategy reports.
+  feature)`, thresholded into an action: `score <= 0` = fold (check if
+  nothing to call), `0 < score <= 1` = check/call, `score > 1` = bet/raise
+  sized at `(score - 1) x pot` (e.g. 2.0 = a pot-sized raise). Those weights
+  *are* the genes the GA evolves; `NUM_FEATURES` drives their shape
+  automatically, whatever `features.py` defines.
+- **Features** (`poker_ga/features.py`): ~11 basic situation characteristics
+  (made-hand category, high card, hole card connectivity, street, pot odds,
+  SPR, position, stack depth, players in hand, raises this street) each get
+  *two* representations: one generalized 0-1 feature so the genome can learn
+  a linear trend across its values, and one exact indicator feature per
+  specific value (e.g. one boolean each for Preflop/Flop/Turn/River, one for
+  every card rank 2-Ace) so the genome can also learn a non-linear,
+  value-specific override. Plus a handful of standalone 0/1 flags (facing a
+  bet, on the button, suited hole cards, etc). That's 91 features total, each
+  with a human-readable label and a precise definition (see `FEATURE_SPECS`).
 - **Game engine** (`poker_ga/game.py`): a real 6-max NLHE implementation —
   blinds, four streets, all-in handling with correct multi-way side pots,
   and showdown.
@@ -84,11 +86,15 @@ After the last generation, `<out-dir>/final/` contains:
 - `leaderboard.md` — a ranked table (mean net chips/session, win rate, bust
   rate, bb/100) for the top N genomes.
 - `rankNN_playerID_strategy.md` — one report per top genome: performance
-  stats, its bias and noise level, a weight table for the boolean (0/1)
-  features, a per-feature value-contribution table for every multi-value
+  stats, its bias and noise level, a weight table for the standalone boolean
+  (0/1) features, and a per-value breakdown table for every multi-value
   feature (e.g. Betting Street broken into Preflop/Flop/Turn/River, High
-  Card Rank into 2 through Ace, Pot Odds into named risk ratios), and a
-  reference section defining each feature precisely.
+  Card Rank into 2 through Ace, Pot Odds into named risk ratios). Each
+  breakdown row combines that value's general (linear) contribution with its
+  own exact indicator feature's contribution into one number, so the ~80
+  underlying indicator features never clutter the report as separate
+  entries. A reference section defines each generalized/standalone feature
+  precisely (17 entries, not 91).
 - `rankNN_playerID_genome.npy` — the raw weights, loadable via `Genome.load`.
 - `population.npy` — the entire final generation, ranked best-first, saved
   via `genome.save_population`. This is what `--reload-previous` picks up
@@ -96,8 +102,17 @@ After the last generation, `<out-dir>/final/` contains:
 
 ## Extending
 
-- Add a feature: append to `FEATURE_NAMES`/`extract_features` in `features.py`
-  (genomes auto-resize since `NUM_FEATURES` drives every weight shape).
+- Add a standalone boolean feature: add a `FeatureSpec` to `FEATURE_SPECS` in
+  `features.py` and set its value in `extract_features`'s `values` dict
+  (keyed by `spec.key`, so ordering doesn't matter) — genomes auto-resize
+  since `NUM_FEATURES` drives every weight shape.
+- Add a new multi-value feature: give it a `value_table` (a tuple of
+  `(normalized_value, human_label)`), then add one linked `FeatureSpec` per
+  value with `kind="boolean"`, `linked_to=<parent key>`, and
+  `linked_value_index=<index into value_table>` — `_linked_bool` /
+  `_continuous_children` in `features.py` show the pattern. Linking is what
+  makes the strategy export fold each value into one combined row instead of
+  listing every indicator separately.
 - Change fitness: edit `run_session`/`run_generation` in `simulate.py` — e.g.
   blend in hands-survived, or weight later generations' sessions differently.
 - Pit two saved genomes against each other head-to-head by constructing
