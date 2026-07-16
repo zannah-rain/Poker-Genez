@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from features import FEATURE_NAMES, NUM_FEATURES
+from features import FEATURE_SPECS, NUM_FEATURES
 from game import GameConfig, SeatState, play_hand
 from genome import ACTION_NAMES, BET_RAISE, Genome
 from player import Player
@@ -126,9 +126,11 @@ def rank_players(players: list[Player], stats: dict[int, PlayerStats]) -> list[P
     return sorted(players, key=lambda p: stats[p.player_id].mean_net_chips, reverse=True)
 
 
-def _top_features(weights: np.ndarray, feature_names: list[str], k: int = 6) -> list[tuple]:
-    order = np.argsort(-np.abs(weights))[:k]
-    return [(feature_names[i], float(weights[i])) for i in order]
+def _ranked_features(weights: np.ndarray) -> list[tuple]:
+    """All features paired with their weight, most influential (by
+    magnitude) first."""
+    order = np.argsort(-np.abs(weights))
+    return [(FEATURE_SPECS[i], float(weights[i])) for i in order]
 
 
 def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig, rank: int) -> str:
@@ -160,25 +162,25 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
 
     for a, action_name in enumerate(ACTION_NAMES):
         lines.append(f"### What drives \"{action_name}\"")
-        top = _top_features(g.action_weights[a], FEATURE_NAMES, k=8)
+        lines.append("All features, most influential first:")
+        lines.append("")
         lines.append("| feature | weight | effect |")
         lines.append("|---|---|---|")
-        for feat, w in top:
+        for spec, w in _ranked_features(g.action_weights[a]):
             effect = f"pushes toward {action_name}" if w > 0 else f"pushes away from {action_name}"
-            lines.append(f"| {feat} | {w:+.3f} | {effect} |")
+            lines.append(f"| {spec.label} | {w:+.3f} | {effect} |")
         lines.append("")
 
     lines.append("## Bet sizing")
     base_frac = g.bet_size_fraction(np.zeros(NUM_FEATURES))
     lines.append(f"- Baseline bet size with neutral features: ~{base_frac:.2f}x pot")
     lines.append("")
-    top_sizing = _top_features(g.sizing_weights, FEATURE_NAMES, k=6)
-    lines.append("Features that most move bet sizing (positive = bets bigger):")
+    lines.append("All features that move bet sizing, most influential first (positive = bets bigger):")
     lines.append("")
     lines.append("| feature | weight |")
     lines.append("|---|---|")
-    for feat, w in top_sizing:
-        lines.append(f"| {feat} | {w:+.3f} |")
+    for spec, w in _ranked_features(g.sizing_weights):
+        lines.append(f"| {spec.label} | {w:+.3f} |")
     lines.append("")
 
     lines.append("## Exploration / bluffing")
@@ -186,6 +188,13 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
         f"- Decision noise (stddev added to action scores each decision): {g.noise_std:.3f}. "
         "Higher values mean more unpredictable/bluffy play; near zero means fully deterministic."
     )
+    lines.append("")
+
+    lines.append("## Feature Reference")
+    lines.append("Precise definition of every feature named above:")
+    lines.append("")
+    for spec in FEATURE_SPECS:
+        lines.append(f"- **{spec.label}** — {spec.description}")
     lines.append("")
 
     return "\n".join(lines)
@@ -210,13 +219,13 @@ def export_top_n(
             f"| {rank} | {name} | {s.mean_net_chips:+.1f} | {s.win_rate:.1%} "
             f"| {s.bust_rate:.1%} | {s.bb_per_100(game_config.big_blind):+.2f} |"
         )
-    with open(os.path.join(out_dir, "leaderboard.md"), "w") as f:
+    with open(os.path.join(out_dir, "leaderboard.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(summary_lines) + "\n")
 
     for rank, p in enumerate(ranked_players[:n], start=1):
         s = stats[p.player_id]
         report = describe_genome(p, s, game_config, rank)
         base = f"rank{rank:02d}_player{p.player_id}"
-        with open(os.path.join(out_dir, f"{base}_strategy.md"), "w") as f:
+        with open(os.path.join(out_dir, f"{base}_strategy.md"), "w", encoding="utf-8") as f:
             f.write(report)
         p.genome.save(os.path.join(out_dir, f"{base}_genome.npy"))
