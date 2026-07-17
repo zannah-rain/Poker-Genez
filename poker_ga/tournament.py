@@ -139,18 +139,20 @@ def _children_by_parent() -> dict[str, dict[int, "FeatureSpec"]]:
     return out
 
 
-def _value_row_combined(weight_by_key: dict, spec, children: dict, index: int, point: float) -> tuple:
-    """Returns (general, specific, combined) contribution for one value-table row."""
+def _axis_combined(weight_by_key: dict, spec, children: dict, index: int, point: float) -> float:
+    """Combined (general + specific) raw (pre-clip) contribution for one
+    value-table row, on one axis (V or L)."""
     general = weight_by_key[spec.key] * point
     child = children.get(index)
     specific = weight_by_key[child.key] if child is not None else 0.0
-    return general, specific, general + specific
+    return general + specific
 
 
 def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig, rank: int) -> str:
     """Renders a genome's weights as a human-readable strategy report."""
     g = player.genome
-    weight_by_key = {spec.key: float(w) for spec, w in zip(FEATURE_SPECS, g.weights)}
+    v_weight_by_key = {spec.key: float(w) for spec, w in zip(FEATURE_SPECS, g.weights_v)}
+    l_weight_by_key = {spec.key: float(w) for spec, w in zip(FEATURE_SPECS, g.weights_l)}
     children_by_parent = _children_by_parent()
 
     lines = []
@@ -170,20 +172,51 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
 
     lines.append("## How this genome decides")
     lines.append(
-        "Every decision computes one number: `score = bias + sum(weight x feature value)` "
-        f"over the features below ({len(FEATURE_SPECS)} total, organized by theme below -- "
-        "see the group breakdowns for how the count gets that high while staying readable). "
-        "The score is then thresholded:"
+        "Every decision computes two numbers from the features below "
+        f"({len(FEATURE_SPECS)} total, organized by theme -- see the group breakdowns for "
+        "how the count gets that high while staying readable):"
     )
     lines.append("")
-    lines.append("- `score <= 0` -> fold (or check, if there's nothing to call)")
-    lines.append("- `0 < score <= 1` -> check/call")
-    lines.append("- `score > 1` -> bet/raise, sized at `(score - 1) x pot` (e.g. score 2.0 = a pot-sized raise)")
-    lines.append("")
-    lines.append(f"- Bias (the score with all features at 0): {g.bias:+.3f}")
     lines.append(
-        f"- Decision noise (random amount added to the score each decision): {g.noise_std:.3f}. "
-        "Higher values mean more unpredictable/bluffy play; near zero means fully deterministic."
+        "- **V (showdown value)** ~ roughly this player's equity against the range that "
+        "continues, calibrated to read as a 0-100 percentage."
+    )
+    lines.append(
+        "- **L (leverage)** ~ roughly how much of villain's range folds to a bet here (fold "
+        "equity, shaped by blockers, initiative, board texture, position, SPR), also "
+        "calibrated to 0-100."
+    )
+    lines.append("")
+    lines.append(
+        "Each is a linear, clipped sum of `weight x feature value` across all features "
+        "below -- one weight per feature feeds V, a separate weight feeds L, so the two axes "
+        "can capture near-independent signals (e.g. a nut flush blocker is almost pure L "
+        "with ~0 V; a set on a dry board is almost pure V with low L). They combine "
+        "non-convexly into one action score:"
+    )
+    lines.append("")
+    lines.append("`A = max(V - theta_value,  L - theta_bluff - kappa x V)`")
+    lines.append("")
+    lines.append("- `A > 0` -> bet/raise, sized at `(A / 100) x pot` (e.g. A=50 -> half-pot, A=100 -> pot-sized)")
+    lines.append("- `elif V > theta_call` -> call/check")
+    lines.append("- `else` -> fold/check")
+    lines.append("")
+    lines.append(f"- theta_value (value needed to raise for value): {g.theta_value:.1f}")
+    lines.append(f"- theta_bluff (leverage needed to raise as a bluff): {g.theta_bluff:.1f}")
+    lines.append(f"- theta_call (value needed to call rather than fold): {g.theta_call:.1f}")
+    lines.append(f"- kappa (how much V suppresses the bluff term): {g.kappa:.3f}")
+    lines.append(
+        f"- Decision noise (random amount added to V and L independently each decision): "
+        f"{g.noise_std:.2f} points. Higher values mean more unpredictable/bluffy play; near "
+        "zero means fully deterministic."
+    )
+    lines.append("")
+    lines.append(
+        "The per-feature weights below are on the pre-clip (raw) scale, not directly in "
+        "V/L percentage points -- they combine additively with every other active feature's "
+        "weight before the final linear 0-100 calibration (offset by 50, then clipped) is "
+        "applied, so sign and relative magnitude are meaningful, but a single weight doesn't "
+        "translate to \"N points of V\" on its own."
     )
     lines.append("")
 
@@ -193,26 +226,27 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
     def parent_influence(spec) -> float:
         children = children_by_parent.get(spec.key, {})
         return max(
-            abs(_value_row_combined(weight_by_key, spec, children, i, point)[2])
+            max(
+                abs(_axis_combined(v_weight_by_key, spec, children, i, point)),
+                abs(_axis_combined(l_weight_by_key, spec, children, i, point)),
+            )
             for i, (point, _label) in enumerate(spec.value_table)
         )
 
     parents_sorted = sorted(parents, key=parent_influence, reverse=True)
-    standalone_sorted = sorted(standalone_booleans, key=lambda s: -abs(weight_by_key[s.key]))
+    standalone_sorted = sorted(
+        standalone_booleans,
+        key=lambda s: -max(abs(v_weight_by_key[s.key]), abs(l_weight_by_key[s.key])),
+    )
 
     lines.append("## Feature Groups")
     lines.append(
         "Features are grouped by theme so related ones sit together. Within each group: "
-        "boolean (yes/no) features first as a compact table, most influential first; then "
-        "one breakdown table per multi-value feature. Each multi-value feature has both a "
-        "single \"general\" weight (a linear trend across its values) and an exact indicator "
-        "feature for every specific value (letting the genome learn a non-linear override "
-        "just for that value) -- the breakdown table combines both into one row per value:"
+        "boolean (yes/no) features first as a compact table (V weight, L weight), most "
+        "influential first; then one breakdown table per multi-value feature, combining each "
+        "value's general (linear) weight and its own exact indicator feature's weight into "
+        "one raw (pre-clip) number per axis."
     )
-    lines.append("")
-    lines.append("- **general trend** = general weight x this value (the linear component)")
-    lines.append("- **specific adjustment** = the weight of this exact value's own indicator feature")
-    lines.append("- **combined** = general trend + specific adjustment (what this value actually contributes)")
     lines.append("")
 
     for group in FEATURE_GROUPS:
@@ -225,28 +259,30 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
         lines.append("")
 
         if group_booleans:
-            lines.append("| feature | weight | effect |")
+            lines.append("| feature | V weight | L weight |")
             lines.append("|---|---|---|")
             for spec in group_booleans:
-                w = weight_by_key[spec.key]
-                effect = "raises the score (more aggressive)" if w > 0 else "lowers the score (more passive)"
-                lines.append(f"| {spec.label} | {w:+.3f} | {effect} |")
+                vw = v_weight_by_key[spec.key]
+                lw = l_weight_by_key[spec.key]
+                lines.append(f"| {spec.label} | {vw:+.3f} | {lw:+.3f} |")
             lines.append("")
 
         for spec in group_parents:
-            w = weight_by_key[spec.key]
+            vw = v_weight_by_key[spec.key]
+            lw = l_weight_by_key[spec.key]
             children = children_by_parent.get(spec.key, {})
             note = (
                 " (continuous -- bucketed to the nearest of 5 representative points)"
                 if spec.kind == "continuous" else ""
             )
-            lines.append(f"#### {spec.label} — general weight {w:+.3f}{note}")
+            lines.append(f"#### {spec.label} — general weights V {vw:+.3f} / L {lw:+.3f}{note}")
             lines.append("")
-            lines.append("| value | normalized value | general trend | specific adjustment | combined |")
-            lines.append("|---|---|---|---|---|")
+            lines.append("| value | normalized value | V weight | L weight |")
+            lines.append("|---|---|---|---|")
             for i, (point, label) in enumerate(spec.value_table):
-                general, specific, combined = _value_row_combined(weight_by_key, spec, children, i, point)
-                lines.append(f"| {label} | {point:.3f} | {general:+.3f} | {specific:+.3f} | {combined:+.3f} |")
+                v_combined = _axis_combined(v_weight_by_key, spec, children, i, point)
+                l_combined = _axis_combined(l_weight_by_key, spec, children, i, point)
+                lines.append(f"| {label} | {point:.3f} | {v_combined:+.3f} | {l_combined:+.3f} |")
             lines.append("")
 
     lines.append("## Feature Reference")

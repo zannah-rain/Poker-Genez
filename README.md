@@ -4,13 +4,22 @@ A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
 
 ## How it works
 
-- **Genome** (`poker_ga/genome.py`): each player is one linear scoring
-  function, simple enough to hand-compute — `score = bias + sum(weight x
-  feature)`, thresholded into an action: `score <= 0` = fold (check if
-  nothing to call), `0 < score <= 1` = check/call, `score > 1` = bet/raise
-  sized at `(score - 1) x pot` (e.g. 2.0 = a pot-sized raise). Those weights
-  *are* the genes the GA evolves; `NUM_FEATURES` drives their shape
-  automatically, whatever `features.py` defines.
+- **Genome** (`poker_ga/genome.py`): each feature gets *two* weights instead
+  of one, feeding two near-orthogonal axes: **V** (showdown value — roughly
+  "my equity against the range that continues") and **L** (leverage —
+  roughly "how much of villain's range folds to me": fold equity shaped by
+  blockers, initiative, board texture, position, SPR). Both are a linear
+  sum of `weight x feature`, offset and clipped to read as a 0-100
+  percentage (no exponentials, so the mapping can be done by hand). They
+  combine *non-convexly* (so it isn't just a 1D score again) into one
+  action score: `A = max(V - theta_value, L - theta_bluff - kappa * V)`.
+  Then: `A > 0` = bet/raise (sized at `(A / 100) x pot`), `elif
+  V > theta_call` = call/check, `else` = fold/check. theta_value/theta_bluff
+  /theta_call are stored as raw genes and linearly rescaled onto the same
+  0-100 scale only when used, so every gene — weights, biases, thresholds,
+  kappa, noise — mutates at a comparable numeric scale. `NUM_FEATURES`
+  drives every weight vector's shape automatically, whatever `features.py`
+  defines.
 - **Features** (`poker_ga/features.py`): 15 basic situation characteristics
   (made-hand category, hole/shared-cards high card, hole card connectivity,
   street, call size vs pot, SPR, action-order position, starting seat
@@ -107,19 +116,21 @@ After the last generation, `<out-dir>/final/` contains:
 - `leaderboard.md` — a ranked table (mean net chips/session, win rate, bust
   rate, bb/100) for the top N genomes.
 - `rankNN_playerID_strategy.md` — one report per top genome: performance
-  stats, its bias and noise level, then a `## Feature Groups` section
-  organized by theme (Hole Card Characteristics, Board / Flop
-  Characteristics, Made Hand Features, Draw Features, Betting Behaviour
-  Features, Stack & Pot Features, Table & Game State Features — see
-  `FEATURE_GROUPS`). Each group shows its standalone boolean (0/1) features
-  as a compact table, then a per-value breakdown table for each of its
-  multi-value features (e.g. Betting Street broken into
-  Preflop/Flop/Turn/River, High Card Rank into 2 through Ace). Each
-  breakdown row combines that value's general (linear) contribution with its
-  own exact indicator feature's contribution into one number, so the ~90
-  underlying indicator features never clutter the report as separate
-  entries. A reference section defines each generalized/standalone feature
-  precisely, grouped the same way (35 entries, not 125).
+  stats, its theta_value/theta_bluff/theta_call/kappa/noise_std, then a `##
+  Feature Groups` section organized by theme (Hole Card Characteristics,
+  Board / Flop Characteristics, Made Hand Features, Draw Features, Betting
+  Behaviour Features, Stack & Pot Features, Table & Game State Features —
+  see `FEATURE_GROUPS`). Each group shows its standalone boolean (0/1)
+  features as a compact table (V weight, L weight), then a per-value
+  breakdown table for each of its multi-value features (e.g. Betting Street
+  broken into Preflop/Flop/Turn/River, each row showing its V and L
+  weight). Each breakdown row combines that value's general (linear) weight
+  with its own exact indicator feature's weight into one raw (pre-clip) number
+  per axis, so the ~90 underlying indicator features never clutter the
+  report as separate entries — these weights are on the raw pre-clip scale,
+  not literal V/L percentage points. A reference section defines each
+  generalized/standalone feature precisely, grouped the same way (35
+  entries, not 125).
 - `rankNN_playerID_genome.npy` — the raw weights, loadable via `Genome.load`.
 - `population.npy` — the entire final generation, ranked best-first, saved
   via `genome.save_population`. This is what `--reload-previous` picks up
