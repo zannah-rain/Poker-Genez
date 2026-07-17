@@ -3,11 +3,12 @@
 Every feature gets two weights, one feeding V and one feeding L:
 
     V -- showdown value. Roughly "my equity against the range that
-         continues." A linear combination of the features, offset and
-         clipped to land on 0-100 (read it as a percentage).
+         continues." A linear combination of the features, offset by a
+         bias and clamped (plain min/max, not a sigmoid) to land on 0-100
+         -- read it as a percentile ("V=90" ~ a top-10% hand).
     L -- leverage. Roughly "how much of villain's range folds to me" --
          fold equity shaped by blockers, initiative, board texture,
-         position, and SPR. Also a linear, clipped 0-100 combination.
+         position, and SPR. Also a linear, clamped 0-100 combination.
 
 These two are close to independent (a nut flush blocker is almost pure L
 with near-zero V; a set on a dry board is almost pure V with low L), which
@@ -21,13 +22,21 @@ be a 1D score again -- so it's a max of two linear terms:
     elif V > theta_call -> call/check
     else               -> fold/check
 
-Feature weights (weights_v/weights_l) are quantized to WEIGHT_ALPHABET, a
-small fixed set like {-3, -2, -1, -0.5, 0, 0.5, 1, 2, 3}, rather than being
-continuous -- so a genome reduces to "which of ~130 features matter, how
-much, in which direction," a table small enough a human could plausibly
-memorize and apply at the table. The GA's fitness function separately
-penalizes nonzero weights (see main.py's --sparsity-penalty), pushing
-evolution toward genomes where most weights land on exactly 0.
+Weights, biases, and thresholds are all scaled to live on that same 0-100
+range (weights big enough that a handful of active features move V/L
+meaningfully; biases centered near 50, the "no information" percentile;
+thresholds initialized in 0-100 too), so every number in a genome reads
+the same way a human would think about it -- no separate unit conversion
+needed at the table. The only nonlinear-looking step anywhere is the
+min/max clamp on V/L, which is just "cap it at 0 or 100," not a curve.
+
+Feature weights (weights_v/weights_l) are quantized to WEIGHT_ALPHABET
+rather than being continuous -- so a genome reduces to "which of ~130
+features matter, how much, in which direction," a table small enough a
+human could plausibly memorize and apply at the table. The GA's fitness
+function separately penalizes nonzero weights (see main.py's
+--sparsity-penalty), pushing evolution toward genomes where most weights
+land on exactly 0.
 """
 
 from __future__ import annotations
@@ -39,17 +48,59 @@ from features import NUM_FEATURES, Situation, extract_features
 FOLD, CHECK_CALL, BET_RAISE = 0, 1, 2
 ACTION_NAMES = ["fold", "check/call", "bet/raise"]
 
+V_SCALE = 100.0  # V and L both live on this range, clamped -- read them as percentiles.
+
 # Feature weights (weights_v/weights_l) are constrained to this small alphabet
 # rather than being continuous -- a genome is then just a lookup table of
 # "which features matter, how much, in which direction" that a human could
-# plausibly memorize, instead of an arbitrary-precision float vector.
-WEIGHT_ALPHABET = np.array([-3.0, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 3.0])
+# plausibly memorize, instead of an arbitrary-precision float vector. Values
+# are sized so that a handful of active features can meaningfully move a
+# 0-100 score (see V_SCALE) -- e.g. 3 active weight-20 features already
+# swings the score by more than half its range.
+WEIGHT_ALPHABET_SCALE = 10.0
+WEIGHT_ALPHABET = np.array([-3.0, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 3.0]) * WEIGHT_ALPHABET_SCALE
 
 
 def quantize(values: np.ndarray) -> np.ndarray:
     """Snaps each value to its nearest member of WEIGHT_ALPHABET."""
     distances = np.abs(values[..., None] - WEIGHT_ALPHABET)
     return WEIGHT_ALPHABET[np.argmin(distances, axis=-1)]
+
+
+def mutate_weights(weights: np.ndarray, rate: float, rng: np.random.Generator) -> np.ndarray:
+    """Mutates a quantized weight vector by jumping between WEIGHT_ALPHABET
+    entries directly, instead of adding continuous noise and re-quantizing.
+    A perturbation small enough to be sane for a continuous gene (e.g.
+    GAConfig.mutation_scale ~ a few units) is almost always *far* smaller
+    than the ~5-10 unit gap between adjacent alphabet values, so
+    continuous-style mutation silently does nothing to a quantized gene on
+    nearly every mutation event -- weights would never actually change.
+
+    Each selected gene gets one of three moves, picked at random:
+      - nudge one step up/down the (ordered) alphabet -- local search
+      - reset straight to 0 -- a direct one-mutation path to sparsity,
+        complementing the fitness function's --sparsity-penalty (reaching 0
+        by nudging alone could take up to 4 successive mutations from the
+        alphabet's extremes)
+      - jump to a uniformly random alphabet value -- occasional big jumps
+        so search isn't limited to exploring one neighbor at a time
+    """
+    mask = rng.random(weights.shape) < rate
+    if not mask.any():
+        return weights
+
+    n = len(WEIGHT_ALPHABET)
+    zero_index = int(np.argmin(np.abs(WEIGHT_ALPHABET)))
+    current_index = np.argmin(np.abs(weights[..., None] - WEIGHT_ALPHABET), axis=-1)
+
+    step = np.where(rng.random(weights.shape) < 0.5, 1, -1)
+    nudged_index = np.clip(current_index + step, 0, n - 1)
+    random_index = rng.integers(0, n, size=weights.shape)
+
+    move = rng.random(weights.shape)
+    new_index = np.where(move < 0.5, nudged_index, np.where(move < 0.75, zero_index, random_index))
+
+    return np.where(mask, WEIGHT_ALPHABET[new_index], weights)
 
 
 class Genome:
@@ -84,14 +135,22 @@ class Genome:
 
     @classmethod
     def random(cls, rng: np.random.Generator, scale: float = 0.5) -> "Genome":
+        # `scale` is on the same relative footing as before quantization was
+        # introduced (WEIGHT_ALPHABET is just the old {-3..3} pattern scaled
+        # up), so the fraction of weights that land on each alphabet value
+        # is unchanged by that rescaling -- only what each value *means* is
+        # bigger now.
+        weights_v = quantize(rng.normal(0, scale * WEIGHT_ALPHABET_SCALE, size=NUM_FEATURES))
+        weights_l = quantize(rng.normal(0, scale * WEIGHT_ALPHABET_SCALE, size=NUM_FEATURES))
+
         return cls(
-            weights_v=quantize(rng.normal(0, scale, size=NUM_FEATURES)),
-            bias_v=float(rng.normal(0, scale)),
-            weights_l=quantize(rng.normal(0, scale, size=NUM_FEATURES)),
-            bias_l=float(rng.normal(0, scale)),
-            theta_value=float(rng.normal(0.0, 1.0)),
-            theta_bluff=float(rng.normal(0.0, 1.0)),
-            theta_call=float(rng.normal(-0.5, 1.0)),
+            weights_v=weights_v,
+            bias_v=float(rng.normal(50.0, 20.0)),  # centered on 50: the "no information" percentile
+            weights_l=weights_l,
+            bias_l=float(rng.normal(50.0, 20.0)),
+            theta_value=float(rng.normal(65.0, 15.0)),
+            theta_bluff=float(rng.normal(65.0, 15.0)),
+            theta_call=float(rng.normal(40.0, 15.0)),
             kappa=float(abs(rng.normal(0.5, 0.3))),
             noise_std=float(abs(rng.normal(5.0, 3.0))),
         )
@@ -145,6 +204,25 @@ class Genome:
             self.theta_value, self.theta_bluff, self.theta_call, self.kappa, self.noise_std,
         )
 
+    def mutate(self, rng: np.random.Generator, rate: float, continuous_scale: float) -> "Genome":
+        """Returns a mutated copy. Feature weights get alphabet-jump
+        mutation (see mutate_weights) since additive noise re-quantized
+        almost never actually moves them; the continuous scalars (biases,
+        thresholds, kappa, noise) keep simple additive-gaussian mutation.
+        Each gene is independently selected for mutation with probability
+        `rate`, whichever kind it is."""
+        def mutate_scalar(value: float) -> float:
+            if rng.random() < rate:
+                return value + float(rng.normal(0, continuous_scale))
+            return value
+
+        return Genome(
+            mutate_weights(self.weights_v, rate, rng), mutate_scalar(self.bias_v),
+            mutate_weights(self.weights_l, rate, rng), mutate_scalar(self.bias_l),
+            mutate_scalar(self.theta_value), mutate_scalar(self.theta_bluff), mutate_scalar(self.theta_call),
+            abs(mutate_scalar(self.kappa)), abs(mutate_scalar(self.noise_std)),
+        )
+
     def nonzero_weight_count(self) -> int:
         """Number of nonzero feature weights across both axes -- a proxy for
         how complex/hard-to-memorize this genome's strategy is."""
@@ -153,7 +231,12 @@ class Genome:
     def compute_v_l(self, features: np.ndarray) -> tuple[float, float]:
         raw_v = float(self.weights_v @ features + self.bias_v)
         raw_l = float(self.weights_l @ features + self.bias_l)
-        return raw_v, raw_l
+        # Clamp (plain min/max, not a curve) rather than let a linear sum
+        # wander arbitrarily -- V/L are meant to read as percentiles, which
+        # can't go below 0 or above 100.
+        v = min(max(raw_v, 0.0), V_SCALE)
+        l = min(max(raw_l, 0.0), V_SCALE)
+        return v, l
 
     def decide(
         self,
@@ -183,7 +266,7 @@ class Genome:
 
         bet_size = 0.0
         if action == BET_RAISE:
-            bet_size = a * max(situation.pot, 1.0)
+            bet_size = (a / V_SCALE) * max(situation.pot, 1.0)
         return action, bet_size
 
 

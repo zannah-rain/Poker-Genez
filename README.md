@@ -9,24 +9,27 @@ A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
   "my equity against the range that continues") and **L** (leverage —
   roughly "how much of villain's range folds to me": fold equity shaped by
   blockers, initiative, board texture, position, SPR). Both are a linear
-  sum of `weight x feature`, offset and clipped to read as a 0-100
-  percentage (no exponentials, so the mapping can be done by hand). They
-  combine *non-convexly* (so it isn't just a 1D score again) into one
-  action score: `A = max(V - theta_value, L - theta_bluff - kappa * V)`.
-  Then: `A > 0` = bet/raise (sized at `(A / 100) x pot`), `elif
-  V > theta_call` = call/check, `else` = fold/check. theta_value/theta_bluff
-  /theta_call are stored as raw genes and linearly rescaled onto the same
-  0-100 scale only when used, so every gene — weights, biases, thresholds,
-  kappa, noise — mutates at a comparable numeric scale. `NUM_FEATURES`
-  drives every weight vector's shape automatically, whatever `features.py`
-  defines. The feature weights themselves (`weights_v`/`weights_l`, not the
-  biases/thresholds) are quantized to a small fixed alphabet —
-  `WEIGHT_ALPHABET = {-3, -2, -1, -0.5, 0, 0.5, 1, 2, 3}` — via `quantize()`,
-  applied centrally in `Genome.unflatten()` so every genome coming out of
-  crossover/mutation snaps back onto the alphabet without `ga.py` needing to
-  know which genes are weights. This turns a genome into something closer
-  to a lookup table a human could memorize, rather than an arbitrary-float
-  vector.
+  sum of `weight x feature`, offset by a bias and clamped with plain
+  min/max (not a curve) to land on 0-100 — read them as percentiles, e.g.
+  `V=90` ~ a top-10% hand. They combine *non-convexly* (so it isn't just a
+  1D score again) into one action score: `A = max(V - theta_value, L -
+  theta_bluff - kappa * V)`. Then: `A > 0` = bet/raise (sized at `(A / 100)
+  x pot`), `elif V > theta_call` = call/check, `else` = fold/check. Weights,
+  biases, and thresholds are all initialized to live on that same 0-100
+  range (weights sized so a handful of active features move V/L
+  meaningfully; biases centered near 50, the "no information" percentile;
+  thresholds likewise ~0-100), so every number in a genome reads the same
+  way a human would think about it — no unit conversion needed at the
+  table, and the only non-arithmetic step anywhere is the min/max clamp.
+  `NUM_FEATURES` drives every weight vector's shape automatically, whatever
+  `features.py` defines. The feature weights themselves (`weights_v`/
+  `weights_l`, not the biases/thresholds) are quantized to a small fixed
+  alphabet — `WEIGHT_ALPHABET = {-30, -20, -10, -5, 0, 5, 10, 20, 30}` — via
+  `quantize()`, applied centrally in `Genome.unflatten()` so every genome
+  coming out of crossover/mutation snaps back onto the alphabet without
+  `ga.py` needing to know which genes are weights. This turns a genome into
+  something closer to a lookup table a human could memorize, rather than an
+  arbitrary-float vector.
 - **Features** (`poker_ga/features.py`): 16 basic situation characteristics
   (made-hand category, hole/shared-cards high card, hole card connectivity,
   street, call size vs pot, SPR, action-order position, starting seat
@@ -65,8 +68,19 @@ A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
   player has chips left or a hand cap is hit; players are removed from the
   table the instant they bust. A player's fitness is their net chip result
   summed across all sessions they played that generation.
-- **GA** (`poker_ga/ga.py`): tournament selection + blend crossover + gaussian
-  mutation, with elitism carrying the top genomes forward unchanged.
+- **GA** (`poker_ga/ga.py`): tournament selection + blend crossover, with
+  elitism carrying the top genomes forward unchanged. Mutation
+  (`Genome.mutate` in `genome.py`) is gene-type-aware: the continuous
+  scalars (biases, thresholds, kappa, noise) get simple additive-gaussian
+  noise as before, but the quantized feature weights get a dedicated
+  alphabet-jump mutation instead -- additive noise re-quantized would
+  almost always land back on the same WEIGHT_ALPHABET value it started at,
+  since the alphabet's ~5-10-unit gaps dwarf any sane continuous mutation
+  step, silently making weight mutation a no-op. Each selected weight gene
+  instead gets one of: a one-step nudge up/down the alphabet (local
+  search), a direct reset to 0 (a one-mutation path to sparsity,
+  complementing `--sparsity-penalty`), or a jump to a uniformly random
+  alphabet value (occasional larger jumps).
 - **Final tournament** (`poker_ga/tournament.py`): once evolution finishes,
   the last generation is re-evaluated with many more rounds and a higher
   hand cap than the (deliberately cheap) per-generation fitness pass, for a

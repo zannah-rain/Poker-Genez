@@ -35,8 +35,8 @@ def apply_sparsity_penalty(players: list[Player], fitness: dict, coefficient: fl
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evolve poker strategies with a genetic algorithm.")
     p.add_argument("--generations", type=int, default=100)
-    p.add_argument("--population", type=int, default=120, help="Must be a multiple of 6.")
-    p.add_argument("--rounds", type=int, default=25, help="Random re-seatings per generation.")
+    p.add_argument("--population", type=int, default=90, help="Must be a multiple of 6.")
+    p.add_argument("--rounds", type=int, default=100, help="Random re-seatings per generation.")
     p.add_argument("--max-hands", type=int, default=50, help="Hand cap per table session.")
     p.add_argument(
         "--busts-before-table-ends", type=int, default=2,
@@ -48,11 +48,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--starting-stack", type=float, default=200.0)
     p.add_argument("--small-blind", type=float, default=1.0)
     p.add_argument("--big-blind", type=float, default=2.0)
-    p.add_argument("--elite", type=int, default=4)
+    p.add_argument("--elite", type=int, default=0)
     p.add_argument("--mutation-rate", type=float, default=0.15)
     p.add_argument("--mutation-scale", type=float, default=0.3)
     p.add_argument(
-        "--sparsity-penalty", type=float, default=2.0,
+        "--sparsity-penalty", type=float, default=0.0,
         help="Chips subtracted from fitness per nonzero feature weight (weights_v + "
         "weights_l combined), pushing evolution toward sparser, more memorizable "
         "genomes. Applied both during evolution and to the final tournament ranking. "
@@ -136,8 +136,8 @@ def main() -> None:
         elapsed = time.time() - t0
 
         print(
-            f"gen {gen:4d} | best {values.max():9.1f} | mean {values.mean():8.1f} "
-            f"| worst {values.min():9.1f} | std {values.std():7.1f} "
+            f"gen {gen:4d} | best {values.max() / sim_config.rounds_per_generation:9.1f} | mean {values.mean() / sim_config.rounds_per_generation:8.1f} "
+            f"| worst {values.min() / sim_config.rounds_per_generation:9.1f} | std {values.std() / sim_config.rounds_per_generation:7.1f} "
             f"| nonzero wts avg {nonzero_counts.mean():5.1f} min {nonzero_counts.min():3d} "
             f"| {elapsed:5.1f}s"
         )

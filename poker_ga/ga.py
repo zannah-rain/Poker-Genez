@@ -40,11 +40,10 @@ def crossover(a: Genome, b: Genome, rng: np.random.Generator) -> Genome:
 
 
 def mutate(genome: Genome, rate: float, scale: float, rng: np.random.Generator) -> Genome:
-    vec = genome.flatten()
-    mask = rng.random(vec.shape) < rate
-    noise = rng.normal(0, scale, size=vec.shape)
-    vec = np.where(mask, vec + noise, vec)
-    return Genome.unflatten(vec)
+    """Delegates to Genome.mutate, which knows to mutate the quantized
+    feature weights differently (alphabet jumps) from the continuous
+    scalars (additive gaussian, using `scale`) -- see genome.py."""
+    return genome.mutate(rng, rate, scale)
 
 
 class Population:
