@@ -20,26 +20,30 @@ A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
   kappa, noise — mutates at a comparable numeric scale. `NUM_FEATURES`
   drives every weight vector's shape automatically, whatever `features.py`
   defines.
-- **Features** (`poker_ga/features.py`): 15 basic situation characteristics
+- **Features** (`poker_ga/features.py`): 16 basic situation characteristics
   (made-hand category, hole/shared-cards high card, hole card connectivity,
   street, call size vs pot, SPR, action-order position, starting seat
-  position, stack depth, players in hand, raises this street, and 3
-  flop-texture dimensions) each get *two* representations: one generalized
+  position, stack depth, players in hand, raises this street, pot type, and
+  3 flop-texture dimensions) each get *two* representations: one generalized
   0-1 feature so the genome can learn a linear trend across its values, and
   one exact indicator feature per specific value (e.g. one boolean each for
   Preflop/Flop/Turn/River, one for every card rank 2-Ace, one for each of
-  UTG/HJ/CO/BTN/SB/BB, one for Rainbow/Flush-Draw-Flop/Monotone) so the
-  genome can also learn a non-linear, value-specific override. Plus ~20
-  standalone 0/1 heuristic flags that don't reduce to a clean one-hot family
-  (top pair, overpair, combo draw, backdoor flush draws, connected flop,
-  etc — some, like Low Pair, are subsets of others, like Underpair, so
-  forcing them into a single mutually-exclusive category would be wrong).
-  That's 125 features total, each with a human-readable label, a precise
-  definition, and a high-level group (e.g. "Made Hand Features", "Draw
-  Features" — see `FEATURE_GROUPS`) used to organize the strategy exports
-  below (see `FEATURE_SPECS`). There's no separate Pot Odds feature — it's
-  the same information as Call Size Vs Pot, just a harder mental calculation
-  from that ratio, so only the easier-to-use one is kept.
+  UTG/HJ/CO/BTN/SB/BB, one for Rainbow/Flush-Draw-Flop/Monotone, one for
+  Unraised/Single-Raised/3-Bet/4-Bet+ pots) so the genome can also learn a
+  non-linear, value-specific override. Plus ~20 standalone 0/1 heuristic
+  flags that don't reduce to a clean one-hot family (top pair, overpair,
+  combo draw, backdoor flush draws, connected flop, etc — some, like Low
+  Pair, are subsets of others, like Underpair, so forcing them into a
+  single mutually-exclusive category would be wrong). That's 130 features
+  total, each with a human-readable label, a precise definition, and a
+  high-level group (e.g. "Made Hand Features", "Draw Features" — see
+  `FEATURE_GROUPS`) used to organize the strategy exports below (see
+  `FEATURE_SPECS`). There's no separate Pot Odds feature — it's the same
+  information as Call Size Vs Pot, just a harder mental calculation from
+  that ratio, so only the easier-to-use one is kept. Pot Type (Unraised /
+  Single Raised / 3-Bet / 4-Bet+) is frozen at the final preflop raise count
+  once the flop is dealt, unlike Raises This Street, which resets every
+  street — "we're in a 3-bet pot" describes the whole hand.
 - **Seating** (`poker_ga/seating.py`): pure seat-arithmetic shared by the
   game engine and feature extraction — blind positions, preflop action
   order, and standard seat-role naming (UTG/HJ/CO/BTN/SB/BB) that correctly

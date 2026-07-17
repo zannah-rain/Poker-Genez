@@ -84,10 +84,15 @@ def betting_round(
     street: int,
     starting_stack: float,
     button_idx: int,
+    preflop_raise_count: int,
     rng: np.random.Generator,
     log: list | None = None,
-) -> float:
-    """Runs one betting round in-place on `seats`. Returns the updated pot."""
+) -> tuple[float, int]:
+    """Runs one betting round in-place on `seats`. Returns (updated pot,
+    number of raises made this street). `preflop_raise_count` is the
+    already-final preflop raise count on postflop streets (where this
+    street's own raise count resets to 0 but Pot Type shouldn't) -- on the
+    preflop street itself, it's unused since the live count IS the pot type."""
     current_bet = starting_bet
     last_raise_increment = min_bet
     last_aggressor: int | None = None
@@ -126,6 +131,7 @@ def betting_round(
             num_seats_total=len(seats),
             num_active=len(non_folded),
             num_raises_this_street=num_raises,
+            num_preflop_raises=(num_raises if street == PREFLOP else preflop_raise_count),
             is_aggressor=(last_aggressor == i),
             starting_stack=starting_stack,
         )
@@ -168,7 +174,7 @@ def betting_round(
             if log is not None:
                 log.append((i, "call" if add > 1e-9 else "check"))
 
-    return pot
+    return pot, num_raises
 
 
 def compute_payouts(
@@ -244,6 +250,7 @@ def play_hand(
 
     board: list[Card] = []
     contributor_indices = list(range(n))
+    preflop_raise_count = 0
 
     for street in range(4):
         if street > 0:
@@ -259,10 +266,12 @@ def play_hand(
         not_all_in = [i for i in non_folded if not seats[i].all_in]
         if len(not_all_in) >= 2:
             starting_bet = max((seats[i].street_committed for i in non_folded), default=0.0)
-            pot = betting_round(
+            pot, street_num_raises = betting_round(
                 seats, order, pot, config.big_blind, starting_bet, board, street,
-                config.starting_stack, button_idx, rng,
+                config.starting_stack, button_idx, preflop_raise_count, rng,
             )
+            if street == PREFLOP:
+                preflop_raise_count = street_num_raises
             non_folded = [i for i in order if not seats[i].folded]
             if len(non_folded) <= 1:
                 break

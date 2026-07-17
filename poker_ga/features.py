@@ -184,6 +184,12 @@ _RAISES_VALUES = (
     (0.75, "3 raises so far"),
     (1.0, "4 or more raises so far (clipped)"),
 )
+_POT_TYPE_VALUES = (
+    (0.0, "Unraised Pot"),
+    (1 / 3, "Single Raised Pot"),
+    (2 / 3, "3-Bet Pot"),
+    (3 / 3, "4-Bet+ Pot"),
+)
 _STACK_DEPTH_VALUES = (
     (0.0, "Busted / no chips left"),
     (0.25, "Half of the starting stack remaining"),
@@ -309,6 +315,30 @@ _RAISES_CHILDREN = [
         "1 if 4 or more raises have occurred so far this street, else 0.",
         "num_raises_norm", 4,
     )
+]
+
+_POT_TYPE_CHILDREN = [
+    _linked_bool(
+        "is_unraised_pot", "Unraised Pot",
+        "1 if there have been no preflop raises (everyone limped/checked/folded to the big "
+        "blind), else 0.",
+        "pot_type_norm", 0,
+    ),
+    _linked_bool(
+        "is_single_raised_pot", "Single Raised Pot",
+        "1 if there has been exactly 1 preflop raise (the standard 'open'), else 0.",
+        "pot_type_norm", 1,
+    ),
+    _linked_bool(
+        "is_3bet_pot", "3-Bet Pot",
+        "1 if there have been exactly 2 preflop raises (someone re-raised the opener), else 0.",
+        "pot_type_norm", 2,
+    ),
+    _linked_bool(
+        "is_4bet_plus_pot", "4-Bet+ Pot",
+        "1 if there have been 3 or more preflop raises, else 0.",
+        "pot_type_norm", 3,
+    ),
 ]
 
 _SEAT_ROLE_KEYS = {
@@ -480,6 +510,17 @@ FEATURE_SPECS: list[FeatureSpec] = [
         kind="categorical", value_table=_RAISES_VALUES, group="Betting Behaviour Features",
     ),
     *_RAISES_CHILDREN,
+
+    FeatureSpec(
+        "pot_type_norm", "Pot Type",
+        "How many preflop raises shaped this pot, normalized as raise_count / 3 (capped at "
+        "3): Unraised (0) < Single Raised (1) < 3-Bet (2) < 4-Bet+ (3 or more). Unlike "
+        "Raises This Street, this doesn't reset postflop -- it's frozen at the final preflop "
+        "count once the flop is dealt, since 'we're in a 3-bet pot' describes the whole hand, "
+        "not just the current street.",
+        kind="categorical", value_table=_POT_TYPE_VALUES, group="Betting Behaviour Features",
+    ),
+    *_POT_TYPE_CHILDREN,
 
     FeatureSpec(
         "stack_depth_norm", "Stack Depth",
@@ -689,6 +730,7 @@ class Situation:
     num_seats_total: int  # seats dealt into this hand (constant all hand, unlike num_active)
     num_active: int  # players still in the hand (not folded)
     num_raises_this_street: int
+    num_preflop_raises: int  # frozen once preflop ends, unlike num_raises_this_street
     is_aggressor: bool  # did I make the last bet/raise this street?
     starting_stack: float
 
@@ -832,6 +874,7 @@ def extract_features(sit: Situation) -> np.ndarray:
         position_norm = sit.position / (sit.num_seats_this_street - 1)
     num_active_norm = _clip01(sit.num_active / 6.0)
     num_raises_norm = _clip01(sit.num_raises_this_street / 4.0)
+    pot_type_raises = min(sit.num_preflop_raises, 3)
     stack_depth_norm = _clip01(sit.my_stack / max(sit.starting_stack, 1.0) / 2.0)
     hole_high_card_rank = max(sit.hole[0].rank, sit.hole[1].rank)
     shared_high_card_rank = max((c.rank for c in sit.board), default=None)
@@ -855,6 +898,7 @@ def extract_features(sit: Situation) -> np.ndarray:
         "starting_position_norm": role_index / (len(SEAT_ROLES) - 1),
         "num_active_norm": num_active_norm,
         "num_raises_norm": num_raises_norm,
+        "pot_type_norm": pot_type_raises / 3.0,
         "stack_depth_norm": stack_depth_norm,
     }
     for i, seat_role_name in enumerate(SEAT_ROLES):
@@ -886,6 +930,9 @@ def extract_features(sit: Situation) -> np.ndarray:
     for r in range(0, 4):
         values[f"raises_is_{r}"] = float(sit.num_raises_this_street == r)
     values["raises_is_4plus"] = float(sit.num_raises_this_street >= 4)
+
+    for i, key in enumerate(("is_unraised_pot", "is_single_raised_pot", "is_3bet_pot", "is_4bet_plus_pot")):
+        values[key] = float(pot_type_raises == i)
 
     # Nearest-representative-point bucket indicators for genuinely continuous features.
     for feature_key, raw_value in (
