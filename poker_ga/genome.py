@@ -21,6 +21,13 @@ be a 1D score again -- so it's a max of two linear terms:
     elif V > theta_call -> call/check
     else               -> fold/check
 
+Feature weights (weights_v/weights_l) are quantized to WEIGHT_ALPHABET, a
+small fixed set like {-3, -2, -1, -0.5, 0, 0.5, 1, 2, 3}, rather than being
+continuous -- so a genome reduces to "which of ~130 features matter, how
+much, in which direction," a table small enough a human could plausibly
+memorize and apply at the table. The GA's fitness function separately
+penalizes nonzero weights (see main.py's --sparsity-penalty), pushing
+evolution toward genomes where most weights land on exactly 0.
 """
 
 from __future__ import annotations
@@ -31,6 +38,19 @@ from features import NUM_FEATURES, Situation, extract_features
 
 FOLD, CHECK_CALL, BET_RAISE = 0, 1, 2
 ACTION_NAMES = ["fold", "check/call", "bet/raise"]
+
+# Feature weights (weights_v/weights_l) are constrained to this small alphabet
+# rather than being continuous -- a genome is then just a lookup table of
+# "which features matter, how much, in which direction" that a human could
+# plausibly memorize, instead of an arbitrary-precision float vector.
+WEIGHT_ALPHABET = np.array([-3.0, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 3.0])
+
+
+def quantize(values: np.ndarray) -> np.ndarray:
+    """Snaps each value to its nearest member of WEIGHT_ALPHABET."""
+    distances = np.abs(values[..., None] - WEIGHT_ALPHABET)
+    return WEIGHT_ALPHABET[np.argmin(distances, axis=-1)]
+
 
 class Genome:
     """weights_v/weights_l: (NUM_FEATURES,) each; bias_v/bias_l: scalars.
@@ -65,9 +85,9 @@ class Genome:
     @classmethod
     def random(cls, rng: np.random.Generator, scale: float = 0.5) -> "Genome":
         return cls(
-            weights_v=rng.normal(0, scale, size=NUM_FEATURES),
+            weights_v=quantize(rng.normal(0, scale, size=NUM_FEATURES)),
             bias_v=float(rng.normal(0, scale)),
-            weights_l=rng.normal(0, scale, size=NUM_FEATURES),
+            weights_l=quantize(rng.normal(0, scale, size=NUM_FEATURES)),
             bias_l=float(rng.normal(0, scale)),
             theta_value=float(rng.normal(0.0, 1.0)),
             theta_bluff=float(rng.normal(0.0, 1.0)),
@@ -85,12 +105,18 @@ class Genome:
 
     @classmethod
     def unflatten(cls, vec: np.ndarray) -> "Genome":
+        """Reconstructs a Genome from a flat gene vector, re-quantizing the
+        weight slices back onto WEIGHT_ALPHABET. This is the single point
+        every genome passes through after crossover/mutation (see ga.py,
+        which treats genomes as opaque flat vectors), so it's what keeps
+        weights on-alphabet without ga.py needing to know which genes are
+        "feature weights" versus continuous scalars like the thresholds."""
         i = 0
-        weights_v = vec[i : i + NUM_FEATURES]
+        weights_v = quantize(vec[i : i + NUM_FEATURES])
         i += NUM_FEATURES
         bias_v = float(vec[i])
         i += 1
-        weights_l = vec[i : i + NUM_FEATURES]
+        weights_l = quantize(vec[i : i + NUM_FEATURES])
         i += NUM_FEATURES
         bias_l = float(vec[i])
         i += 1
@@ -118,6 +144,11 @@ class Genome:
             self.weights_l.copy(), self.bias_l,
             self.theta_value, self.theta_bluff, self.theta_call, self.kappa, self.noise_std,
         )
+
+    def nonzero_weight_count(self) -> int:
+        """Number of nonzero feature weights across both axes -- a proxy for
+        how complex/hard-to-memorize this genome's strategy is."""
+        return int(np.count_nonzero(self.weights_v)) + int(np.count_nonzero(self.weights_l))
 
     def compute_v_l(self, features: np.ndarray) -> tuple[float, float]:
         raw_v = float(self.weights_v @ features + self.bias_v)

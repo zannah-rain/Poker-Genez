@@ -19,7 +19,14 @@ A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
   0-100 scale only when used, so every gene — weights, biases, thresholds,
   kappa, noise — mutates at a comparable numeric scale. `NUM_FEATURES`
   drives every weight vector's shape automatically, whatever `features.py`
-  defines.
+  defines. The feature weights themselves (`weights_v`/`weights_l`, not the
+  biases/thresholds) are quantized to a small fixed alphabet —
+  `WEIGHT_ALPHABET = {-3, -2, -1, -0.5, 0, 0.5, 1, 2, 3}` — via `quantize()`,
+  applied centrally in `Genome.unflatten()` so every genome coming out of
+  crossover/mutation snaps back onto the alphabet without `ga.py` needing to
+  know which genes are weights. This turns a genome into something closer
+  to a lookup table a human could memorize, rather than an arbitrary-float
+  vector.
 - **Features** (`poker_ga/features.py`): 16 basic situation characteristics
   (made-hand category, hole/shared-cards high card, hole card connectivity,
   street, call size vs pot, SPR, action-order position, starting seat
@@ -91,6 +98,12 @@ Key flags (see `python main.py --help` for all of them):
   full/near-full table. Applies to both evolution and the final tournament.
 - `--starting-stack`, `--small-blind`, `--big-blind` — table stakes.
 - `--elite`, `--mutation-rate`, `--mutation-scale` — GA hyperparameters.
+- `--sparsity-penalty` (default 2.0) — chips subtracted from fitness per
+  nonzero feature weight (`weights_v` + `weights_l` combined, out of a
+  possible `2 x NUM_FEATURES`), applied both during evolution and to the
+  final tournament ranking. Pushes selection toward genomes where most
+  weights land on exactly 0 — a shorter, more memorizable "cheat sheet" —
+  alongside raw chip performance. Set to 0 to disable.
 - `--final-rounds`, `--final-max-hands` — size of the final scoring
   tournament run after evolution completes (bigger = lower-variance ranking,
   slower). Defaults (200 rounds, 500-hand cap) take roughly 1-2 minutes at
@@ -118,9 +131,10 @@ best = Genome.load("runs/best_genome_latest.npy")
 After the last generation, `<out-dir>/final/` contains:
 
 - `leaderboard.md` — a ranked table (mean net chips/session, win rate, bust
-  rate, bb/100) for the top N genomes.
+  rate, bb/100, nonzero weight count) for the top N genomes.
 - `rankNN_playerID_strategy.md` — one report per top genome: performance
-  stats, its theta_value/theta_bluff/theta_call/kappa/noise_std, then a `##
+  stats, its theta_value/theta_bluff/theta_call/kappa/noise_std, its nonzero
+  feature weight count (out of `2 x NUM_FEATURES` possible), then a `##
   Feature Groups` section organized by theme (Hole Card Characteristics,
   Board / Flop Characteristics, Made Hand Features, Draw Features, Betting
   Behaviour Features, Stack & Pot Features, Table & Game State Features —
@@ -131,10 +145,10 @@ After the last generation, `<out-dir>/final/` contains:
   weight). Each breakdown row combines that value's general (linear) weight
   with its own exact indicator feature's weight into one raw (pre-clip) number
   per axis, so the ~90 underlying indicator features never clutter the
-  report as separate entries — these weights are on the raw pre-clip scale,
-  not literal V/L percentage points. A reference section defines each
-  generalized/standalone feature precisely, grouped the same way (35
-  entries, not 125).
+  report as separate entries — these weights are on the raw pre-clip scale
+  (and quantized, per WEIGHT_ALPHABET), not literal V/L percentage points. A
+  reference section defines each generalized/standalone feature precisely,
+  grouped the same way (36 entries, not 130).
 - `rankNN_playerID_genome.npy` — the raw weights, loadable via `Genome.load`.
 - `population.npy` — the entire final generation, ranked best-first, saved
   via `genome.save_population`. This is what `--reload-previous` picks up

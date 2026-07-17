@@ -16,12 +16,25 @@ from ga import GAConfig, Population
 from game import GameConfig
 from genome import load_population, save_population
 from simulate import SimConfig, run_generation
+from player import Player
 from tournament import export_top_n, rank_players, run_final_tournament
+
+
+def apply_sparsity_penalty(players: list[Player], fitness: dict, coefficient: float) -> dict:
+    """Subtracts `coefficient` chips per nonzero feature weight from each
+    player's fitness, so selection favors sparser (more memorizable)
+    genomes alongside raw poker performance."""
+    if coefficient <= 0:
+        return fitness
+    return {
+        p.player_id: fitness[p.player_id] - coefficient * p.genome.nonzero_weight_count()
+        for p in players
+    }
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evolve poker strategies with a genetic algorithm.")
-    p.add_argument("--generations", type=int, default=10)
+    p.add_argument("--generations", type=int, default=100)
     p.add_argument("--population", type=int, default=120, help="Must be a multiple of 6.")
     p.add_argument("--rounds", type=int, default=25, help="Random re-seatings per generation.")
     p.add_argument("--max-hands", type=int, default=50, help="Hand cap per table session.")
@@ -38,6 +51,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--elite", type=int, default=4)
     p.add_argument("--mutation-rate", type=float, default=0.15)
     p.add_argument("--mutation-scale", type=float, default=0.3)
+    p.add_argument(
+        "--sparsity-penalty", type=float, default=2.0,
+        help="Chips subtracted from fitness per nonzero feature weight (weights_v + "
+        "weights_l combined), pushing evolution toward sparser, more memorizable "
+        "genomes. Applied both during evolution and to the final tournament ranking. "
+        "0 disables it.",
+    )
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--out-dir", type=str, default="runs", help="Where to save the best genome each generation.")
     p.add_argument(
@@ -108,14 +128,18 @@ def main() -> None:
 
     for gen in range(args.generations):
         t0 = time.time()
-        fitness = run_generation(population.players, game_config, sim_config, rng)
+        raw_fitness = run_generation(population.players, game_config, sim_config, rng)
+        fitness = apply_sparsity_penalty(population.players, raw_fitness, args.sparsity_penalty)
         values = np.array(list(fitness.values()))
+        nonzero_counts = np.array([p.genome.nonzero_weight_count() for p in population.players])
         best_player = max(population.players, key=lambda p: fitness[p.player_id])
         elapsed = time.time() - t0
 
         print(
             f"gen {gen:4d} | best {values.max():9.1f} | mean {values.mean():8.1f} "
-            f"| worst {values.min():9.1f} | std {values.std():7.1f} | {elapsed:5.1f}s"
+            f"| worst {values.min():9.1f} | std {values.std():7.1f} "
+            f"| nonzero wts avg {nonzero_counts.mean():5.1f} min {nonzero_counts.min():3d} "
+            f"| {elapsed:5.1f}s"
         )
         best_player.genome.save(os.path.join(args.out_dir, "best_genome_latest.npy"))
         if gen == args.generations - 1:
@@ -137,7 +161,7 @@ def main() -> None:
     )
     t0 = time.time()
     final_stats = run_final_tournament(population.players, final_game_config, final_sim_config, rng)
-    ranked = rank_players(population.players, final_stats)
+    ranked = rank_players(population.players, final_stats, sparsity_penalty=args.sparsity_penalty)
     export_top_n(ranked, final_stats, final_game_config, args.top_n, final_out_dir)
 
     population_path = os.path.join(final_out_dir, "population.npy")
@@ -150,7 +174,8 @@ def main() -> None:
         name = p.label or f"Player {p.player_id}"
         print(
             f"  #{rank} {name:12s} | mean {s.mean_net_chips:+8.1f}/session | "
-            f"win {s.win_rate:6.1%} | bust {s.bust_rate:6.1%} | {s.bb_per_100(args.big_blind):+7.2f} bb/100"
+            f"win {s.win_rate:6.1%} | bust {s.bust_rate:6.1%} | {s.bb_per_100(args.big_blind):+7.2f} bb/100 "
+            f"| {p.genome.nonzero_weight_count():3d} nonzero wts"
         )
     print(f"Strategy reports written to {final_out_dir}/")
     print(f"Full ranked population ({len(ranked)} genomes) saved to {population_path} for --reload-previous.")

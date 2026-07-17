@@ -13,6 +13,7 @@ import numpy as np
 
 from features import FEATURE_GROUPS, FEATURE_SPECS, group_of
 from game import GameConfig, SeatState, play_hand
+from genome import WEIGHT_ALPHABET
 from player import Player
 from simulate import SimConfig
 
@@ -126,8 +127,20 @@ def run_final_tournament(
     return stats
 
 
-def rank_players(players: list[Player], stats: dict[int, PlayerStats]) -> list[Player]:
-    return sorted(players, key=lambda p: stats[p.player_id].mean_net_chips, reverse=True)
+def rank_players(
+    players: list[Player],
+    stats: dict[int, PlayerStats],
+    sparsity_penalty: float = 0.0,
+) -> list[Player]:
+    """Ranks by mean net chips, minus `sparsity_penalty` per nonzero feature
+    weight -- the same complexity penalty applied during evolution (see
+    main.py's --sparsity-penalty), so the genomes exported as "best" reflect
+    the same simplicity preference used to select for them, not just raw
+    chip performance."""
+    def score(p: Player) -> float:
+        return stats[p.player_id].mean_net_chips - sparsity_penalty * p.genome.nonzero_weight_count()
+
+    return sorted(players, key=score, reverse=True)
 
 
 def _children_by_parent() -> dict[str, dict[int, "FeatureSpec"]]:
@@ -209,6 +222,13 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
         f"- Decision noise (random amount added to V and L independently each decision): "
         f"{g.noise_std:.2f} points. Higher values mean more unpredictable/bluffy play; near "
         "zero means fully deterministic."
+    )
+    alphabet_str = ", ".join(str(float(x)) for x in WEIGHT_ALPHABET)
+    lines.append(
+        f"- Nonzero feature weights: {g.nonzero_weight_count()} of "
+        f"{len(FEATURE_SPECS) * 2} possible (weights are quantized to [{alphabet_str}], "
+        "and fitness penalizes nonzero ones, so most should land on exactly 0 -- the tables "
+        "below are the actual cheat sheet, not an approximation of one)."
     )
     lines.append("")
     lines.append(
@@ -331,14 +351,17 @@ def export_top_n(
     os.makedirs(out_dir, exist_ok=True)
 
     summary_lines = ["# Final Tournament Leaderboard", ""]
-    summary_lines.append("| rank | player | mean net chips/session | win rate | bust rate | bb/100 |")
-    summary_lines.append("|---|---|---|---|---|---|")
+    summary_lines.append(
+        "| rank | player | mean net chips/session | win rate | bust rate | bb/100 | nonzero wts |"
+    )
+    summary_lines.append("|---|---|---|---|---|---|---|")
     for rank, p in enumerate(ranked_players[:n], start=1):
         s = stats[p.player_id]
         name = p.label or f"Player {p.player_id}"
         summary_lines.append(
             f"| {rank} | {name} | {s.mean_net_chips:+.1f} | {s.win_rate:.1%} "
-            f"| {s.bust_rate:.1%} | {s.bb_per_100(game_config.big_blind):+.2f} |"
+            f"| {s.bust_rate:.1%} | {s.bb_per_100(game_config.big_blind):+.2f} "
+            f"| {p.genome.nonzero_weight_count()} |"
         )
     with open(os.path.join(out_dir, "leaderboard.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(summary_lines) + "\n")
