@@ -30,13 +30,10 @@ def tournament_select(players: list[Player], fitness: dict[int, float], k: int, 
 
 
 def crossover(a: Genome, b: Genome, rng: np.random.Generator) -> Genome:
-    """Uniform blend crossover: each gene is a random weighted average of
-    the two parents (alpha drawn per-gene), producing a child that mixes
-    both strategies rather than cloning contiguous chunks of either."""
-    va, vb = a.flatten(), b.flatten()
-    alpha = rng.uniform(0.0, 1.0, size=va.shape)
-    child_vec = alpha * va + (1 - alpha) * vb
-    return Genome.unflatten(child_vec)
+    """Delegates to Genome.crossover, which knows to use uniform (discrete)
+    inheritance for the quantized feature weights and blend crossover for
+    the continuous scalars -- see genome.py."""
+    return a.crossover(b, rng)
 
 
 def mutate(genome: Genome, rate: float, scale: float, rng: np.random.Generator) -> Genome:

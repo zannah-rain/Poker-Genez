@@ -12,6 +12,7 @@ import time
 
 import numpy as np
 
+from benchmark import run_benchmark
 from ga import GAConfig, Population
 from game import GameConfig
 from genome import load_population, save_population
@@ -34,25 +35,18 @@ def apply_sparsity_penalty(players: list[Player], fitness: dict, coefficient: fl
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evolve poker strategies with a genetic algorithm.")
-    p.add_argument("--generations", type=int, default=100)
-    p.add_argument("--population", type=int, default=90, help="Must be a multiple of 6.")
-    p.add_argument("--rounds", type=int, default=100, help="Random re-seatings per generation.")
-    p.add_argument("--max-hands", type=int, default=50, help="Hand cap per table session.")
-    p.add_argument(
-        "--busts-before-table-ends", type=int, default=2,
-        help="End a table's session once this many of its original players have busted, "
-        "rather than always playing down to heads-up. Models real tables refilling empty "
-        "seats with new players, and keeps the GA from over-adapting to short-handed "
-        "end-games it won't mostly face.",
-    )
+    p.add_argument("--generations", type=int, default=20)
+    p.add_argument("--population", type=int, default=180, help="Must be a multiple of 6.")
+    p.add_argument("--rounds", type=int, default=20, help="Random re-seatings per generation.")
+    p.add_argument("--max-hands", type=int, default=200, help="Hand cap per table session.")
     p.add_argument("--starting-stack", type=float, default=200.0)
     p.add_argument("--small-blind", type=float, default=1.0)
     p.add_argument("--big-blind", type=float, default=2.0)
     p.add_argument("--elite", type=int, default=0)
-    p.add_argument("--mutation-rate", type=float, default=0.15)
+    p.add_argument("--mutation-rate", type=float, default=0.001)
     p.add_argument("--mutation-scale", type=float, default=0.3)
     p.add_argument(
-        "--sparsity-penalty", type=float, default=0.0,
+        "--sparsity-penalty", type=float, default=2.0,
         help="Chips subtracted from fitness per nonzero feature weight (weights_v + "
         "weights_l combined), pushing evolution toward sparser, more memorizable "
         "genomes. Applied both during evolution and to the final tournament ranking. "
@@ -82,6 +76,19 @@ def parse_args() -> argparse.Namespace:
         "--reload-path", type=str, default=None,
         help="Population file to reload. Defaults to <final-out-dir>/population.npy.",
     )
+    p.add_argument(
+        "--benchmark-interval", type=int, default=10,
+        help="Every this many generations, play the current population head-to-head against "
+        "a saved checkpoint from --benchmark-interval generations ago, in 3-vs-3 tables, and "
+        "print aggregate net chips + bb/100 for each side. Unlike the per-generation fitness "
+        "number (only comparable against that generation's own random opponents), this is a "
+        "direct, apples-to-apples measure of whether evolution is actually improving. Set to "
+        "0 to disable.",
+    )
+    p.add_argument(
+        "--benchmark-tables", type=int, default=2400,
+        help="Number of independent 3-vs-3 tables played for each --benchmark-interval checkpoint match.",
+    )
     return p.parse_args()
 
 
@@ -89,8 +96,6 @@ def main() -> None:
     args = parse_args()
     if args.population % 6 != 0:
         raise SystemExit("--population must be a multiple of 6 for clean 6-max seating.")
-    if args.busts_before_table_ends < 1:
-        raise SystemExit("--busts-before-table-ends must be at least 1.")
 
     rng = np.random.default_rng(args.seed)
 
@@ -105,13 +110,15 @@ def main() -> None:
         big_blind=args.big_blind,
         starting_stack=args.starting_stack,
         max_hands_per_session=args.max_hands,
-        busts_before_table_ends=args.busts_before_table_ends,
     )
     sim_config = SimConfig(rounds_per_generation=args.rounds)
 
     os.makedirs(args.out_dir, exist_ok=True)
     final_out_dir = args.final_out_dir or os.path.join(args.out_dir, "final")
     reload_path = args.reload_path or os.path.join(final_out_dir, "population.npy")
+    benchmark_dir = os.path.join(args.out_dir, "benchmarks")
+    if args.benchmark_interval > 0:
+        os.makedirs(benchmark_dir, exist_ok=True)
 
     seed_genomes = None
     if args.reload_previous:
@@ -128,7 +135,7 @@ def main() -> None:
 
     for gen in range(args.generations):
         t0 = time.time()
-        raw_fitness = run_generation(population.players, game_config, sim_config, rng)
+        raw_fitness, gen_stats = run_generation(population.players, game_config, sim_config, rng)
         fitness = apply_sparsity_penalty(population.players, raw_fitness, args.sparsity_penalty)
         values = np.array(list(fitness.values()))
         nonzero_counts = np.array([p.genome.nonzero_weight_count() for p in population.players])
@@ -141,9 +148,37 @@ def main() -> None:
             f"| nonzero wts avg {nonzero_counts.mean():5.1f} min {nonzero_counts.min():3d} "
             f"| {elapsed:5.1f}s"
         )
+        print(
+            f"         | sense check: mean hands survived {gen_stats.mean_hands_survived:6.1f} "
+            f"| bust rate {gen_stats.bust_rate:6.1%} | fold rate facing bet {gen_stats.fold_rate_facing_bet:6.1%} "
+            f"| mean raises/street {gen_stats.mean_raises_per_street:4.2f}"
+        )
         best_player.genome.save(os.path.join(args.out_dir, "best_genome_latest.npy"))
         if gen == args.generations - 1:
             best_player.genome.save(os.path.join(args.out_dir, f"best_genome_gen{gen}.npy"))
+
+        if args.benchmark_interval > 0 and gen % args.benchmark_interval == 0:
+            checkpoint_gen = gen - args.benchmark_interval
+            checkpoint_path = os.path.join(benchmark_dir, f"gen{checkpoint_gen:05d}_population.npy")
+            if checkpoint_gen >= 0 and os.path.exists(checkpoint_path):
+                checkpoint_genomes = load_population(checkpoint_path)
+                checkpoint_players = [
+                    Player(player_id=-(i + 1), genome=g, generation=checkpoint_gen)
+                    for i, g in enumerate(checkpoint_genomes)
+                ]
+                bench = run_benchmark(
+                    population.players, checkpoint_players, game_config, rng,
+                    num_tables=args.benchmark_tables,
+                )
+                print(
+                    f"         | benchmark vs gen {checkpoint_gen:4d} | "
+                    f"current {bench.current_net_total:+9.1f} chips ({bench.bb_per_100('current', args.big_blind):+7.2f} bb/100) "
+                    f"| checkpoint {bench.checkpoint_net_total:+9.1f} chips ({bench.bb_per_100('checkpoint', args.big_blind):+7.2f} bb/100)"
+                )
+            save_population(
+                [p.genome for p in population.players],
+                os.path.join(benchmark_dir, f"gen{gen:05d}_population.npy"),
+            )
 
         population.evolve(fitness)
 
@@ -157,7 +192,6 @@ def main() -> None:
         big_blind=args.big_blind,
         starting_stack=args.starting_stack,
         max_hands_per_session=args.final_max_hands,
-        busts_before_table_ends=args.busts_before_table_ends,
     )
     t0 = time.time()
     final_stats = run_final_tournament(population.players, final_game_config, final_sim_config, rng)

@@ -12,10 +12,10 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from features import FEATURE_GROUPS, FEATURE_SPECS, group_of
-from game import GameConfig, SeatState, play_hand
-from genome import WEIGHT_ALPHABET
+from game import GameConfig
+from genome import BIAS_L, BIAS_V, KAPPA, THETA_BLUFF, THETA_CALL, THETA_VALUE, WEIGHT_ALPHABET
 from player import Player
-from simulate import SimConfig
+from simulate import SimConfig, run_session
 
 
 @dataclass
@@ -54,46 +54,6 @@ class PlayerStats:
         return (self.total_net_chips / big_blind) / self.total_hands_survived * 100.0
 
 
-def run_session_detailed(players: list[Player], game_config: GameConfig, rng: np.random.Generator) -> dict:
-    """Like simulate.run_session, but also tracks per-player hands survived,
-    who busted, and who ended the session on top (the "winner")."""
-    seats = [SeatState(player=p, stack=game_config.starting_stack) for p in players]
-    starting_ids = [p.player_id for p in players]
-    initial_seat_count = len(seats)
-    hands_survived = {pid: 0 for pid in starting_ids}
-    busted = {pid: False for pid in starting_ids}
-
-    button_idx = 0
-    hands_played = 0
-    while (
-        len(seats) > 1
-        and hands_played < game_config.max_hands_per_session
-        and (initial_seat_count - len(seats)) < game_config.busts_before_table_ends
-    ):
-        alive_before = {s.player.player_id for s in seats}
-        play_hand(seats, button_idx % len(seats), game_config, rng)
-        hands_played += 1
-        for pid in alive_before:
-            hands_survived[pid] += 1
-        seats = [s for s in seats if s.stack > 1e-9]
-        remaining = {s.player.player_id for s in seats}
-        for pid in alive_before - remaining:
-            busted[pid] = True
-        if seats:
-            button_idx = (button_idx + 1) % len(seats)
-
-    final_stack = {s.player.player_id: s.stack for s in seats}
-    net = {pid: final_stack.get(pid, 0.0) - game_config.starting_stack for pid in starting_ids}
-    winner_id = max(seats, key=lambda s: s.stack).player.player_id if seats else None
-
-    return {
-        "net": net,
-        "hands_survived": hands_survived,
-        "busted": busted,
-        "winner_id": winner_id,
-    }
-
-
 def run_final_tournament(
     players: list[Player],
     game_config: GameConfig,
@@ -101,7 +61,9 @@ def run_final_tournament(
     rng: np.random.Generator,
 ) -> dict[int, PlayerStats]:
     """Runs many rounds of random re-seating (more than a normal GA
-    generation) and accumulates detailed per-player statistics."""
+    generation) and accumulates detailed per-player statistics, using
+    simulate.run_session (which refills busted seats with a fresh player
+    from the whole population rather than ending the session early)."""
     stats = {p.player_id: PlayerStats(player_id=p.player_id, label=p.label) for p in players}
 
     for _ in range(sim_config.rounds_per_generation):
@@ -111,14 +73,13 @@ def run_final_tournament(
             table = shuffled[start : start + sim_config.table_size]
             if len(table) < 2:
                 continue
-            result = run_session_detailed(table, game_config, rng)
-            for p in table:
-                pid = p.player_id
+            result = run_session(table, game_config, rng, backfill_pool=players)
+            for pid, net in result["net"].items():
                 s = stats[pid]
                 s.sessions_played += 1
-                s.total_net_chips += result["net"][pid]
+                s.total_net_chips += net
                 s.total_hands_survived += result["hands_survived"][pid]
-                s.session_results.append(result["net"][pid])
+                s.session_results.append(net)
                 if result["busted"][pid]:
                     s.busts += 1
                 if result["winner_id"] == pid:
@@ -214,10 +175,26 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
     lines.append("- `elif V > theta_call` -> call/check")
     lines.append("- `else` -> fold/check")
     lines.append("")
-    lines.append(f"- theta_value (value needed to raise for value): {g.theta_value:.1f}")
-    lines.append(f"- theta_bluff (leverage needed to raise as a bluff): {g.theta_bluff:.1f}")
-    lines.append(f"- theta_call (value needed to call rather than fold): {g.theta_call:.1f}")
-    lines.append(f"- kappa (how much V suppresses the bluff term): {g.kappa:.3f}")
+    lines.append(
+        f"- theta_value (value needed to raise for value): {THETA_VALUE:.1f} "
+        "(fixed for every genome, not evolved)"
+    )
+    lines.append(
+        f"- theta_bluff (leverage needed to raise as a bluff): {THETA_BLUFF:.1f} "
+        "(fixed for every genome, not evolved)"
+    )
+    lines.append(
+        f"- theta_call (value needed to call rather than fold): {THETA_CALL:.1f} "
+        "(fixed for every genome, not evolved)"
+    )
+    lines.append(
+        f"- bias_v / bias_l (baseline V/L before any feature is considered): "
+        f"{BIAS_V:.1f} / {BIAS_L:.1f} (fixed for every genome, not evolved)"
+    )
+    lines.append(
+        f"- kappa (how much V suppresses the bluff term): {KAPPA:.3f} "
+        "(fixed for every genome, not evolved)"
+    )
     lines.append(
         f"- Decision noise (random amount added to V and L independently each decision): "
         f"{g.noise_std:.2f} points. Higher values mean more unpredictable/bluffy play; near "

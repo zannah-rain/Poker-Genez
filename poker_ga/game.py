@@ -45,12 +45,37 @@ class GameConfig:
     big_blind: float = 2.0
     starting_stack: float = 200.0  # in big blinds' worth of chips (== 100bb if bb=2)
     max_hands_per_session: int = 500
-    # Ends a table's session once this many of its original players have
-    # busted, rather than always playing down to heads-up. Real tables
-    # refill empty seats with new players, so short-handed end-games (where
-    # optimal play looks very different) are rare in practice -- this stops
-    # the GA from over-adapting to a scenario it won't mostly face.
-    busts_before_table_ends: int = 2
+    # Caps re-raising within a single street, matching the standard "N-bet
+    # cap" used in many structured games. Without this, nothing stops two
+    # genomes that both read "villain raised" as a reason to raise again
+    # (a locally-learnable but collectively pathological correlation) from
+    # re-raising each other dozens of times in one street, inflating the
+    # pot to an all-in almost every hand regardless of actual hand strength.
+    max_raises_per_street: int = 4
+    # Floors every raise-to at (current bet + this fraction of the pot), on
+    # top of the standard min-bet/previous-raise-size floor. Without this, a
+    # genome whose action score A is only barely positive can raise for
+    # next to nothing (bet_size scales with A), which is nearly free for the
+    # aggressor but still forces whoever's next to act to make a decision --
+    # a cheap way to grind opponents toward folding or committing chips a
+    # sliver at a time, regardless of actual hand strength.
+    min_raise_fraction_of_pot: float = 0.25
+
+
+@dataclass
+class HandStats:
+    """Mutable, optional accumulator for sense-check metrics -- threaded
+    through betting_round/play_hand so simulate.py can report generation-
+    level trends (action mix, fold rate when facing a bet, raises per
+    street) without every caller needing to opt in or pay for it."""
+    action_counts: dict = field(default_factory=lambda: {FOLD: 0, CHECK_CALL: 0, BET_RAISE: 0})
+    # Facing-a-bet decisions specifically (i.e. FOLD was a legal action) --
+    # the fold rate that actually matters for "is this genome ever folding,"
+    # since most CHECK_CALL actions are free checks, not a genuine choice to
+    # continue over folding.
+    facing_bet_decisions: int = 0
+    facing_bet_folds: int = 0
+    raises_per_street: list = field(default_factory=list)
 
 
 @dataclass
@@ -85,7 +110,10 @@ def betting_round(
     starting_stack: float,
     button_idx: int,
     preflop_raise_count: int,
+    max_raises_per_street: int,
+    min_raise_fraction_of_pot: float,
     rng: np.random.Generator,
+    stats: HandStats | None = None,
     log: list | None = None,
 ) -> tuple[float, int]:
     """Runs one betting round in-place on `seats`. Returns (updated pot,
@@ -112,7 +140,7 @@ def betting_round(
         legal_actions = [CHECK_CALL]
         if call_amount > 1e-9:
             legal_actions.append(FOLD)
-        if seats[i].stack > call_amount + 1e-9:
+        if seats[i].stack > call_amount + 1e-9 and num_raises < max_raises_per_street:
             legal_actions.append(BET_RAISE)
 
         position = order.index(i)
@@ -137,13 +165,21 @@ def betting_round(
         )
         action, raw_bet_size = seats[i].player.genome.decide(situation, legal_actions, rng)
 
+        if stats is not None:
+            stats.action_counts[action] += 1
+            if FOLD in legal_actions:
+                stats.facing_bet_decisions += 1
+                if action == FOLD:
+                    stats.facing_bet_folds += 1
+
         if action == FOLD:
             seats[i].folded = True
             if log is not None:
                 log.append((i, "fold"))
         elif action == BET_RAISE:
             max_raise_to = seats[i].street_committed + seats[i].stack
-            min_raise_to = min(current_bet + max(last_raise_increment, min_bet), max_raise_to)
+            min_raise_increment = max(last_raise_increment, min_bet, min_raise_fraction_of_pot * pot)
+            min_raise_to = min(current_bet + min_raise_increment, max_raise_to)
             desired_total = (current_bet if current_bet > 0 else 0.0) + raw_bet_size
             new_bet = min(max(desired_total, min_raise_to), max_raise_to)
             add = new_bet - seats[i].street_committed
@@ -173,6 +209,9 @@ def betting_round(
                 seats[i].all_in = True
             if log is not None:
                 log.append((i, "call" if add > 1e-9 else "check"))
+
+    if stats is not None:
+        stats.raises_per_street.append(num_raises)
 
     return pot, num_raises
 
@@ -226,6 +265,7 @@ def play_hand(
     button_idx: int,
     config: GameConfig,
     rng: np.random.Generator,
+    stats: HandStats | None = None,
 ) -> HandResult:
     """Plays a single hand in-place on `seats` (a list of currently-alive
     players at the table). Returns the payouts and final board."""
@@ -268,7 +308,9 @@ def play_hand(
             starting_bet = max((seats[i].street_committed for i in non_folded), default=0.0)
             pot, street_num_raises = betting_round(
                 seats, order, pot, config.big_blind, starting_bet, board, street,
-                config.starting_stack, button_idx, preflop_raise_count, rng,
+                config.starting_stack, button_idx, preflop_raise_count,
+                config.max_raises_per_street, config.min_raise_fraction_of_pot, rng,
+                stats=stats,
             )
             if street == PREFLOP:
                 preflop_raise_count = street_num_raises
