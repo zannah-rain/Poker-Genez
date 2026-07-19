@@ -90,6 +90,15 @@ def parse_args() -> argparse.Namespace:
         help="Number of independent 3-vs-3 tables played for each --benchmark-interval checkpoint match.",
     )
     p.add_argument(
+        "--early-stop-patience", type=int, default=3,
+        help="Whenever a --benchmark-interval check shows the current population hasn't beaten "
+        "the previous benchmark checkpoint, training reverts to that checkpoint instead of "
+        "continuing from the (worse) current population. If this happens this many times in a "
+        "row, training stops early rather than running out --generations. Set to 0 to never "
+        "stop early (still reverts on non-improvement, just keeps retrying indefinitely). Only "
+        "applies when --benchmark-interval > 0.",
+    )
+    p.add_argument(
         "--num-islands", type=int, default=3,
         help="Splits --population into this many independent islands, each with its own "
         "breeding pool AND its own tables (an island's players only ever face other members "
@@ -147,8 +156,22 @@ def main() -> None:
 
     os.makedirs(args.out_dir, exist_ok=True)
     final_out_dir = args.final_out_dir or os.path.join(args.out_dir, "final")
-    reload_path = args.reload_path or os.path.join(final_out_dir, "population.npy")
+    # A single, continuously-overwritten snapshot of the full population,
+    # saved every generation (not one file per generation, to avoid
+    # bloating disk on long runs) -- this is what lets a run resume from
+    # wherever it last got to, rather than only from a fully completed
+    # run's final tournament output.
+    latest_population_path = os.path.join(args.out_dir, "latest_population.npy")
+    final_population_path = os.path.join(final_out_dir, "population.npy")
+    default_reload_path = latest_population_path if os.path.exists(latest_population_path) else final_population_path
+    reload_path = args.reload_path or default_reload_path
+
     benchmark_dir = os.path.join(args.out_dir, "benchmarks")
+    # Also a single, continuously-overwritten snapshot -- but only advanced
+    # when a benchmark check confirms improvement (see the training loop
+    # below), so it always holds the last population that was actually
+    # measured to be better than the one before it.
+    benchmark_checkpoint_path = os.path.join(benchmark_dir, "checkpoint_population.npy")
     if args.benchmark_interval > 0:
         os.makedirs(benchmark_dir, exist_ok=True)
 
@@ -164,6 +187,7 @@ def main() -> None:
             print(f"No previous population found at {reload_path}; starting from scratch.")
 
     island_model = IslandModel(ga_config, island_config, rng, seed_genomes=seed_genomes)
+    consecutive_non_improvements = 0
 
     for gen in range(args.generations):
         t0 = time.time()
@@ -204,30 +228,58 @@ def main() -> None:
         if gen == args.generations - 1:
             best_player.genome.save(os.path.join(args.out_dir, f"best_genome_gen{gen}.npy"))
 
+        # Overwrite the resumable "latest" snapshot every generation (not
+        # once per generation as a separate file, to avoid bloating disk on
+        # long runs) so a killed/interrupted run can pick back up here.
+        save_population([p.genome for p in all_players], latest_population_path)
+
+        reverted = False
         if args.benchmark_interval > 0 and gen % args.benchmark_interval == 0:
-            checkpoint_gen = gen - args.benchmark_interval
-            checkpoint_path = os.path.join(benchmark_dir, f"gen{checkpoint_gen:05d}_population.npy")
-            if checkpoint_gen >= 0 and os.path.exists(checkpoint_path):
-                checkpoint_genomes = load_population(checkpoint_path)
+            if os.path.exists(benchmark_checkpoint_path):
+                checkpoint_genomes = load_population(benchmark_checkpoint_path)
                 checkpoint_players = [
-                    Player(player_id=-(i + 1), genome=g, generation=checkpoint_gen)
+                    Player(player_id=-(i + 1), genome=g, generation=gen - args.benchmark_interval)
                     for i, g in enumerate(checkpoint_genomes)
                 ]
                 bench = run_benchmark(
                     all_players, checkpoint_players, game_config, rng,
                     num_tables=args.benchmark_tables,
                 )
+                # The match is zero-sum (chips only move between the seated
+                # players, none created/destroyed by refilling), so beating
+                # the checkpoint at all is exactly current_net_total > 0.
+                improved = bench.current_net_total > 0
                 print(
-                    f"         | benchmark vs gen {checkpoint_gen:4d} | "
+                    f"         | benchmark vs checkpoint | "
                     f"current {bench.current_net_total:+9.1f} chips ({bench.bb_per_100('current', args.big_blind):+7.2f} bb/100) "
-                    f"| checkpoint {bench.checkpoint_net_total:+9.1f} chips ({bench.bb_per_100('checkpoint', args.big_blind):+7.2f} bb/100)"
+                    f"| checkpoint {bench.checkpoint_net_total:+9.1f} chips ({bench.bb_per_100('checkpoint', args.big_blind):+7.2f} bb/100) "
+                    f"| {'IMPROVED' if improved else 'NOT IMPROVED'}"
                 )
-            save_population(
-                [p.genome for p in all_players],
-                os.path.join(benchmark_dir, f"gen{gen:05d}_population.npy"),
-            )
+                if improved:
+                    consecutive_non_improvements = 0
+                    save_population([p.genome for p in all_players], benchmark_checkpoint_path)
+                else:
+                    consecutive_non_improvements += 1
+                    print(
+                        f"         | reverting to benchmark checkpoint "
+                        f"({consecutive_non_improvements}/{args.early_stop_patience or '∞'} consecutive non-improvements)"
+                    )
+                    island_model = IslandModel(ga_config, island_config, rng, seed_genomes=checkpoint_genomes)
+                    save_population([p.genome for p in island_model.all_players], latest_population_path)
+                    reverted = True
+                    if args.early_stop_patience > 0 and consecutive_non_improvements >= args.early_stop_patience:
+                        print(
+                            f"Early stopping: no improvement for {args.early_stop_patience} "
+                            "consecutive benchmark checks."
+                        )
+                        break
+            else:
+                # First benchmark interval -- nothing to compare against yet,
+                # so just bootstrap the checkpoint from the current population.
+                save_population([p.genome for p in all_players], benchmark_checkpoint_path)
 
-        island_model.evolve_all(fitness_by_island)
+        if not reverted:
+            island_model.evolve_all(fitness_by_island)
 
     all_players = island_model.all_players
     print(
