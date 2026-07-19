@@ -120,6 +120,30 @@ A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
   instead gets one of: a one-step nudge up/down the alphabet (local
   search), or a jump to a uniformly random alphabet value (occasional
   larger jumps, including landing back on 0).
+- **Island model** (`IslandConfig` / `IslandModel` in `poker_ga/ga.py`):
+  `--population` is split into `--num-islands` (default 3) independent
+  `Population`s, each with its own breeding pool *and* its own tables --
+  `main.py` calls `run_generation` once per island, so an island's players
+  only ever face other members of that same island, never the other
+  islands. That isolation is the point: if one island's fitness landscape
+  gets taken over by a pathological strategy (the "never fold" collapse
+  this project spent a while diagnosing is exactly this kind of failure),
+  the other islands aren't directly exposed to it as opponents, so they
+  don't automatically inherit the same collapse -- diversity across the
+  whole population survives even if one island doesn't. Every
+  `--migration-interval` generations (default 10), a ring migration is the
+  only channel connecting islands: each island's best `--migration-size`
+  (default 3) genomes this generation are copied into the next island in
+  the ring, overwriting random *non-elite* slots there (elitism already
+  protects each island's own best; "worst" isn't used as the criterion
+  since the receiving island's freshly-bred next generation hasn't been
+  evaluated yet at the point migration happens, and fitness numbers aren't
+  directly comparable across islands anyway -- different opponents,
+  different noise). `player_id`s are offset per island (1,000,000 apart) so
+  they never collide once islands are combined for the final tournament,
+  benchmark checkpoints, or `--reload-previous`. Set `--num-islands 1` to
+  disable and get the original single-population behavior exactly (no
+  migration, no per-island output line).
 - **Final tournament** (`poker_ga/tournament.py`): once evolution finishes,
   the last generation is re-evaluated with many more rounds and a higher
   hand cap than the (deliberately cheap) per-generation fitness pass, for a
@@ -134,12 +158,17 @@ Modules use flat imports and are run directly from inside `poker_ga/`
 ```bash
 pip install -r requirements.txt
 cd poker_ga
-python main.py --generations 50 --population 60 --rounds 3
+python main.py --generations 50 --population 90 --rounds 3
 ```
 
 Key flags (see `python main.py --help` for all of them):
 
-- `--population` — pool size, must be a multiple of 6.
+- `--population` — total pool size across all islands combined, must be a
+  multiple of `--num-islands * 6`.
+- `--num-islands` (default 3), `--migration-interval` (default 10),
+  `--migration-size` (default 3) — the island model (see Island model
+  above). Set `--num-islands 1` to disable and evolve a single population,
+  as before.
 - `--rounds` — random table re-seatings per generation (more rounds = less
   variance in the fitness signal, at the cost of speed).
 - `--max-hands` — hand cap per table session during evolution (a session
@@ -154,13 +183,14 @@ Key flags (see `python main.py --help` for all of them):
   weights land on exactly 0 — a shorter, more memorizable "cheat sheet" —
   alongside raw chip performance. Set to 0 to disable.
 - `--benchmark-interval` (default 10) — every this many generations, plays
-  the current population head-to-head against a saved checkpoint from
-  `--benchmark-interval` generations ago, in `--benchmark-tables` (default
-  60) independent 3-vs-3 tables, and prints aggregate net chips + bb/100 for
-  each side. Unlike the per-generation fitness number (only comparable
-  against that generation's own random opponents, not across generations),
-  this is a direct, apples-to-apples measure of whether evolution is
-  actually improving. Set to 0 to disable. See Benchmark checkpoints below.
+  the current population (combined across all islands) head-to-head against
+  a saved checkpoint from `--benchmark-interval` generations ago, in
+  `--benchmark-tables` (default 2400) independent 3-vs-3 tables, and prints
+  aggregate net chips + bb/100 for each side. Unlike the per-generation
+  fitness number (only comparable against that generation's own random
+  opponents, not across generations), this is a direct, apples-to-apples
+  measure of whether evolution is actually improving. Set to 0 to disable.
+  See Benchmark checkpoints below.
 - `--final-rounds`, `--final-max-hands` — size of the final scoring
   tournament run after evolution completes (bigger = lower-variance ranking,
   slower). Defaults (200 rounds, 100-hand cap) take roughly 1-2 minutes at

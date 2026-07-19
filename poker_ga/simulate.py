@@ -143,3 +143,20 @@ def run_generation(
                     gen_stats.total_busts += 1
 
     return total_fitness, gen_stats
+
+
+def combine_generation_stats(stats_list: list[GenerationStats]) -> GenerationStats:
+    """Merges several GenerationStats (e.g. one per island -- see ga.py's
+    IslandModel) into one combined summary, for printing an overall sense
+    check alongside (not instead of) each island's own numbers."""
+    combined = GenerationStats()
+    for s in stats_list:
+        combined.total_hands_survived += s.total_hands_survived
+        combined.total_session_participations += s.total_session_participations
+        combined.total_busts += s.total_busts
+        for action, count in s.hand_stats.action_counts.items():
+            combined.hand_stats.action_counts[action] = combined.hand_stats.action_counts.get(action, 0) + count
+        combined.hand_stats.facing_bet_decisions += s.hand_stats.facing_bet_decisions
+        combined.hand_stats.facing_bet_folds += s.hand_stats.facing_bet_folds
+        combined.hand_stats.raises_per_street.extend(s.hand_stats.raises_per_street)
+    return combined
