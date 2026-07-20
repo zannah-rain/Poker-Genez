@@ -205,6 +205,30 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
     )
     lines.append("")
 
+    active_spots = g.active_gto_spots()
+    lines.append("## GTO Chart Overrides")
+    if active_spots:
+        lines.append(
+            "This genome memorizes an exact chart for the spot(s) below -- whenever the "
+            "situation matches, it plays straight off the chart instead of the V/L rule above "
+            "(checked in the order listed; the first matching spot wins). Anything not listed "
+            "in a spot's ranges is a fold."
+        )
+        lines.append("")
+        for spot in active_spots:
+            lines.append(f"### {spot.label}")
+            lines.append(f"- **When this applies:** {spot.matcher.describe()}")
+            lines.append("")
+            lines.append("| action | range |")
+            lines.append("|---|---|")
+            for action_token, range_str in spot.action_ranges:
+                lines.append(f"| {action_token} | {range_str} |")
+            lines.append(f"| *(anything else)* | {spot.default_action} |")
+            lines.append("")
+    else:
+        lines.append("This genome doesn't trust any memorized chart -- every decision goes through the V/L rule above.")
+        lines.append("")
+
     parents = [s for s in FEATURE_SPECS if s.kind != "boolean"]
     standalone_booleans = [s for s in FEATURE_SPECS if s.kind == "boolean" and s.linked_to is None]
 

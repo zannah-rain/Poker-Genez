@@ -162,6 +162,7 @@ def betting_round(
             num_preflop_raises=(num_raises if street == PREFLOP else preflop_raise_count),
             is_aggressor=(last_aggressor == i),
             starting_stack=starting_stack,
+            big_blind=min_bet,
         )
         action, raw_bet_size = seats[i].player.genome.decide(situation, legal_actions, rng)
 

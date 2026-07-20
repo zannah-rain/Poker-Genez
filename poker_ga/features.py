@@ -733,6 +733,7 @@ class Situation:
     num_preflop_raises: int  # frozen once preflop ends, unlike num_raises_this_street
     is_aggressor: bool  # did I make the last bet/raise this street?
     starting_stack: float
+    big_blind: float = 2.0  # lets stack depth be expressed in actual BB (see gto.py's SpotMatcher)
 
 
 def _clip01(x: float) -> float:

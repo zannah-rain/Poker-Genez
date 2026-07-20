@@ -62,6 +62,20 @@ human could plausibly memorize and apply at the table. The GA's fitness
 function separately penalizes nonzero weights (see main.py's
 --sparsity-penalty), pushing evolution toward genomes where most weights
 land on exactly 0.
+
+On top of the linear V/L system, a genome can also memorize exact charts
+for specific, well-defined spots (see gto.py) -- e.g. "UTG open, 100BB":
+situations narrow enough that a human plays them from a memorized range
+chart rather than by feel. `gto_flags` is one evolvable boolean gene per
+catalog entry in gto.py's GTO_SPOTS ("does this genome trust this spot's
+chart or not"); when a situation matches an active spot, `decide()` looks
+the hand up in that spot's chart and plays exactly what it says, bypassing
+V/L entirely for that decision. This is a structurally different kind of
+gene from everything else here -- a hard override, not another linear
+term -- because a chart lookup is exactly as memorizable for a human as the
+chart itself, whereas trying to fold "always raise AA in this one exact
+spot" into the linear weights would require it to also make sense as a
+general trend across every other spot, which it doesn't.
 """
 
 from __future__ import annotations
@@ -69,9 +83,16 @@ from __future__ import annotations
 import numpy as np
 
 from features import NUM_FEATURES, Situation, extract_features
+from gto import GTO_SPOTS, NUM_GTO_SPOTS, resolve_spot_action
 
 FOLD, CHECK_CALL, BET_RAISE = 0, 1, 2
 ACTION_NAMES = ["fold", "check/call", "bet/raise"]
+
+# Fraction of GTO_SPOTS a freshly random genome starts out trusting -- low,
+# so the GA has to actively select for a spot's chart being useful (mirrors
+# the sparsity-penalty philosophy for weights: earn complexity, don't start
+# with it) while still giving mutation/crossover some initial material.
+GTO_INIT_PROB = 0.1
 
 V_SCALE = 100.0  # V and L both live on this range, clamped -- read them as percentiles.
 
@@ -148,6 +169,15 @@ def crossover_weights(a_weights: np.ndarray, b_weights: np.ndarray, rng: np.rand
     return np.where(from_a, a_weights, b_weights)
 
 
+def mutate_bool_flags(flags: np.ndarray, rate: float, rng: np.random.Generator) -> np.ndarray:
+    """Bit-flip mutation for boolean genes (0.0/1.0 floats): each selected
+    gene flips to its opposite, rather than being nudged like a continuous
+    value or alphabet-jumped like a quantized weight -- there's nothing
+    "in between" on or off."""
+    mask = rng.random(flags.shape) < rate
+    return np.where(mask, 1.0 - flags, flags)
+
+
 class Genome:
     """weights_v/weights_l: (NUM_FEATURES,) each.
     bias_v/bias_l: baseline V/L before any feature is considered.
@@ -161,6 +191,7 @@ class Genome:
     __slots__ = (
         "weights_v", "weights_l", "bias_v", "bias_l",
         "theta_value", "theta_bluff", "theta_call", "kappa", "noise_std",
+        "gto_flags",
     )
 
     def __init__(
@@ -169,6 +200,7 @@ class Genome:
         bias_v: float, bias_l: float,
         theta_value: float, theta_bluff: float, theta_call: float,
         kappa: float, noise_std: float,
+        gto_flags: np.ndarray,
     ):
         self.weights_v = weights_v
         self.weights_l = weights_l
@@ -179,6 +211,7 @@ class Genome:
         self.theta_call = theta_call
         self.kappa = kappa
         self.noise_std = noise_std
+        self.gto_flags = gto_flags
 
     @classmethod
     def random(cls, rng: np.random.Generator, scale: float = 0.5) -> "Genome":
@@ -200,6 +233,7 @@ class Genome:
             theta_call=float(rng.normal(THETA_CALL_INIT, 15.0)),
             kappa=float(abs(rng.normal(KAPPA_INIT, 0.3))),
             noise_std=float(abs(rng.normal(5.0, 3.0))),
+            gto_flags=(rng.random(NUM_GTO_SPOTS) < GTO_INIT_PROB).astype(np.float64),
         )
 
     def flatten(self) -> np.ndarray:
@@ -207,6 +241,7 @@ class Genome:
             self.weights_v, self.weights_l,
             [self.bias_v, self.bias_l, self.theta_value, self.theta_bluff, self.theta_call,
              self.kappa, self.noise_std],
+            self.gto_flags,
         ])
 
     @classmethod
@@ -228,8 +263,12 @@ class Genome:
         theta_bluff = float(vec[i]); i += 1
         theta_call = float(vec[i]); i += 1
         kappa = float(abs(vec[i])); i += 1
-        noise_std = float(abs(vec[i]))
-        return cls(weights_v, weights_l, bias_v, bias_l, theta_value, theta_bluff, theta_call, kappa, noise_std)
+        noise_std = float(abs(vec[i])); i += 1
+        gto_flags = (vec[i : i + NUM_GTO_SPOTS] > 0.5).astype(np.float64)
+        return cls(
+            weights_v, weights_l, bias_v, bias_l, theta_value, theta_bluff, theta_call,
+            kappa, noise_std, gto_flags,
+        )
 
     def save(self, path: str) -> None:
         np.save(path, self.flatten())
@@ -244,15 +283,17 @@ class Genome:
             self.bias_v, self.bias_l,
             self.theta_value, self.theta_bluff, self.theta_call,
             self.kappa, self.noise_std,
+            self.gto_flags.copy(),
         )
 
     def mutate(self, rng: np.random.Generator, rate: float, continuous_scale: float) -> "Genome":
         """Returns a mutated copy. Feature weights get alphabet-jump
         mutation (see mutate_weights) since additive noise re-quantized
-        almost never actually moves them; the continuous scalars (biases,
-        thresholds, kappa, noise) keep simple additive-gaussian mutation.
-        Each gene is independently selected for mutation with probability
-        `rate`, whichever kind it is."""
+        almost never actually moves them; gto_flags get bit-flip mutation
+        (see mutate_bool_flags); the continuous scalars (biases, thresholds,
+        kappa, noise) keep simple additive-gaussian mutation. Each gene is
+        independently selected for mutation with probability `rate`,
+        whichever kind it is."""
         def mutate_scalar(value: float) -> float:
             if rng.random() < rate:
                 return value + float(rng.normal(0, continuous_scale))
@@ -264,16 +305,18 @@ class Genome:
             mutate_scalar(self.bias_v), mutate_scalar(self.bias_l),
             mutate_scalar(self.theta_value), mutate_scalar(self.theta_bluff), mutate_scalar(self.theta_call),
             abs(mutate_scalar(self.kappa)), abs(mutate_scalar(self.noise_std)),
+            mutate_bool_flags(self.gto_flags, rate, rng),
         )
 
     def crossover(self, other: "Genome", rng: np.random.Generator) -> "Genome":
-        """Returns a child combining self and other. Feature weights use
-        uniform (discrete) crossover (see crossover_weights) since they're
-        quantized -- blending two alphabet values and re-quantizing invents
-        values neither parent had and dilutes sparsity. The continuous
-        scalars (biases, thresholds, kappa, noise) keep blend crossover (a
-        random weighted average per gene), the right operator for genuinely
-        real-valued genes."""
+        """Returns a child combining self and other. Feature weights and
+        gto_flags use uniform (discrete) crossover (see crossover_weights)
+        since they're both categorical/boolean genes, not continuous --
+        blending two alphabet values (or two booleans) and re-quantizing
+        invents values neither parent had and dilutes sparsity. The
+        continuous scalars (biases, thresholds, kappa, noise) keep blend
+        crossover (a random weighted average per gene), the right operator
+        for genuinely real-valued genes."""
         def blend_scalar(x: float, y: float) -> float:
             alpha = rng.uniform(0.0, 1.0)
             return alpha * x + (1 - alpha) * y
@@ -287,12 +330,20 @@ class Genome:
             blend_scalar(self.theta_call, other.theta_call),
             abs(blend_scalar(self.kappa, other.kappa)),
             abs(blend_scalar(self.noise_std, other.noise_std)),
+            crossover_weights(self.gto_flags, other.gto_flags, rng),
         )
 
     def nonzero_weight_count(self) -> int:
         """Number of nonzero feature weights across both axes -- a proxy for
-        how complex/hard-to-memorize this genome's strategy is."""
+        how complex/hard-to-memorize this genome's strategy is. Doesn't
+        include gto_flags -- a different kind of complexity (how many
+        memorized charts, not how many linear weights)."""
         return int(np.count_nonzero(self.weights_v)) + int(np.count_nonzero(self.weights_l))
+
+    def active_gto_spots(self) -> list:
+        """The GTO_SPOTS entries this genome currently trusts (gto_flags is
+        on), in catalog order -- the same order decide() checks them in."""
+        return [spot for spot, flag in zip(GTO_SPOTS, self.gto_flags) if flag > 0.5]
 
     def compute_v_l(self, features: np.ndarray) -> tuple[float, float]:
         raw_v = float(self.weights_v @ features + self.bias_v)
@@ -311,6 +362,10 @@ class Genome:
         rng: np.random.Generator | None = None,
     ) -> tuple[int, float]:
         """Returns (action, raw_bet_size_in_chips_if_betting_else_0)."""
+        gto_result = self._decide_from_gto_charts(situation, legal_actions)
+        if gto_result is not None:
+            return gto_result
+
         features = extract_features(situation)
         v, l = self.compute_v_l(features)
         if rng is not None and self.noise_std > 0:
@@ -330,6 +385,33 @@ class Genome:
         if action == BET_RAISE:
             bet_size = (a / V_SCALE) * max(situation.pot, 1.0)
         return action, bet_size
+
+    def _decide_from_gto_charts(
+        self, situation: Situation, legal_actions: list[int],
+    ) -> tuple[int, float] | None:
+        """Checks this genome's active GTO_SPOTS (gto_flags on), in catalog
+        order, for the first one whose spot matches `situation` -- if found,
+        plays exactly what that spot's chart says for this hand, bypassing
+        V/L entirely. Returns None if no active spot applies, so decide()
+        falls through to the normal linear decision."""
+        for i, spot in enumerate(GTO_SPOTS):
+            if self.gto_flags[i] <= 0.5:
+                continue
+            resolved = resolve_spot_action(spot, situation)
+            if resolved is None:
+                continue
+            kind, pot_fraction = resolved
+            if kind == "fold":
+                action = FOLD if FOLD in legal_actions else CHECK_CALL
+                return action, 0.0
+            if kind == "call":
+                return CHECK_CALL, 0.0
+            # kind == "raise"
+            if BET_RAISE not in legal_actions:
+                return CHECK_CALL, 0.0
+            bet_size = situation.my_stack if pot_fraction is None else pot_fraction * max(situation.pot, 1.0)
+            return BET_RAISE, bet_size
+        return None
 
 
 def save_population(genomes: list[Genome], path: str) -> None:

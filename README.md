@@ -51,6 +51,63 @@ A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
   snaps back onto the alphabet without `ga.py` needing to know which genes
   are weights. This turns a genome into something closer to a lookup table
   a human could memorize, rather than an arbitrary-float vector.
+- **Ranges** (`poker_ga/ranges.py`): parses human-readable starting-hand
+  range strings, e.g. `"AA-77, AJs+, AQo+, KQs"`, into the standard 169-hand
+  abstraction (13 pocket pairs + 78 suited + 78 offsuit two-card combos,
+  ignoring exact suit — preflop, all 4 suits of a suited combo play
+  identically, and likewise for offsuit combos, so this is the same
+  abstraction every range tool/chart uses). `parse_range()` supports exact
+  hands (`"77"`, `"AKs"`, `"AKo"`), pair ranges/`"+"` (`"AA-77"`, `"77+"`),
+  suited/offsuit `"+"` with a fixed top card (`"AJs+"` = AJs, AQs, AKs),
+  fixed-top-card ranges (`"AJs-A5s"`), and matching-gap connector ranges
+  (`"T9s-54s"` = T9s, 98s, 87s, 76s, 65s, 54s). `hand_label()` computes a
+  hole-card pair's canonical label (e.g. `"AKs"`) so it can be checked
+  against a parsed range.
+- **GTO spots** (`poker_ga/gto.py`): the piece that lets a genome memorize
+  an *exact* strategy for a specific, well-defined spot — the way a human
+  plays "UTG open, 100BB" straight off a memorized chart rather than by
+  feel — instead of only ever reasoning through the linear V/L system. A
+  `GTOSpot` combines a `SpotMatcher` (a readable, declarative definition of
+  which situations it applies to: street, pot type, position, facing a bet
+  or not, who was last aggressor, effective stack in actual big blinds) with
+  `action_ranges` — an ordered list of `(action, range_str)` pairs (e.g.
+  `("raise_250", "77+, ATs+, ...")`, `("call", "22-99, ...")`) checked in
+  order, first match wins; anything not covered by any listed range falls
+  back to `default_action` (normally `"fold"`, matching how a real chart is
+  read — everything not colored in is a fold). Action tokens are `"fold"`,
+  `"call"`, `"raise_NN"` (NN = percent of pot, e.g. `"raise_75"` = 3/4-pot),
+  or `"allin"` (shoves the full stack). `GTO_SPOTS` is a small, fixed,
+  code-defined catalog (same pattern as `features.py`'s `FEATURE_SPECS` —
+  extend it by adding entries, not by making it runtime-configurable); the
+  included spots are illustrative, reasonable ranges, not verified solver
+  output, so swap in real solved charts for genuine accuracy. Note that
+  `SpotMatcher` can express "BTN facing a 3-bet" but not "BTN facing a
+  3-bet specifically from the BB" — `Situation` tracks whether *I* was the
+  last aggressor, not which seat/position made a given raise. Position
+  matching reuses the same `seating.seat_role()` helper as the rest of the
+  framework, so a spot's definition of "BTN" means exactly what the
+  Starting Seat Position feature means, and stack depth is measured in
+  actual big blinds (`Situation.big_blind`, threaded from `game.py`), so
+  "100BB stack" means what it says regardless of `--starting-stack`.
+  Whether a genome actually *uses* a given spot is a separate, evolvable
+  per-genome gene (`gto_flags` in `genome.py`, one boolean per `GTO_SPOTS`
+  entry, initialized on ~10% of the time — see `GTO_INIT_PROB`) — a spot
+  existing in the catalog doesn't mean every genome plays it that way, only
+  that a genome *can* learn to trust it. When a genome has a spot active and
+  the current situation matches it, `Genome.decide()` looks the hand up in
+  that spot's chart and plays exactly what it says, **bypassing V/L
+  entirely** for that decision (checked in `GTO_SPOTS` catalog order; the
+  first active, matching spot wins) — this is deliberately a hard override
+  rather than another linear term, since a chart lookup is exactly as
+  memorizable for a human as the chart itself, whereas folding "always raise
+  AA in this one exact spot" into the linear weights would require it to
+  also make sense as a general trend across every other spot, which it
+  doesn't. `gto_flags` get their own mutation (bit-flip) and crossover
+  (uniform, like the quantized weights) operators, and don't count toward
+  `nonzero_weight_count()` (a different kind of complexity — memorized
+  charts, not linear weights). Exported strategy reports include a "GTO
+  Chart Overrides" section listing every active spot's full chart (see
+  Final tournament output below).
 - **Features** (`poker_ga/features.py`): 16 basic situation characteristics
   (made-hand category, hole/shared-cards high card, hole card connectivity,
   street, call size vs pot, SPR, action-order position, starting seat
@@ -281,7 +338,10 @@ After the last generation, `<out-dir>/final/` contains:
 - `rankNN_playerID_strategy.md` — one report per top genome: performance
   stats, this genome's own theta_value/theta_bluff/theta_call/bias_v/
   bias_l/kappa/noise_std (see Genome above), its nonzero feature weight
-  count (out of `2 x NUM_FEATURES` possible), then a `##
+  count (out of `2 x NUM_FEATURES` possible), a `## GTO Chart Overrides`
+  section (see GTO spots above) listing every spot this genome currently
+  trusts — its matcher description and its full action/range table, exactly
+  as a human would need to memorize it — then a `##
   Feature Groups` section organized by theme (Hole Card Characteristics,
   Board / Flop Characteristics, Made Hand Features, Draw Features, Betting
   Behaviour Features, Stack & Pot Features, Table & Game State Features —
