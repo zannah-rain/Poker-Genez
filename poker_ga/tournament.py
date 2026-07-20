@@ -13,7 +13,7 @@ import numpy as np
 
 from features import FEATURE_GROUPS, FEATURE_SPECS, group_of
 from game import GameConfig
-from genome import BIAS_L, BIAS_V, KAPPA, THETA_BLUFF, THETA_CALL, THETA_VALUE, WEIGHT_ALPHABET
+from genome import WEIGHT_ALPHABET
 from player import Player
 from simulate import SimConfig, run_session
 
@@ -175,26 +175,14 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
     lines.append("- `elif V > theta_call` -> call/check")
     lines.append("- `else` -> fold/check")
     lines.append("")
-    lines.append(
-        f"- theta_value (value needed to raise for value): {THETA_VALUE:.1f} "
-        "(fixed for every genome, not evolved)"
-    )
-    lines.append(
-        f"- theta_bluff (leverage needed to raise as a bluff): {THETA_BLUFF:.1f} "
-        "(fixed for every genome, not evolved)"
-    )
-    lines.append(
-        f"- theta_call (value needed to call rather than fold): {THETA_CALL:.1f} "
-        "(fixed for every genome, not evolved)"
-    )
+    lines.append(f"- theta_value (value needed to raise for value): {g.theta_value:.1f}")
+    lines.append(f"- theta_bluff (leverage needed to raise as a bluff): {g.theta_bluff:.1f}")
+    lines.append(f"- theta_call (value needed to call rather than fold): {g.theta_call:.1f}")
     lines.append(
         f"- bias_v / bias_l (baseline V/L before any feature is considered): "
-        f"{BIAS_V:.1f} / {BIAS_L:.1f} (fixed for every genome, not evolved)"
+        f"{g.bias_v:.1f} / {g.bias_l:.1f}"
     )
-    lines.append(
-        f"- kappa (how much V suppresses the bluff term): {KAPPA:.3f} "
-        "(fixed for every genome, not evolved)"
-    )
+    lines.append(f"- kappa (how much V suppresses the bluff term): {g.kappa:.3f}")
     lines.append(
         f"- Decision noise (random amount added to V and L independently each decision): "
         f"{g.noise_std:.2f} points. Higher values mean more unpredictable/bluffy play; near "

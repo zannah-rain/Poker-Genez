@@ -9,30 +9,37 @@ A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
   "my equity against the range that continues") and **L** (leverage —
   roughly "how much of villain's range folds to me": fold equity shaped by
   blockers, initiative, board texture, position, SPR). Both are a linear
-  sum of `weight x feature`, offset by a fixed bias and clamped with plain
-  min/max (not a curve) to land on 0-100 — read them as percentiles, e.g.
-  `V=90` ~ a top-10% hand. They combine *non-convexly* (so it isn't just a
-  1D score again) into one action score: `A = max(V - THETA_VALUE, L -
-  THETA_BLUFF - KAPPA * V)`. Then: `A > 0` = bet/raise (sized at `(A / 100)
-  x pot`), `elif V > THETA_CALL` = call/check, `else` = fold/check.
-  `THETA_VALUE`/`THETA_BLUFF`/`THETA_CALL`/`BIAS_V`/`BIAS_L`/`KAPPA` are all
-  **fixed module-level constants, not evolvable genes** — they started out
-  as per-genome genes, but that let each one random-walk without any bound.
-  Since bet/raise fires on *either* axis clearing its bar (an OR) while
-  folding needs *both* to fail (an AND), selection could cheapen folding to
-  near-zero by drifting *any* number that sits on the "makes it easier to
-  clear a bar" side of either inequality — measured directly: fixing just
-  the thresholds didn't stop a fold-rate collapse (~34% to ~7% within a
-  handful of generations, average hands survived per session collapsing to
-  ~1); evolution simply moved the same exploit onto `bias_l` (drifted
-  toward the value that pushes `L` past `THETA_BLUFF` on its own) and
-  `kappa` (drifted toward zero, disabling the term that's supposed to make
-  bluffing harder as `V` rises). There's no real reason any of these need
-  to be learned per genome — a human would pick one sensible set of numbers
-  and stick with it, same as here. Only the feature weights and the
-  exploration noise (`noise_std`) are left to evolve. Weights live on the
-  same 0-100 range as V/L (sized so a handful of active features move V/L
-  meaningfully) and `BIAS_V`/`BIAS_L` sit at 50 — the "no information"
+  sum of `weight x feature`, offset by a bias and clamped with plain min/max
+  (not a curve) to land on 0-100 — read them as percentiles, e.g. `V=90` ~ a
+  top-10% hand. They combine *non-convexly* (so it isn't just a 1D score
+  again) into one action score: `A = max(V - theta_value, L - theta_bluff -
+  kappa * V)`. Then: `A > 0` = bet/raise (sized at `(A / 100) x pot`), `elif
+  V > theta_call` = call/check, `else` = fold/check. `theta_value` /
+  `theta_bluff` / `theta_call` / `bias_v` / `bias_l` / `kappa` are all
+  evolvable per-genome genes, initialized centered on the same reasonable
+  values (`theta_value=theta_bluff=70`, `theta_call=40`, `bias_v=bias_l=50`,
+  `kappa=0.5`) that were briefly used as fixed constants earlier in this
+  project's life. They were fixed for a while because letting them
+  free-drift under selection turned out to be exploitable — bet/raise fires
+  on *either* axis clearing its bar (an OR) while folding needs *both* to
+  fail (an AND), so selection could cheapen folding to near-zero by
+  drifting any of these numbers toward the "makes it easier to clear a bar"
+  side of either inequality (measured directly as a fold-rate collapse from
+  ~34% to ~7% within a handful of generations). What actually turned out to
+  be driving that collapse, though, was a game mechanic — sessions used to
+  end outright once a couple of players busted, letting a lucky win get
+  "locked in" before it could be punished — fixed by refilling busted seats
+  with fresh players instead of ending the session (see Simulation below).
+  With that root cause fixed, and with several other safeguards added since
+  (a pot-scaled minimum raise floor, a sparsity penalty, island-isolated
+  sub-populations, and benchmark-checkpoint reverting/early-stopping that
+  catches and undoes a population that's measurably gotten worse — see
+  Island model and Resuming and benchmark checkpoints below), these six
+  scalars are evolvable again: the mechanism that made an unbounded drift
+  pay off is gone, and there's now a safety net that reverts training if a
+  similar drift ever did start paying off. Weights live on the same 0-100
+  range as V/L (sized so a handful of active features move V/L
+  meaningfully) and biases are centered at 50 — the "no information"
   percentile — so every number in a genome reads the same way a human would
   think about it — no unit conversion needed at the table, and the only
   non-arithmetic step anywhere is the min/max clamp. `NUM_FEATURES` drives
@@ -272,10 +279,9 @@ After the last generation, `<out-dir>/final/` contains:
 - `leaderboard.md` — a ranked table (mean net chips/session, win rate, bust
   rate, bb/100, nonzero weight count) for the top N genomes.
 - `rankNN_playerID_strategy.md` — one report per top genome: performance
-  stats, the fixed THETA_VALUE/THETA_BLUFF/THETA_CALL/BIAS_V/BIAS_L/KAPPA
-  constants (same for every genome — see Genome above) plus this genome's
-  own noise_std, its nonzero feature weight count (out of `2 x
-  NUM_FEATURES` possible), then a `##
+  stats, this genome's own theta_value/theta_bluff/theta_call/bias_v/
+  bias_l/kappa/noise_std (see Genome above), its nonzero feature weight
+  count (out of `2 x NUM_FEATURES` possible), then a `##
   Feature Groups` section organized by theme (Hole Card Characteristics,
   Board / Flop Characteristics, Made Hand Features, Draw Features, Betting
   Behaviour Features, Stack & Pot Features, Table & Game State Features —

@@ -17,39 +17,43 @@ is what lets 2 numbers per feature carry more than 1 did.
 The decision rule is deliberately non-convex -- a plain aV + bL would just
 be a 1D score again -- so it's a max of two linear terms:
 
-    A = max( V - THETA_VALUE,  L - THETA_BLUFF - KAPPA * V )
+    A = max( V - theta_value,  L - theta_bluff - kappa * V )
     A > 0              -> bet/raise, sized off A as a fraction of pot
-    elif V > THETA_CALL -> call/check
+    elif V > theta_call -> call/check
     else               -> fold/check
 
-THETA_VALUE/THETA_BLUFF/THETA_CALL/BIAS_V/BIAS_L/KAPPA are all fixed
-constants, not evolvable genes. They started out as per-genome genes, but
-that let each one random-walk without any bound -- and since bet/raise
+theta_value/theta_bluff/theta_call/bias_v/bias_l/kappa are evolvable
+per-genome genes. They were fixed as constants for a while, because letting
+them free-drift under selection turned out to be exploitable: bet/raise
 fires on *either* axis clearing its bar (an OR) while folding needs *both*
-to fail (an AND), selection can cheapen folding to near-zero by drifting
-*any* number that sits on the "makes it easier to clear a bar" side of
-either inequality, not just the thresholds themselves. This was measured
-directly: fixing just the thresholds didn't stop the collapse (fold rate
-still fell to ~7%, hands survived per session still collapsed to ~1) --
-evolution simply moved the same exploit onto BIAS_L (drifted ~48 -> ~65-75
-across generations, which alone pushes L past THETA_BLUFF before any
-feature is even considered) and KAPPA (drifted ~0.52 -> ~0.30, weakening
-the term that's supposed to make bluffing harder as V rises). There's no
-real reason any of these need to be learned per genome -- they're all just
-"how good does my hand/leverage need to be, on the same 0-100 scale as
-V/L, to raise / bluff / continue," and "how much bluffing gets suppressed
-by having a strong hand anyway" -- a human would pick one sensible set of
-numbers and stick with it, same as here. Only the feature weights (which
-feed V/L based on the position's actual features) and the exploration
-noise are left to evolve.
+to fail (an AND), so selection could cheapen folding to near-zero just by
+drifting any of these numbers toward the "makes it easier to clear a bar"
+side of either inequality -- measured directly as a fold-rate collapse
+(~34% to ~7%) and average hands survived per session collapsing to ~1
+within a handful of generations, tracked all the way down to specific genes
+walking in that direction (bias_l drifting up, kappa drifting toward 0).
+What actually turned out to be driving that collapse, though, was a game
+mechanic: sessions used to end outright once a couple of players busted,
+letting a lucky win get "locked in" before it could be punished -- fixed by
+refilling busted seats with fresh players instead of ending the session
+(see simulate.py). With that root cause fixed, and with several other
+safeguards added since (a pot-scaled minimum raise floor, a sparsity
+penalty, island-isolated sub-populations, and benchmark-checkpoint
+reverting/early-stopping that catches and undoes a population that's
+measurably gotten worse -- see main.py), these six scalars are safe to let
+evolve again: the mechanism that made an unbounded drift pay off is gone,
+and there's now a safety net that reverts training if a similar drift ever
+did start paying off. `random()` still initializes them centered on the
+same reasonable values previously used as fixed constants (theta_value=70,
+theta_bluff=70, theta_call=40, bias_v=bias_l=50, kappa=0.5), so evolution
+starts from a sane baseline and has to earn any drift away from it.
 
 Weights are scaled to live on the same 0-100 range as V/L (big enough that
-a handful of active features move V/L meaningfully), and BIAS_V/BIAS_L sit
-at 50 -- the "no information" percentile -- so every number in a genome
-reads the same way a human would think about it: no separate unit
-conversion needed at the table. The only nonlinear-looking step anywhere
-is the min/max clamp on V/L, which is just "cap it at 0 or 100," not a
-curve.
+a handful of active features move V/L meaningfully), and biases are
+centered at 50 -- the "no information" percentile -- so every number in a
+genome reads the same way a human would think about it: no separate unit
+conversion needed at the table. The only nonlinear-looking step anywhere is
+the min/max clamp on V/L, which is just "cap it at 0 or 100," not a curve.
 
 Feature weights (weights_v/weights_l) are quantized to WEIGHT_ALPHABET
 rather than being continuous -- so a genome reduces to "which of ~130
@@ -71,17 +75,15 @@ ACTION_NAMES = ["fold", "check/call", "bet/raise"]
 
 V_SCALE = 100.0  # V and L both live on this range, clamped -- read them as percentiles.
 
-# Fixed decision thresholds, on the same 0-100 scale as V/L (see module
-# docstring for why these are constants rather than evolvable genes).
-THETA_VALUE = 70.0  # V needed to raise for value: roughly "top 30%" showdown equity
-THETA_BLUFF = 70.0  # L needed to raise as a bluff: roughly "top 30%" leverage
-THETA_CALL = 40.0  # V needed to continue at all rather than fold: better than roughly average
-
-# Fixed baseline offsets for V/L, and fixed bluff-suppression strength (see
-# module docstring for why these are constants rather than evolvable genes).
-BIAS_V = 50.0  # the "no information" percentile: a featureless hand reads as average
-BIAS_L = 50.0
-KAPPA = 0.5  # how much having a strong hand (V) suppresses the bluff term
+# Init centers for the evolvable scalars below, on the same 0-100 scale as
+# V/L -- these are where `random()` centers its initial spread, not fixed
+# values (see module docstring for why they're evolvable, and why these
+# particular numbers are still a sane starting point).
+THETA_VALUE_INIT = 70.0  # V needed to raise for value: roughly "top 30%" showdown equity
+THETA_BLUFF_INIT = 70.0  # L needed to raise as a bluff: roughly "top 30%" leverage
+THETA_CALL_INIT = 40.0  # V needed to continue at all rather than fold: better than roughly average
+BIAS_INIT = 50.0  # the "no information" percentile: a featureless hand reads as average
+KAPPA_INIT = 0.5  # how much having a strong hand (V) suppresses the bluff term
 
 # Feature weights (weights_v/weights_l) are constrained to this small alphabet
 # rather than being continuous -- a genome is then just a lookup table of
@@ -148,17 +150,34 @@ def crossover_weights(a_weights: np.ndarray, b_weights: np.ndarray, rng: np.rand
 
 class Genome:
     """weights_v/weights_l: (NUM_FEATURES,) each.
+    bias_v/bias_l: baseline V/L before any feature is considered.
+    theta_value/theta_bluff/theta_call: decision thresholds (see module
+    docstring for the decision rule).
+    kappa: non-negative damping of the bluff term as V rises.
     noise_std: exploration noise added to V and L (independently) before
-    thresholding. (THETA_VALUE/THETA_BLUFF/THETA_CALL/BIAS_V/BIAS_L/KAPPA
-    are all fixed constants, not part of the genome -- see module
-    docstring.)
+    thresholding.
     """
 
-    __slots__ = ("weights_v", "weights_l", "noise_std")
+    __slots__ = (
+        "weights_v", "weights_l", "bias_v", "bias_l",
+        "theta_value", "theta_bluff", "theta_call", "kappa", "noise_std",
+    )
 
-    def __init__(self, weights_v: np.ndarray, weights_l: np.ndarray, noise_std: float):
+    def __init__(
+        self,
+        weights_v: np.ndarray, weights_l: np.ndarray,
+        bias_v: float, bias_l: float,
+        theta_value: float, theta_bluff: float, theta_call: float,
+        kappa: float, noise_std: float,
+    ):
         self.weights_v = weights_v
         self.weights_l = weights_l
+        self.bias_v = bias_v
+        self.bias_l = bias_l
+        self.theta_value = theta_value
+        self.theta_bluff = theta_bluff
+        self.theta_call = theta_call
+        self.kappa = kappa
         self.noise_std = noise_std
 
     @classmethod
@@ -174,11 +193,21 @@ class Genome:
         return cls(
             weights_v=weights_v,
             weights_l=weights_l,
+            bias_v=float(rng.normal(BIAS_INIT, 20.0)),
+            bias_l=float(rng.normal(BIAS_INIT, 20.0)),
+            theta_value=float(rng.normal(THETA_VALUE_INIT, 15.0)),
+            theta_bluff=float(rng.normal(THETA_BLUFF_INIT, 15.0)),
+            theta_call=float(rng.normal(THETA_CALL_INIT, 15.0)),
+            kappa=float(abs(rng.normal(KAPPA_INIT, 0.3))),
             noise_std=float(abs(rng.normal(5.0, 3.0))),
         )
 
     def flatten(self) -> np.ndarray:
-        return np.concatenate([self.weights_v, self.weights_l, [self.noise_std]])
+        return np.concatenate([
+            self.weights_v, self.weights_l,
+            [self.bias_v, self.bias_l, self.theta_value, self.theta_bluff, self.theta_call,
+             self.kappa, self.noise_std],
+        ])
 
     @classmethod
     def unflatten(cls, vec: np.ndarray) -> "Genome":
@@ -193,8 +222,14 @@ class Genome:
         i += NUM_FEATURES
         weights_l = quantize(vec[i : i + NUM_FEATURES])
         i += NUM_FEATURES
+        bias_v = float(vec[i]); i += 1
+        bias_l = float(vec[i]); i += 1
+        theta_value = float(vec[i]); i += 1
+        theta_bluff = float(vec[i]); i += 1
+        theta_call = float(vec[i]); i += 1
+        kappa = float(abs(vec[i])); i += 1
         noise_std = float(abs(vec[i]))
-        return cls(weights_v, weights_l, noise_std)
+        return cls(weights_v, weights_l, bias_v, bias_l, theta_value, theta_bluff, theta_call, kappa, noise_std)
 
     def save(self, path: str) -> None:
         np.save(path, self.flatten())
@@ -204,14 +239,20 @@ class Genome:
         return cls.unflatten(np.load(path))
 
     def copy(self) -> "Genome":
-        return Genome(self.weights_v.copy(), self.weights_l.copy(), self.noise_std)
+        return Genome(
+            self.weights_v.copy(), self.weights_l.copy(),
+            self.bias_v, self.bias_l,
+            self.theta_value, self.theta_bluff, self.theta_call,
+            self.kappa, self.noise_std,
+        )
 
     def mutate(self, rng: np.random.Generator, rate: float, continuous_scale: float) -> "Genome":
         """Returns a mutated copy. Feature weights get alphabet-jump
         mutation (see mutate_weights) since additive noise re-quantized
-        almost never actually moves them; noise_std keeps simple
-        additive-gaussian mutation. Each gene is independently selected for
-        mutation with probability `rate`, whichever kind it is."""
+        almost never actually moves them; the continuous scalars (biases,
+        thresholds, kappa, noise) keep simple additive-gaussian mutation.
+        Each gene is independently selected for mutation with probability
+        `rate`, whichever kind it is."""
         def mutate_scalar(value: float) -> float:
             if rng.random() < rate:
                 return value + float(rng.normal(0, continuous_scale))
@@ -220,16 +261,19 @@ class Genome:
         return Genome(
             mutate_weights(self.weights_v, rate, rng),
             mutate_weights(self.weights_l, rate, rng),
-            abs(mutate_scalar(self.noise_std)),
+            mutate_scalar(self.bias_v), mutate_scalar(self.bias_l),
+            mutate_scalar(self.theta_value), mutate_scalar(self.theta_bluff), mutate_scalar(self.theta_call),
+            abs(mutate_scalar(self.kappa)), abs(mutate_scalar(self.noise_std)),
         )
 
     def crossover(self, other: "Genome", rng: np.random.Generator) -> "Genome":
         """Returns a child combining self and other. Feature weights use
         uniform (discrete) crossover (see crossover_weights) since they're
         quantized -- blending two alphabet values and re-quantizing invents
-        values neither parent had and dilutes sparsity. noise_std keeps
-        blend crossover (a random weighted average), the right operator for
-        a genuinely real-valued gene."""
+        values neither parent had and dilutes sparsity. The continuous
+        scalars (biases, thresholds, kappa, noise) keep blend crossover (a
+        random weighted average per gene), the right operator for genuinely
+        real-valued genes."""
         def blend_scalar(x: float, y: float) -> float:
             alpha = rng.uniform(0.0, 1.0)
             return alpha * x + (1 - alpha) * y
@@ -237,6 +281,11 @@ class Genome:
         return Genome(
             crossover_weights(self.weights_v, other.weights_v, rng),
             crossover_weights(self.weights_l, other.weights_l, rng),
+            blend_scalar(self.bias_v, other.bias_v), blend_scalar(self.bias_l, other.bias_l),
+            blend_scalar(self.theta_value, other.theta_value),
+            blend_scalar(self.theta_bluff, other.theta_bluff),
+            blend_scalar(self.theta_call, other.theta_call),
+            abs(blend_scalar(self.kappa, other.kappa)),
             abs(blend_scalar(self.noise_std, other.noise_std)),
         )
 
@@ -246,8 +295,8 @@ class Genome:
         return int(np.count_nonzero(self.weights_v)) + int(np.count_nonzero(self.weights_l))
 
     def compute_v_l(self, features: np.ndarray) -> tuple[float, float]:
-        raw_v = float(self.weights_v @ features + BIAS_V)
-        raw_l = float(self.weights_l @ features + BIAS_L)
+        raw_v = float(self.weights_v @ features + self.bias_v)
+        raw_l = float(self.weights_l @ features + self.bias_l)
         # Clamp (plain min/max, not a curve) rather than let a linear sum
         # wander arbitrarily -- V/L are meant to read as percentiles, which
         # can't go below 0 or above 100.
@@ -268,11 +317,11 @@ class Genome:
             v += float(rng.normal(0, self.noise_std))
             l += float(rng.normal(0, self.noise_std))
 
-        a = max(v - THETA_VALUE, l - THETA_BLUFF - KAPPA * v)
+        a = max(v - self.theta_value, l - self.theta_bluff - self.kappa * v)
 
         if a > 0:
             action = BET_RAISE if BET_RAISE in legal_actions else CHECK_CALL
-        elif v > THETA_CALL:
+        elif v > self.theta_call:
             action = CHECK_CALL
         else:
             action = FOLD if FOLD in legal_actions else CHECK_CALL
