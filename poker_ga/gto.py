@@ -113,11 +113,18 @@ class GTOSpot:
         object.__setattr__(self, "parsed_ranges", parsed)
 
 
-def parse_action_token(token: str) -> tuple[str, float | None]:
-    """Returns (kind, pot_fraction): kind is "fold"/"call"/"raise";
-    pot_fraction is None for fold/call, a fraction of pot for "raise_NN"
-    (e.g. "raise_75" -> 0.75), or None for "allin" (a sentinel meaning
-    "shove the full stack", handled by the caller)."""
+def parse_action_token(token: str) -> tuple[str, tuple[str, float] | None]:
+    """Returns (kind, size_spec). kind is "fold"/"call"/"raise". size_spec is:
+      - None                -- fold/call (unused); or "allin" for raise
+                                (sentinel meaning "shove the full stack")
+      - ("pot", fraction)   -- raise sized at `fraction` x pot, e.g.
+                                "raise_75" -> ("pot", 0.75)
+      - ("bb", n)           -- raise sized so this player's TOTAL commitment
+                                this street reaches `n` big blinds, e.g.
+                                "raise_2.5bb" -> ("bb", 2.5) -- the natural
+                                way to specify an open size ("raise to 2.5bb")
+    size_spec is resolved into actual chips by the caller (genome.py), which
+    has access to the current pot/call_amount/big_blind."""
     token = token.strip().lower()
     if token == "fold":
         return "fold", None
@@ -125,13 +132,16 @@ def parse_action_token(token: str) -> tuple[str, float | None]:
         return "call", None
     if token == "allin":
         return "raise", None
+    m = re.fullmatch(r"raise_(\d+(?:\.\d+)?)bb", token)
+    if m:
+        return "raise", ("bb", float(m.group(1)))
     m = re.fullmatch(r"raise_(\d+(?:\.\d+)?)", token)
     if m:
-        return "raise", float(m.group(1)) / 100.0
+        return "raise", ("pot", float(m.group(1)) / 100.0)
     raise ValueError(f"Unknown GTO action token: {token!r}")
 
 
-def resolve_spot_action(spot: GTOSpot, situation: Situation) -> tuple[str, float | None] | None:
+def resolve_spot_action(spot: GTOSpot, situation: Situation) -> tuple[str, tuple[str, float] | None] | None:
     """If `situation` matches this spot, returns this hand's action (falling
     back to spot.default_action if the hand isn't in any listed range).
     Returns None if the spot doesn't apply to this situation at all."""
@@ -153,11 +163,16 @@ GTO_SPOTS: list[GTOSpot] = [
         key="utg_open_100bb",
         label="UTG Open -- 100BB stack",
         matcher=SpotMatcher(
-            street=0, pot_type=0, position="UTG", facing_bet=False,
+            # Not `facing_bet=False`: preflop, everyone except the BB has a
+            # nonzero call_amount even in an unraised pot (they still owe
+            # the BB's forced post to continue), so `facing_bet` is True for
+            # basically every preflop decision that isn't the BB's option.
+            # `pot_type=0` (no raises yet) is what actually means "open."
+            street=0, pot_type=0, position="UTG",
             min_effective_bb=80, max_effective_bb=120,
         ),
         action_ranges=(
-            ("raise_250", "77+, ATs+, KTs+, QTs+, JTs, T9s, 98s, AJo+, KQo"),
+            ("raise_2.5bb", "77+, ATs+, KTs+, QTs+, JTs, T9s, 98s, AJo+, KQo"),
         ),
         default_action="fold",
     ),
@@ -165,12 +180,12 @@ GTO_SPOTS: list[GTOSpot] = [
         key="btn_open_100bb",
         label="BTN Open -- 100BB stack",
         matcher=SpotMatcher(
-            street=0, pot_type=0, position="BTN", facing_bet=False,
+            street=0, pot_type=0, position="BTN",
             min_effective_bb=80, max_effective_bb=120,
         ),
         action_ranges=(
             (
-                "raise_250",
+                "raise_2.2bb",
                 "22+, A2s+, K5s+, Q7s+, J7s+, T7s+, 96s+, 86s+, 75s+, 64s+, 53s+, "
                 "A2o+, K8o+, Q9o+, J9o+, T9o",
             ),

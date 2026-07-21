@@ -400,7 +400,7 @@ class Genome:
             resolved = resolve_spot_action(spot, situation)
             if resolved is None:
                 continue
-            kind, pot_fraction = resolved
+            kind, size_spec = resolved
             if kind == "fold":
                 action = FOLD if FOLD in legal_actions else CHECK_CALL
                 return action, 0.0
@@ -409,7 +409,17 @@ class Genome:
             # kind == "raise"
             if BET_RAISE not in legal_actions:
                 return CHECK_CALL, 0.0
-            bet_size = situation.my_stack if pot_fraction is None else pot_fraction * max(situation.pot, 1.0)
+            if size_spec is None:
+                bet_size = situation.my_stack  # "allin": shove the full stack
+            elif size_spec[0] == "pot":
+                bet_size = size_spec[1] * max(situation.pot, 1.0)
+            else:  # ("bb", n): raise so my total commitment this street reaches n big blinds.
+                # call_amount == current_bet for every non-blind seat that hasn't
+                # committed anything yet this street (the common case these
+                # spots are written for), so this is exact there and a close
+                # approximation for the blinds.
+                target_total = size_spec[1] * situation.big_blind
+                bet_size = max(target_total - situation.call_amount, 0.0)
             return BET_RAISE, bet_size
         return None
 

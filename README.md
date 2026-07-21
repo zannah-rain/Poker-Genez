@@ -71,12 +71,18 @@ A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
   which situations it applies to: street, pot type, position, facing a bet
   or not, who was last aggressor, effective stack in actual big blinds) with
   `action_ranges` — an ordered list of `(action, range_str)` pairs (e.g.
-  `("raise_250", "77+, ATs+, ...")`, `("call", "22-99, ...")`) checked in
+  `("raise_2.5bb", "77+, ATs+, ...")`, `("call", "22-99, ...")`) checked in
   order, first match wins; anything not covered by any listed range falls
   back to `default_action` (normally `"fold"`, matching how a real chart is
   read — everything not colored in is a fold). Action tokens are `"fold"`,
-  `"call"`, `"raise_NN"` (NN = percent of pot, e.g. `"raise_75"` = 3/4-pot),
-  or `"allin"` (shoves the full stack). `GTO_SPOTS` is a small, fixed,
+  `"call"`, `"raise_NN"` (NN = percent of pot, e.g. `"raise_75"` = 3/4-pot;
+  the raise amount is an increment on top of whatever's already bet, same
+  as the linear V/L system's sizing), `"raise_NNbb"` (raise so this
+  player's *total* commitment this street reaches NN big blinds, e.g.
+  `"raise_2.5bb"` — the natural way to write a preflop open size; exact for
+  any seat that hasn't put any chips in yet this street, a close
+  approximation for the blinds), or `"allin"` (shoves the full stack).
+  `GTO_SPOTS` is a small, fixed,
   code-defined catalog (same pattern as `features.py`'s `FEATURE_SPECS` —
   extend it by adding entries, not by making it runtime-configurable); the
   included spots are illustrative, reasonable ranges, not verified solver
