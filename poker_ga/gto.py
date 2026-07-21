@@ -172,7 +172,41 @@ GTO_SPOTS: list[GTOSpot] = [
             min_effective_bb=80, max_effective_bb=120,
         ),
         action_ranges=(
-            ("raise_2.5bb", "77+, ATs+, KTs+, QTs+, JTs, T9s, 98s, AJo+, KQo"),
+            ("raise_2bb", "ATo+, KJo+, QJo+, 55+, T9s+, J9s+, Q8s+, K5s+, A2s+"),
+        ),
+        default_action="fold",
+    ),
+    GTOSpot(
+        key="hj_open_100bb",
+        label="HJ Open -- 100BB stack",
+        matcher=SpotMatcher(
+            # Not `facing_bet=False`: preflop, everyone except the BB has a
+            # nonzero call_amount even in an unraised pot (they still owe
+            # the BB's forced post to continue), so `facing_bet` is True for
+            # basically every preflop decision that isn't the BB's option.
+            # `pot_type=0` (no raises yet) is what actually means "open."
+            street=0, pot_type=0, position="HJ",
+            min_effective_bb=80, max_effective_bb=120,
+        ),
+        action_ranges=(
+            ("raise_2bb", "A9o+, KTo+, QTo+, JTo+, 44+, T8s+, J8s+, Q6s+, K4s+, A2s+"),
+        ),
+        default_action="fold",
+    ),
+    GTOSpot(
+        key="co_open_100bb",
+        label="CO Open -- 100BB stack",
+        matcher=SpotMatcher(
+            # Not `facing_bet=False`: preflop, everyone except the BB has a
+            # nonzero call_amount even in an unraised pot (they still owe
+            # the BB's forced post to continue), so `facing_bet` is True for
+            # basically every preflop decision that isn't the BB's option.
+            # `pot_type=0` (no raises yet) is what actually means "open."
+            street=0, pot_type=0, position="CO",
+            min_effective_bb=80, max_effective_bb=120,
+        ),
+        action_ranges=(
+            ("raise_2.3bb", "A5o, A8o+, KTo+, QTo+, JTo+, 44+, 98s, T8s+, J7s+, Q5s+, K3s+, A2s+"),
         ),
         default_action="fold",
     ),
@@ -185,10 +219,25 @@ GTO_SPOTS: list[GTOSpot] = [
         ),
         action_ranges=(
             (
-                "raise_2.2bb",
-                "22+, A2s+, K5s+, Q7s+, J7s+, T7s+, 96s+, 86s+, 75s+, 64s+, 53s+, "
-                "A2o+, K8o+, Q9o+, J9o+, T9o",
+                "raise_2.5bb", "A3o+, K8o+, Q9o+, J9o+, T8o+, 33+, AKs-54s, AQs-75s, 96s, T6s+, J4s+, Q2s+, K2s+, A2s+"
             ),
+        ),
+        default_action="fold",
+    ),
+    GTOSpot(
+        key="sb_open_100bb",
+        label="SB Open -- 100BB stack",
+        matcher=SpotMatcher(
+            # Not `facing_bet=False`: preflop, everyone except the BB has a
+            # nonzero call_amount even in an unraised pot (they still owe
+            # the BB's forced post to continue), so `facing_bet` is True for
+            # basically every preflop decision that isn't the BB's option.
+            # `pot_type=0` (no raises yet) is what actually means "open."
+            street=0, pot_type=0, position="SB",
+            min_effective_bb=80, max_effective_bb=120,
+        ),
+        action_ranges=(
+            ("raise_3bb", "A4o+, K8o+, Q9o+, J9o+, T9o+, 22+, AKs-54s, AQs-64s, AJs-85s, T6s+, J4s+, Q2s+, K2s+, A2s+"),
         ),
         default_action="fold",
     ),
