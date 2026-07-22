@@ -63,6 +63,7 @@ FEATURE_GROUPS = [
     "Betting Behaviour Features",
     "Stack & Pot Features",
     "Table & Game State Features",
+    "Opponent Tendency Features",
 ]
 
 
@@ -197,6 +198,74 @@ _STACK_DEPTH_VALUES = (
     (0.75, "1.5x the starting stack"),
     (1.0, "2x the starting stack or more (clipped)"),
 )
+_OPP_VPIP_VALUES = (
+    (0.0, "Active opponents almost never voluntarily play a hand (very tight)"),
+    (0.25, "Active opponents play somewhat tighter than average"),
+    (0.5, "Average looseness (or no reads yet this session)"),
+    (0.75, "Active opponents play somewhat looser than average"),
+    (1.0, "Active opponents voluntarily play almost every hand (very loose)"),
+)
+_OPP_PFR_VALUES = (
+    (0.0, "Active opponents almost never raise preflop (passive)"),
+    (0.25, "Somewhat less preflop raising than average"),
+    (0.5, "Average preflop aggression (or no reads yet this session)"),
+    (0.75, "Somewhat more preflop raising than average"),
+    (1.0, "Active opponents raise preflop almost every time they play (very aggressive)"),
+)
+_OPP_THREE_BET_VALUES = (
+    (0.0, "Active opponents almost never 3-bet when given the chance"),
+    (0.25, "Somewhat less 3-betting than average"),
+    (0.5, "Average 3-bet frequency (or no reads yet this session)"),
+    (0.75, "Somewhat more 3-betting than average"),
+    (1.0, "Active opponents 3-bet almost every chance they get"),
+)
+_OPP_FOLD_TO_THREE_BET_VALUES = (
+    (0.0, "Active opponents almost never fold to a 3-bet"),
+    (0.25, "Somewhat less likely than average to fold to a 3-bet"),
+    (0.5, "Average fold-to-3-bet rate (or no reads yet this session)"),
+    (0.75, "Somewhat more likely than average to fold to a 3-bet"),
+    (1.0, "Active opponents almost always fold to a 3-bet"),
+)
+_OPP_AGGRESSION_FREQ_VALUES = (
+    (0.0, "Active opponents almost never bet/raise postflop when they act (all calls)"),
+    (0.25, "Somewhat more call-heavy than average postflop"),
+    (0.5, "Average postflop aggression (or no reads yet this session)"),
+    (0.75, "Somewhat more bet/raise-heavy than average postflop"),
+    (1.0, "Active opponents almost always bet/raise rather than call postflop"),
+)
+_OPP_FOLD_VS_BET_VALUES = (
+    (0.0, "Active opponents almost never fold to a postflop bet (very sticky)"),
+    (0.25, "Somewhat less likely than average to fold postflop"),
+    (0.5, "Average postflop fold rate (or no reads yet this session)"),
+    (0.75, "Somewhat more likely than average to fold postflop"),
+    (1.0, "Active opponents almost always fold to a postflop bet"),
+)
+_OPP_SAMPLE_VALUES = (
+    (0.0, "No hands observed yet this session -- every other opponent read is a neutral default"),
+    (0.25, "A few hands observed -- reads are still mostly the neutral default"),
+    (0.5, "A moderate sample -- reads are meaningfully shrunk toward neutral"),
+    (0.75, "A solid sample -- reads are close to the raw observed rate"),
+    (1.0, "30+ hands observed -- reads are trustworthy"),
+)
+_VILLAIN_THREE_BET_VALUES = _OPP_THREE_BET_VALUES
+_VILLAIN_FOLD_VS_BET_VALUES = _OPP_FOLD_VS_BET_VALUES
+_VILLAIN_AGGRESSION_FREQ_VALUES = _OPP_AGGRESSION_FREQ_VALUES
+
+_OPP_VPIP_CHILDREN = _continuous_children("opp_vpip_norm", _OPP_VPIP_VALUES)
+_OPP_PFR_CHILDREN = _continuous_children("opp_pfr_norm", _OPP_PFR_VALUES)
+_OPP_THREE_BET_CHILDREN = _continuous_children("opp_three_bet_norm", _OPP_THREE_BET_VALUES)
+_OPP_FOLD_TO_THREE_BET_CHILDREN = _continuous_children(
+    "opp_fold_to_three_bet_norm", _OPP_FOLD_TO_THREE_BET_VALUES
+)
+_OPP_AGGRESSION_FREQ_CHILDREN = _continuous_children("opp_aggression_freq_norm", _OPP_AGGRESSION_FREQ_VALUES)
+_OPP_FOLD_VS_BET_CHILDREN = _continuous_children("opp_fold_vs_bet_norm", _OPP_FOLD_VS_BET_VALUES)
+_OPP_SAMPLE_CHILDREN = _continuous_children("opp_sample_norm", _OPP_SAMPLE_VALUES)
+_VILLAIN_THREE_BET_CHILDREN = _continuous_children("villain_three_bet_norm", _VILLAIN_THREE_BET_VALUES)
+_VILLAIN_FOLD_VS_BET_CHILDREN = _continuous_children("villain_fold_vs_bet_norm", _VILLAIN_FOLD_VS_BET_VALUES)
+_VILLAIN_AGGRESSION_FREQ_CHILDREN = _continuous_children(
+    "villain_aggression_freq_norm", _VILLAIN_AGGRESSION_FREQ_VALUES
+)
+
 _SEAT_ROLE_LABELS = {
     "UTG": "Under The Gun (UTG)", "HJ": "Hijack (HJ)", "CO": "Cutoff (CO)",
     "BTN": "Button (BTN)", "SB": "Small Blind (SB)", "BB": "Big Blind (BB)",
@@ -693,6 +762,108 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "else 0.",
         group="Draw Features",
     ),
+
+    # Opponent-tendency features: observed HUD-style stats accumulated over
+    # the current session's hands (see opponent_model.py), not derivable
+    # from this hand's cards/board alone -- this is what lets a genome
+    # condition on *how opponents have actually played* rather than only on
+    # the current situation, the missing ingredient for active exploitation.
+    # All default to a neutral 0.5 ("assume average") when nobody's been
+    # observed yet, and shrink toward that neutral value on small samples --
+    # pair with Opponent Sample Size to tell "genuinely average" apart from
+    # "no read yet."
+    FeatureSpec(
+        "opp_vpip_norm", "Opponent VPIP (Table Average)",
+        "Average, across every opponent still active in the hand, of their observed rate "
+        "of voluntarily putting chips in preflop (calling or raising rather than folding "
+        "or checking for free) over hands seen this session. Shrunk toward a neutral 0.5 "
+        "on small samples.",
+        kind="continuous", value_table=_OPP_VPIP_VALUES, group="Opponent Tendency Features",
+    ),
+    *_OPP_VPIP_CHILDREN,
+
+    FeatureSpec(
+        "opp_pfr_norm", "Opponent PFR (Table Average)",
+        "Average, across every opponent still active in the hand, of their observed rate "
+        "of raising preflop (rather than just calling or folding) over hands seen this "
+        "session. Shrunk toward a neutral 0.5 on small samples.",
+        kind="continuous", value_table=_OPP_PFR_VALUES, group="Opponent Tendency Features",
+    ),
+    *_OPP_PFR_CHILDREN,
+
+    FeatureSpec(
+        "opp_three_bet_norm", "Opponent 3-Bet % (Table Average)",
+        "Average, across every opponent still active in the hand, of their observed rate "
+        "of re-raising when facing exactly one preflop raise, among their chances to do "
+        "so this session. Shrunk toward a neutral 0.5 on small samples.",
+        kind="continuous", value_table=_OPP_THREE_BET_VALUES, group="Opponent Tendency Features",
+    ),
+    *_OPP_THREE_BET_CHILDREN,
+
+    FeatureSpec(
+        "opp_fold_to_three_bet_norm", "Opponent Fold to 3-Bet % (Table Average)",
+        "Average, across every opponent still active in the hand, of their observed rate "
+        "of folding when facing a preflop 3-bet, among their chances to do so this "
+        "session. Shrunk toward a neutral 0.5 on small samples.",
+        kind="continuous", value_table=_OPP_FOLD_TO_THREE_BET_VALUES, group="Opponent Tendency Features",
+    ),
+    *_OPP_FOLD_TO_THREE_BET_CHILDREN,
+
+    FeatureSpec(
+        "opp_aggression_freq_norm", "Opponent Postflop Aggression Frequency (Table Average)",
+        "Average, across every opponent still active in the hand, of their observed "
+        "postflop bet/raise rate -- (bets+raises) / (bets+raises+calls) -- over postflop "
+        "actions taken this session. Shrunk toward a neutral 0.5 on small samples.",
+        kind="continuous", value_table=_OPP_AGGRESSION_FREQ_VALUES, group="Opponent Tendency Features",
+    ),
+    *_OPP_AGGRESSION_FREQ_CHILDREN,
+
+    FeatureSpec(
+        "opp_fold_vs_bet_norm", "Opponent Fold vs Bet, Postflop (Table Average)",
+        "Average, across every opponent still active in the hand, of their observed rate "
+        "of folding when facing a postflop bet, among their chances to do so this "
+        "session. Shrunk toward a neutral 0.5 on small samples.",
+        kind="continuous", value_table=_OPP_FOLD_VS_BET_VALUES, group="Opponent Tendency Features",
+    ),
+    *_OPP_FOLD_VS_BET_CHILDREN,
+
+    FeatureSpec(
+        "opp_sample_norm", "Opponent Sample Size (Table Average)",
+        "Average, across every opponent still active in the hand, of how many hands "
+        "they've been observed for this session, divided by 30 and clipped to 0-1 -- how "
+        "much the six Opponent Tendency reads above should be trusted versus treated as "
+        "the neutral default.",
+        kind="continuous", value_table=_OPP_SAMPLE_VALUES, group="Opponent Tendency Features",
+    ),
+    *_OPP_SAMPLE_CHILDREN,
+
+    FeatureSpec(
+        "villain_three_bet_norm", "Current Aggressor's 3-Bet %",
+        "The observed 3-bet rate (see Opponent 3-Bet %) of specifically whichever player "
+        "made the last bet/raise this street -- the single opponent actually applying "
+        "pressure right now, not a table average. Neutral 0.5 if nobody has bet/raised "
+        "yet this street.",
+        kind="continuous", value_table=_VILLAIN_THREE_BET_VALUES, group="Opponent Tendency Features",
+    ),
+    *_VILLAIN_THREE_BET_CHILDREN,
+
+    FeatureSpec(
+        "villain_fold_vs_bet_norm", "Current Aggressor's Fold vs Bet, Postflop",
+        "The observed postflop fold-vs-bet rate (see Opponent Fold vs Bet, Postflop) of "
+        "specifically whichever player made the last bet/raise this street. Neutral 0.5 "
+        "if nobody has bet/raised yet this street.",
+        kind="continuous", value_table=_VILLAIN_FOLD_VS_BET_VALUES, group="Opponent Tendency Features",
+    ),
+    *_VILLAIN_FOLD_VS_BET_CHILDREN,
+
+    FeatureSpec(
+        "villain_aggression_freq_norm", "Current Aggressor's Postflop Aggression Frequency",
+        "The observed postflop aggression frequency (see Opponent Postflop Aggression "
+        "Frequency) of specifically whichever player made the last bet/raise this "
+        "street. Neutral 0.5 if nobody has bet/raised yet this street.",
+        kind="continuous", value_table=_VILLAIN_AGGRESSION_FREQ_VALUES, group="Opponent Tendency Features",
+    ),
+    *_VILLAIN_AGGRESSION_FREQ_CHILDREN,
 ]
 
 FEATURE_NAMES = [spec.key for spec in FEATURE_SPECS]
@@ -734,6 +905,20 @@ class Situation:
     is_aggressor: bool  # did I make the last bet/raise this street?
     starting_stack: float
     big_blind: float = 2.0  # lets stack depth be expressed in actual BB (see gto.py's SpotMatcher)
+
+    # Opponent-tendency reads (see opponent_model.py), already 0-1 rates --
+    # all default to a neutral 0.5 (0.0 for sample size) so any caller that
+    # doesn't opt into opponent modeling still gets a valid Situation.
+    opp_vpip: float = 0.5
+    opp_pfr: float = 0.5
+    opp_three_bet: float = 0.5
+    opp_fold_to_three_bet: float = 0.5
+    opp_aggression_freq: float = 0.5
+    opp_fold_vs_bet: float = 0.5
+    opp_sample: float = 0.0
+    villain_three_bet: float = 0.5
+    villain_fold_vs_bet: float = 0.5
+    villain_aggression_freq: float = 0.5
 
 
 def _clip01(x: float) -> float:
@@ -901,6 +1086,16 @@ def extract_features(sit: Situation) -> np.ndarray:
         "num_raises_norm": num_raises_norm,
         "pot_type_norm": pot_type_raises / 3.0,
         "stack_depth_norm": stack_depth_norm,
+        "opp_vpip_norm": _clip01(sit.opp_vpip),
+        "opp_pfr_norm": _clip01(sit.opp_pfr),
+        "opp_three_bet_norm": _clip01(sit.opp_three_bet),
+        "opp_fold_to_three_bet_norm": _clip01(sit.opp_fold_to_three_bet),
+        "opp_aggression_freq_norm": _clip01(sit.opp_aggression_freq),
+        "opp_fold_vs_bet_norm": _clip01(sit.opp_fold_vs_bet),
+        "opp_sample_norm": _clip01(sit.opp_sample),
+        "villain_three_bet_norm": _clip01(sit.villain_three_bet),
+        "villain_fold_vs_bet_norm": _clip01(sit.villain_fold_vs_bet),
+        "villain_aggression_freq_norm": _clip01(sit.villain_aggression_freq),
     }
     for i, seat_role_name in enumerate(SEAT_ROLES):
         values[_SEAT_ROLE_KEYS[seat_role_name]] = float(role_index == i)
@@ -939,6 +1134,15 @@ def extract_features(sit: Situation) -> np.ndarray:
     for feature_key, raw_value in (
         ("call_amount_norm", call_amount_norm), ("spr_norm", spr_norm),
         ("position_norm", position_norm), ("stack_depth_norm", stack_depth_norm),
+        ("opp_vpip_norm", values["opp_vpip_norm"]), ("opp_pfr_norm", values["opp_pfr_norm"]),
+        ("opp_three_bet_norm", values["opp_three_bet_norm"]),
+        ("opp_fold_to_three_bet_norm", values["opp_fold_to_three_bet_norm"]),
+        ("opp_aggression_freq_norm", values["opp_aggression_freq_norm"]),
+        ("opp_fold_vs_bet_norm", values["opp_fold_vs_bet_norm"]),
+        ("opp_sample_norm", values["opp_sample_norm"]),
+        ("villain_three_bet_norm", values["villain_three_bet_norm"]),
+        ("villain_fold_vs_bet_norm", values["villain_fold_vs_bet_norm"]),
+        ("villain_aggression_freq_norm", values["villain_aggression_freq_norm"]),
     ):
         nearest = _nearest_bucket_index(raw_value)
         for i in range(len(_BUCKET_POINTS)):

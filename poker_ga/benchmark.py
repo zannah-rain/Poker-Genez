@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from game import GameConfig, SeatState, play_hand
+from opponent_model import OpponentModel
 from player import Player
 
 SEATS_PER_SIDE = 3
@@ -53,6 +54,7 @@ def _play_side_match(
     order = rng.permutation(len(seats))  # so "current" isn't always dealt the button first
     seats = [seats[i] for i in order]
     sides = [sides[i] for i in order]
+    opp_model = OpponentModel()
 
     current_net = checkpoint_net = 0.0
     current_hands = checkpoint_hands = 0
@@ -66,7 +68,7 @@ def _play_side_match(
             else:
                 checkpoint_hands += 1
 
-        play_hand(seats, button_idx % len(seats), game_config, rng)
+        play_hand(seats, button_idx % len(seats), game_config, rng, opp_model=opp_model)
         hands_played += 1
         button_idx = (button_idx + 1) % len(seats)
 

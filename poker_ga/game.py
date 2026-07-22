@@ -14,6 +14,7 @@ from cards import Card, Deck
 from evaluator import evaluate_best
 from features import Situation
 from genome import BET_RAISE, CHECK_CALL, FOLD
+from opponent_model import OpponentModel, compute_opponent_features
 from player import Player
 from seating import blind_indices, preflop_order
 
@@ -115,12 +116,16 @@ def betting_round(
     rng: np.random.Generator,
     stats: HandStats | None = None,
     log: list | None = None,
+    opp_model: OpponentModel | None = None,
 ) -> tuple[float, int]:
     """Runs one betting round in-place on `seats`. Returns (updated pot,
     number of raises made this street). `preflop_raise_count` is the
     already-final preflop raise count on postflop streets (where this
     street's own raise count resets to 0 but Pot Type shouldn't) -- on the
-    preflop street itself, it's unused since the live count IS the pot type."""
+    preflop street itself, it's unused since the live count IS the pot type.
+    `opp_model`, if given, both supplies each decision's opponent-tendency
+    features and gets updated with the outcome of that decision -- see
+    opponent_model.py."""
     current_bet = starting_bet
     last_raise_increment = min_bet
     last_aggressor: int | None = None
@@ -144,6 +149,9 @@ def betting_round(
             legal_actions.append(BET_RAISE)
 
         position = order.index(i)
+        opponent_ids = [seats[j].player.player_id for j in non_folded if j != i]
+        villain_id = seats[last_aggressor].player.player_id if last_aggressor is not None else None
+        opp_features = compute_opponent_features(opp_model, opponent_ids, villain_id)
         situation = Situation(
             hole=seats[i].hole,
             board=board,
@@ -163,8 +171,24 @@ def betting_round(
             is_aggressor=(last_aggressor == i),
             starting_stack=starting_stack,
             big_blind=min_bet,
+            opp_vpip=opp_features.opp_vpip,
+            opp_pfr=opp_features.opp_pfr,
+            opp_three_bet=opp_features.opp_three_bet,
+            opp_fold_to_three_bet=opp_features.opp_fold_to_three_bet,
+            opp_aggression_freq=opp_features.opp_aggression_freq,
+            opp_fold_vs_bet=opp_features.opp_fold_vs_bet,
+            opp_sample=opp_features.opp_sample,
+            villain_three_bet=opp_features.villain_three_bet,
+            villain_fold_vs_bet=opp_features.villain_fold_vs_bet,
+            villain_aggression_freq=opp_features.villain_aggression_freq,
         )
         action, raw_bet_size = seats[i].player.genome.decide(situation, legal_actions, rng)
+
+        if opp_model is not None:
+            opp_model.record_action(
+                seats[i].player.player_id, street == PREFLOP, action,
+                max(call_amount, 0.0), num_raises, legal_actions,
+            )
 
         if stats is not None:
             stats.action_counts[action] += 1
@@ -267,12 +291,17 @@ def play_hand(
     config: GameConfig,
     rng: np.random.Generator,
     stats: HandStats | None = None,
+    opp_model: OpponentModel | None = None,
 ) -> HandResult:
     """Plays a single hand in-place on `seats` (a list of currently-alive
-    players at the table). Returns the payouts and final board."""
+    players at the table). Returns the payouts and final board. `opp_model`,
+    if given, has its per-hand bookkeeping reset here (see
+    OpponentModel.start_hand) and is threaded into every betting round."""
     n = len(seats)
     for s in seats:
         s.reset_for_hand()
+    if opp_model is not None:
+        opp_model.start_hand([s.player.player_id for s in seats])
 
     deck = Deck(rng=_np_rng_to_random(rng))
     for i in range(n):
@@ -311,7 +340,7 @@ def play_hand(
                 seats, order, pot, config.big_blind, starting_bet, board, street,
                 config.starting_stack, button_idx, preflop_raise_count,
                 config.max_raises_per_street, config.min_raise_fraction_of_pot, rng,
-                stats=stats,
+                stats=stats, opp_model=opp_model,
             )
             if street == PREFLOP:
                 preflop_raise_count = street_num_raises

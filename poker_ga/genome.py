@@ -252,6 +252,15 @@ class Genome:
         which treats genomes as opaque flat vectors), so it's what keeps
         weights on-alphabet without ga.py needing to know which genes are
         "feature weights" versus continuous scalars."""
+        expected_len = 2 * NUM_FEATURES + 7 + NUM_GTO_SPOTS
+        if vec.shape[-1] != expected_len:
+            raise ValueError(
+                f"Genome vector has {vec.shape[-1]} genes but the current feature/spot "
+                f"catalog expects {expected_len} (NUM_FEATURES={NUM_FEATURES}, "
+                f"NUM_GTO_SPOTS={NUM_GTO_SPOTS}) -- this population was saved against a "
+                "different feature set and can't be reloaded as-is; start from scratch "
+                "(or drop --reload-previous) instead."
+            )
         i = 0
         weights_v = quantize(vec[i : i + NUM_FEATURES])
         i += NUM_FEATURES

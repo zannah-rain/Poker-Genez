@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from game import GameConfig, HandStats, SeatState, play_hand
+from opponent_model import OpponentModel
 from player import Player
 
 TABLE_SIZE = 6
@@ -48,6 +49,11 @@ def run_session(
     """
     pool = backfill_pool if backfill_pool else table_players
     seats = [SeatState(player=p, stack=game_config.starting_stack) for p in table_players]
+    # Fresh per session, not per hand or per Player -- opponent reads should
+    # reflect this table's play so far this sitting, the way a live HUD
+    # resets rather than a permanent cross-session dossier (see
+    # opponent_model.py).
+    opp_model = OpponentModel()
 
     net: dict[int, float] = {}
     hands_survived: dict[int, int] = {}
@@ -59,7 +65,7 @@ def run_session(
         for s in seats:
             hands_survived[s.player.player_id] = hands_survived.get(s.player.player_id, 0) + 1
 
-        play_hand(seats, button_idx % len(seats), game_config, rng, stats=stats)
+        play_hand(seats, button_idx % len(seats), game_config, rng, stats=stats, opp_model=opp_model)
         hands_played += 1
         button_idx = (button_idx + 1) % len(seats)
 
