@@ -70,10 +70,10 @@ class TestParseArgs:
         args = parse_args()
         assert args.reload_previous is False
 
-    def test_workers_defaults_to_sequential(self, monkeypatch):
+    def test_workers_defaults_to_all_cpu_cores(self, monkeypatch):
         monkeypatch.setattr("sys.argv", ["main.py"])
         args = parse_args()
-        assert args.workers == 1
+        assert args.workers == 0  # 0 means "use every available CPU core"
 
     def test_workers_override(self, monkeypatch):
         monkeypatch.setattr("sys.argv", ["main.py", "--workers", "4"])

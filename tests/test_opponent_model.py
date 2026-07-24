@@ -2,7 +2,7 @@ import pytest
 
 from genome import BET_RAISE, CHECK_CALL, FOLD
 from opponent_model import (
-    CONFIDENCE_HANDS, NEUTRAL, SAMPLE_NORM_HANDS, OpponentModel, OpponentStats,
+    CONFIDENCE_HANDS, NEUTRAL, OpponentModel, OpponentStats,
     compute_opponent_features,
 )
 
@@ -16,15 +16,6 @@ class TestOpponentStatsDefaults:
         assert stats.fold_to_three_bet_rate() == NEUTRAL
         assert stats.aggression_freq() == NEUTRAL
         assert stats.fold_vs_bet_rate() == NEUTRAL
-
-    def test_sample_norm_zero_with_no_hands(self):
-        assert OpponentStats().sample_norm() == 0.0
-
-    def test_sample_norm_scales_and_clips(self):
-        stats = OpponentStats(hands=int(SAMPLE_NORM_HANDS / 2))
-        assert stats.sample_norm() == pytest.approx(0.5)
-        stats_full = OpponentStats(hands=int(SAMPLE_NORM_HANDS * 10))
-        assert stats_full.sample_norm() == 1.0
 
 
 class TestRateShrinkage:
@@ -183,7 +174,6 @@ class TestComputeOpponentFeatures:
     def test_no_model_returns_all_neutral_defaults(self):
         features = compute_opponent_features(None, [2, 3], villain_id=2)
         assert features.opp_vpip == NEUTRAL
-        assert features.opp_sample == 0.0
         assert features.villain_three_bet == NEUTRAL
 
     def test_no_active_opponents_returns_defaults(self):
@@ -217,10 +207,3 @@ class TestComputeOpponentFeatures:
             model.record_action(2, False, BET_RAISE, call_amount=0.0, num_raises_before=0, legal_actions=[CHECK_CALL, BET_RAISE])
         features = compute_opponent_features(model, [2, 3], villain_id=2)
         assert features.villain_aggression_freq == pytest.approx(1.0, abs=0.05)
-
-    def test_opp_sample_reflects_hands_observed(self):
-        model = OpponentModel()
-        for _ in range(int(SAMPLE_NORM_HANDS)):
-            model.start_hand([2])
-        features = compute_opponent_features(model, [2], villain_id=None)
-        assert features.opp_sample == pytest.approx(1.0)

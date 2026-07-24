@@ -181,7 +181,6 @@ def betting_round(
             opp_fold_to_three_bet=opp_features.opp_fold_to_three_bet,
             opp_aggression_freq=opp_features.opp_aggression_freq,
             opp_fold_vs_bet=opp_features.opp_fold_vs_bet,
-            opp_sample=opp_features.opp_sample,
             villain_three_bet=opp_features.villain_three_bet,
             villain_fold_vs_bet=opp_features.villain_fold_vs_bet,
             villain_aggression_freq=opp_features.villain_aggression_freq,

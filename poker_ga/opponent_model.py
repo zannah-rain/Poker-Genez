@@ -16,9 +16,7 @@ username around.
 The six rate stats below (VPIP, PFR, 3-bet%, fold-to-3-bet%, postflop
 aggression frequency, fold-vs-bet) are the standard HUD stats cited across
 poker theory for reading preflop looseness/aggression and postflop
-folding/barreling tendencies. A 7th, sample size, isn't a tendency itself --
-it tells the genome how much to trust the other six, since a rate computed
-from one hand is noise, not a read.
+folding/barreling tendencies.
 """
 
 from __future__ import annotations
@@ -36,9 +34,6 @@ NEUTRAL = 0.5
 # reads close to NEUTRAL, not a deterministic 100%, until real observations
 # pile up past this count.
 CONFIDENCE_HANDS = 20.0
-# Hands of evidence considered "fully sampled" for the sample-size
-# confidence feature itself (opp_sample_norm), clipped at 1.0 beyond this.
-SAMPLE_NORM_HANDS = 30.0
 
 
 def _rate(hits: int, chances: int) -> float:
@@ -83,9 +78,6 @@ class OpponentStats:
 
     def fold_vs_bet_rate(self) -> float:
         return _rate(self.fold_vs_bet_hits, self.fold_vs_bet_chances)
-
-    def sample_norm(self) -> float:
-        return min(self.hands / SAMPLE_NORM_HANDS, 1.0)
 
 
 @dataclass
@@ -172,7 +164,6 @@ class OpponentFeatures:
     opp_fold_to_three_bet: float = NEUTRAL
     opp_aggression_freq: float = NEUTRAL
     opp_fold_vs_bet: float = NEUTRAL
-    opp_sample: float = 0.0
     villain_three_bet: float = NEUTRAL
     villain_fold_vs_bet: float = NEUTRAL
     villain_aggression_freq: float = NEUTRAL
@@ -198,7 +189,6 @@ def compute_opponent_features(
         opp_fold_to_three_bet=sum(s.fold_to_three_bet_rate() for s in opponent_stats) / n,
         opp_aggression_freq=sum(s.aggression_freq() for s in opponent_stats) / n,
         opp_fold_vs_bet=sum(s.fold_vs_bet_rate() for s in opponent_stats) / n,
-        opp_sample=sum(s.sample_norm() for s in opponent_stats) / n,
     )
     if villain_id is None:
         return opp

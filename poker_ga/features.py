@@ -258,13 +258,6 @@ _OPP_FOLD_VS_BET_VALUES = (
     (0.75, "Somewhat more likely than average to fold postflop"),
     (1.0, "Active opponents almost always fold to a postflop bet"),
 )
-_OPP_SAMPLE_VALUES = (
-    (0.0, "No hands observed yet this session -- every other opponent read is a neutral default"),
-    (0.25, "A few hands observed -- reads are still mostly the neutral default"),
-    (0.5, "A moderate sample -- reads are meaningfully shrunk toward neutral"),
-    (0.75, "A solid sample -- reads are close to the raw observed rate"),
-    (1.0, "30+ hands observed -- reads are trustworthy"),
-)
 _VILLAIN_THREE_BET_VALUES = _OPP_THREE_BET_VALUES
 _VILLAIN_FOLD_VS_BET_VALUES = _OPP_FOLD_VS_BET_VALUES
 _VILLAIN_AGGRESSION_FREQ_VALUES = _OPP_AGGRESSION_FREQ_VALUES
@@ -277,7 +270,6 @@ _OPP_FOLD_TO_THREE_BET_CHILDREN = _continuous_children(
 )
 _OPP_AGGRESSION_FREQ_CHILDREN = _continuous_children("opp_aggression_freq_norm", _OPP_AGGRESSION_FREQ_VALUES)
 _OPP_FOLD_VS_BET_CHILDREN = _continuous_children("opp_fold_vs_bet_norm", _OPP_FOLD_VS_BET_VALUES)
-_OPP_SAMPLE_CHILDREN = _continuous_children("opp_sample_norm", _OPP_SAMPLE_VALUES)
 _VILLAIN_THREE_BET_CHILDREN = _continuous_children("villain_three_bet_norm", _VILLAIN_THREE_BET_VALUES)
 _VILLAIN_FOLD_VS_BET_CHILDREN = _continuous_children("villain_fold_vs_bet_norm", _VILLAIN_FOLD_VS_BET_VALUES)
 _VILLAIN_AGGRESSION_FREQ_CHILDREN = _continuous_children(
@@ -787,9 +779,7 @@ FEATURE_SPECS: list[FeatureSpec] = [
     # condition on *how opponents have actually played* rather than only on
     # the current situation, the missing ingredient for active exploitation.
     # All default to a neutral 0.5 ("assume average") when nobody's been
-    # observed yet, and shrink toward that neutral value on small samples --
-    # pair with Opponent Sample Size to tell "genuinely average" apart from
-    # "no read yet."
+    # observed yet, and shrink toward that neutral value on small samples.
     FeatureSpec(
         "opp_vpip_norm", "Opponent VPIP (Table Average)",
         "Average, across every opponent still active in the hand, of their observed rate "
@@ -844,16 +834,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         kind="continuous", value_table=_OPP_FOLD_VS_BET_VALUES, group="Opponent Tendency Features",
     ),
     *_OPP_FOLD_VS_BET_CHILDREN,
-
-    FeatureSpec(
-        "opp_sample_norm", "Opponent Sample Size (Table Average)",
-        "Average, across every opponent still active in the hand, of how many hands "
-        "they've been observed for this session, divided by 30 and clipped to 0-1 -- how "
-        "much the six Opponent Tendency reads above should be trusted versus treated as "
-        "the neutral default.",
-        kind="continuous", value_table=_OPP_SAMPLE_VALUES, group="Opponent Tendency Features",
-    ),
-    *_OPP_SAMPLE_CHILDREN,
 
     FeatureSpec(
         "villain_three_bet_norm", "Current Aggressor's 3-Bet %",
@@ -931,15 +911,14 @@ class Situation:
     raised_positions: frozenset[str] = field(default_factory=frozenset)
 
     # Opponent-tendency reads (see opponent_model.py), already 0-1 rates --
-    # all default to a neutral 0.5 (0.0 for sample size) so any caller that
-    # doesn't opt into opponent modeling still gets a valid Situation.
+    # all default to a neutral 0.5 so any caller that doesn't opt into
+    # opponent modeling still gets a valid Situation.
     opp_vpip: float = 0.5
     opp_pfr: float = 0.5
     opp_three_bet: float = 0.5
     opp_fold_to_three_bet: float = 0.5
     opp_aggression_freq: float = 0.5
     opp_fold_vs_bet: float = 0.5
-    opp_sample: float = 0.0
     villain_three_bet: float = 0.5
     villain_fold_vs_bet: float = 0.5
     villain_aggression_freq: float = 0.5
@@ -1093,7 +1072,6 @@ _BUCKET_KEY_FAMILIES = {
     "opp_fold_to_three_bet_norm": _OPP_FOLD_TO_THREE_BET_CHILDREN,
     "opp_aggression_freq_norm": _OPP_AGGRESSION_FREQ_CHILDREN,
     "opp_fold_vs_bet_norm": _OPP_FOLD_VS_BET_CHILDREN,
-    "opp_sample_norm": _OPP_SAMPLE_CHILDREN,
     "villain_three_bet_norm": _VILLAIN_THREE_BET_CHILDREN,
     "villain_fold_vs_bet_norm": _VILLAIN_FOLD_VS_BET_CHILDREN,
     "villain_aggression_freq_norm": _VILLAIN_AGGRESSION_FREQ_CHILDREN,
@@ -1151,7 +1129,6 @@ def extract_features(sit: Situation) -> np.ndarray:
         "opp_fold_to_three_bet_norm": _clip01(sit.opp_fold_to_three_bet),
         "opp_aggression_freq_norm": _clip01(sit.opp_aggression_freq),
         "opp_fold_vs_bet_norm": _clip01(sit.opp_fold_vs_bet),
-        "opp_sample_norm": _clip01(sit.opp_sample),
         "villain_three_bet_norm": _clip01(sit.villain_three_bet),
         "villain_fold_vs_bet_norm": _clip01(sit.villain_fold_vs_bet),
         "villain_aggression_freq_norm": _clip01(sit.villain_aggression_freq),
@@ -1198,7 +1175,6 @@ def extract_features(sit: Situation) -> np.ndarray:
         ("opp_fold_to_three_bet_norm", values["opp_fold_to_three_bet_norm"]),
         ("opp_aggression_freq_norm", values["opp_aggression_freq_norm"]),
         ("opp_fold_vs_bet_norm", values["opp_fold_vs_bet_norm"]),
-        ("opp_sample_norm", values["opp_sample_norm"]),
         ("villain_three_bet_norm", values["villain_three_bet_norm"]),
         ("villain_fold_vs_bet_norm", values["villain_fold_vs_bet_norm"]),
         ("villain_aggression_freq_norm", values["villain_aggression_freq_norm"]),

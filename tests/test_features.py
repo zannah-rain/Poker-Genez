@@ -405,16 +405,19 @@ class TestOpponentTendencyFeatures:
     def test_defaults_are_neutral(self):
         values = values_by_key(make_situation())
         assert values["opp_vpip_norm"] == 0.5
-        assert values["opp_sample_norm"] == 0.0
 
     def test_passes_through_situation_values(self):
         values = values_by_key(make_situation(
-            opp_vpip=0.8, opp_pfr=0.3, villain_three_bet=0.9, opp_sample=0.6,
+            opp_vpip=0.8, opp_pfr=0.3, villain_three_bet=0.9,
         ))
         assert values["opp_vpip_norm"] == pytest.approx(0.8)
         assert values["opp_pfr_norm"] == pytest.approx(0.3)
         assert values["villain_three_bet_norm"] == pytest.approx(0.9)
-        assert values["opp_sample_norm"] == pytest.approx(0.6)
+
+    def test_opponent_sample_size_feature_was_removed(self):
+        # "doesn't interact with any other features" -- dropped as a genome
+        # feature entirely, not just left unused.
+        assert "opp_sample_norm" not in FEATURE_NAMES
 
     def test_clips_out_of_range_values(self):
         values = values_by_key(make_situation(opp_vpip=1.5))
