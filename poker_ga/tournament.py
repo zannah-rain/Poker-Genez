@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import os
+from concurrent.futures import Executor, as_completed
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -17,7 +18,7 @@ from features import FEATURE_GROUPS, FEATURE_SPECS, group_of
 from game import GameConfig
 from genome import WEIGHT_ALPHABET
 from player import Player
-from simulate import SimConfig, run_session
+from simulate import SimConfig, _executor_scope, run_session
 
 
 @dataclass
@@ -56,17 +57,37 @@ class PlayerStats:
         return (self.total_net_chips / big_blind) / self.total_hands_survived * 100.0
 
 
+def _play_one_tournament_table(
+    table_players: list[Player],
+    game_config: GameConfig,
+    backfill_pool: list[Player],
+    rng: np.random.Generator,
+) -> dict:
+    """One table's worth of work for run_final_tournament. Deliberately a
+    plain module-level function (not a closure/lambda) so it can be pickled
+    and sent to a worker process."""
+    return run_session(table_players, game_config, rng, backfill_pool=backfill_pool)
+
+
 def run_final_tournament(
     players: list[Player],
     game_config: GameConfig,
     sim_config: SimConfig,
     rng: np.random.Generator,
     show_progress: bool = True,
+    num_workers: int = 1,
+    executor: Executor | None = None,
 ) -> dict[int, PlayerStats]:
     """Runs many rounds of random re-seating (more than a normal GA
     generation) and accumulates detailed per-player statistics, using
     simulate.run_session (which refills busted seats with a fresh player
-    from the whole population rather than ending the session early)."""
+    from the whole population rather than ending the session early).
+
+    See simulate.run_generation's docstring for what `num_workers`/`executor`
+    do and why a parallel run (num_workers > 1) doesn't reproduce the exact
+    same hands as a sequential one (num_workers=1, the default) for the same
+    seed -- the same trade-off applies here, table matches being the
+    parallel unit for the same reasons."""
     stats = {p.player_id: PlayerStats(player_id=p.player_id, label=p.label) for p in players}
 
     # This is usually the single slowest step of a run (many more rounds
@@ -76,26 +97,50 @@ def run_final_tournament(
     total_tables = sim_config.rounds_per_generation * tables_per_round
     progress = tqdm(total=total_tables, desc="final tournament", unit="table", disable=not show_progress)
 
-    for _ in range(sim_config.rounds_per_generation):
-        order = rng.permutation(len(players))
-        shuffled = [players[i] for i in order]
-        for start in range(0, len(shuffled), sim_config.table_size):
-            table = shuffled[start : start + sim_config.table_size]
-            if len(table) < 2:
-                progress.update(1)
-                continue
-            result = run_session(table, game_config, rng, backfill_pool=players)
-            for pid, net in result["net"].items():
-                s = stats[pid]
-                s.sessions_played += 1
-                s.total_net_chips += net
-                s.total_hands_survived += result["hands_survived"][pid]
-                s.session_results.append(net)
-                if result["busted"][pid]:
-                    s.busts += 1
-                if result["winner_id"] == pid:
-                    s.sessions_won += 1
-            progress.update(1)
+    def _accumulate(result: dict) -> None:
+        for pid, net in result["net"].items():
+            s = stats[pid]
+            s.sessions_played += 1
+            s.total_net_chips += net
+            s.total_hands_survived += result["hands_survived"][pid]
+            s.session_results.append(net)
+            if result["busted"][pid]:
+                s.busts += 1
+            if result["winner_id"] == pid:
+                s.sessions_won += 1
+        progress.update(1)
+
+    if num_workers <= 1:
+        for _ in range(sim_config.rounds_per_generation):
+            order = rng.permutation(len(players))
+            shuffled = [players[i] for i in order]
+            for start in range(0, len(shuffled), sim_config.table_size):
+                table = shuffled[start : start + sim_config.table_size]
+                if len(table) < 2:
+                    progress.update(1)
+                    continue
+                result = run_session(table, game_config, rng, backfill_pool=players)
+                _accumulate(result)
+    else:
+        tables = []
+        for _ in range(sim_config.rounds_per_generation):
+            order = rng.permutation(len(players))
+            shuffled = [players[i] for i in order]
+            for start in range(0, len(shuffled), sim_config.table_size):
+                table = shuffled[start : start + sim_config.table_size]
+                if len(table) >= 2:
+                    tables.append(table)
+                else:
+                    progress.update(1)
+
+        table_rngs = rng.spawn(len(tables))
+        with _executor_scope(executor, num_workers) as pool:
+            futures = [
+                pool.submit(_play_one_tournament_table, table, game_config, players, table_rng)
+                for table, table_rng in zip(tables, table_rngs)
+            ]
+            for future in as_completed(futures):
+                _accumulate(future.result())
 
     progress.close()
     return stats

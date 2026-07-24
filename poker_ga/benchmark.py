@@ -21,6 +21,7 @@ first.
 from __future__ import annotations
 
 import math
+from concurrent.futures import Executor, as_completed
 from dataclasses import dataclass
 
 import numpy as np
@@ -29,6 +30,7 @@ from tqdm import tqdm
 from game import GameConfig, SeatState, play_hand
 from opponent_model import OpponentModel
 from player import Player
+from simulate import _executor_scope
 
 SEATS_PER_SIDE = 3
 
@@ -88,6 +90,22 @@ def _play_side_match(
             checkpoint_net += s.stack - game_config.starting_stack
 
     return current_net, checkpoint_net, current_hands, checkpoint_hands
+
+
+def _play_one_bb100_sample(
+    current_players: list[Player],
+    checkpoint_players: list[Player],
+    game_config: GameConfig,
+    rng: np.random.Generator,
+) -> float:
+    """Plays one 3-vs-3 table and reduces it to the current side's bb/100 --
+    the one independent sample run_benchmark_until_resolved accumulates.
+    Deliberately a plain module-level function (not a closure/lambda) so it
+    can be pickled and sent to a worker process."""
+    cur_net, _chk_net, cur_hands, _chk_hands = _play_side_match(
+        current_players, checkpoint_players, game_config, rng,
+    )
+    return (cur_net / game_config.big_blind) / cur_hands * 100.0 if cur_hands else 0.0
 
 
 def _inverse_normal_cdf(p: float) -> float:
@@ -170,6 +188,8 @@ def run_benchmark_until_resolved(
     table_batch: int = 50,
     p_value: float = 0.05,
     show_progress: bool = True,
+    num_workers: int = 1,
+    executor: Executor | None = None,
 ) -> BenchmarkOutcome:
     """Plays 3-vs-3 tables against the checkpoint one at a time, treating
     each table's current-side bb/100 as one independent sample. After the
@@ -188,7 +208,13 @@ def run_benchmark_until_resolved(
     across each batch and prints an interim status line -- tables played so
     far, the running bb/100 edge and its CI, resolved or not -- after every
     batch, so a slow run isn't silent while it works out which way the
-    edge points."""
+    edge points.
+
+    `num_workers`/`executor` play each batch's tables across that many
+    worker processes instead of one at a time -- see
+    simulate.run_generation's docstring for the same option there, including
+    why a parallel run doesn't reproduce the exact same tables as
+    num_workers=1 (the default) for the same seed."""
     if min_tables < 2:
         raise ValueError("min_tables must be at least 2 to compute a confidence interval.")
     if table_batch < 1:
@@ -202,13 +228,22 @@ def run_benchmark_until_resolved(
             total=batch_size, desc=f"benchmark ({len(samples)}-{target} tables)",
             unit="table", disable=not show_progress, leave=False,
         ) as progress:
-            while len(samples) < target:
-                cur_net, _chk_net, cur_hands, _chk_hands = _play_side_match(
-                    current_players, checkpoint_players, game_config, rng,
-                )
-                bb100 = (cur_net / game_config.big_blind) / cur_hands * 100.0 if cur_hands else 0.0
-                samples.append(bb100)
-                progress.update(1)
+            if num_workers <= 1:
+                while len(samples) < target:
+                    samples.append(
+                        _play_one_bb100_sample(current_players, checkpoint_players, game_config, rng)
+                    )
+                    progress.update(1)
+            else:
+                batch_rngs = rng.spawn(batch_size)
+                with _executor_scope(executor, num_workers) as pool:
+                    futures = [
+                        pool.submit(_play_one_bb100_sample, current_players, checkpoint_players, game_config, table_rng)
+                        for table_rng in batch_rngs
+                    ]
+                    for future in as_completed(futures):
+                        samples.append(future.result())
+                        progress.update(1)
 
         ci_low, ci_high = confidence_interval(samples, p_value)
         mean = float(np.mean(samples))

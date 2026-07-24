@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import os
 import time
+from concurrent.futures import Executor, ProcessPoolExecutor
+from contextlib import nullcontext
 
 import numpy as np
 
@@ -144,21 +146,24 @@ def parse_args() -> argparse.Namespace:
         "--migration-size", type=int, default=3,
         help="How many of an island's best genomes migrate to the next island per migration event.",
     )
+    p.add_argument(
+        "--workers", type=int, default=0,
+        help="Number of worker processes to spread table matches across (used for the "
+        "per-generation fitness pass, the checkpoint benchmark, and the final tournament). "
+        "1 is fully sequential -- identical to this project's original "
+        "single-process behavior, including exact reproducibility for a given --seed. Table "
+        "matches are fully independent of each other, so this parallelizes almost for free, "
+        "but a parallel run necessarily consumes randomness differently than a sequential "
+        "one (each table needs its own independent random stream rather than fighting over "
+        "one shared one), so --workers > 1 will not reproduce the exact same hands as "
+        "--workers 1 for the same --seed -- only the same results run-to-run for a fixed "
+        "(--seed, --workers) pair. 0 or a negative number means 'use every available CPU "
+        "core'.",
+    )
     return p.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    if args.num_islands < 1:
-        raise SystemExit("--num-islands must be at least 1.")
-    if args.population % (args.num_islands * 6) != 0:
-        raise SystemExit(
-            f"--population must be a multiple of --num-islands * 6 "
-            f"({args.num_islands * 6}) for clean 6-max seating within each island."
-        )
-
-    rng = np.random.default_rng(args.seed)
-
+def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_workers: int, executor: Executor | None) -> None:
     island_config = IslandConfig(
         num_islands=args.num_islands,
         migration_interval=args.migration_interval,
@@ -220,7 +225,10 @@ def main() -> None:
         for i, island in enumerate(island_model.islands):
             desc = f"gen {gen} eval (island {i + 1}/{len(island_model.islands)})" if len(island_model.islands) > 1 \
                 else f"gen {gen} eval"
-            raw_fitness, gen_stats = run_generation(island.players, game_config, sim_config, rng, progress_desc=desc)
+            raw_fitness, gen_stats = run_generation(
+                island.players, game_config, sim_config, rng, progress_desc=desc,
+                num_workers=num_workers, executor=executor,
+            )
             fitness_by_island.append(apply_sparsity_penalty(island.players, raw_fitness, args.sparsity_penalty))
             gen_stats_by_island.append(gen_stats)
 
@@ -273,6 +281,7 @@ def main() -> None:
                     max_tables=args.benchmark_max_tables,
                     table_batch=args.benchmark_table_batch,
                     p_value=args.benchmark_p_value,
+                    num_workers=num_workers, executor=executor,
                 )
                 if outcome.resolved:
                     verdict = "IMPROVED" if outcome.improved else "REGRESSED"
@@ -324,7 +333,10 @@ def main() -> None:
         max_hands_per_session=args.final_max_hands,
     )
     t0 = time.time()
-    final_stats = run_final_tournament(all_players, final_game_config, final_sim_config, rng)
+    final_stats = run_final_tournament(
+        all_players, final_game_config, final_sim_config, rng,
+        num_workers=num_workers, executor=executor,
+    )
     ranked = rank_players(all_players, final_stats, sparsity_penalty=args.sparsity_penalty)
     export_top_n(ranked, final_stats, final_game_config, args.top_n, final_out_dir)
 
@@ -343,6 +355,30 @@ def main() -> None:
         )
     print(f"Strategy reports written to {final_out_dir}/")
     print(f"Full ranked population ({len(ranked)} genomes) saved to {population_path} for --reload-previous.")
+
+
+def main() -> None:
+    args = parse_args()
+    if args.num_islands < 1:
+        raise SystemExit("--num-islands must be at least 1.")
+    if args.population % (args.num_islands * 6) != 0:
+        raise SystemExit(
+            f"--population must be a multiple of --num-islands * 6 "
+            f"({args.num_islands * 6}) for clean 6-max seating within each island."
+        )
+
+    rng = np.random.default_rng(args.seed)
+    num_workers = args.workers if args.workers > 0 else (os.cpu_count() or 1)
+
+    # A single, long-lived worker pool reused for the whole run (per-generation
+    # fitness passes across every island, benchmark checks, and the final
+    # tournament) rather than one spun up and torn down per call -- process
+    # start-up has real, repeated cost, so amortizing it over the entire run
+    # matters far more than over any single call. Sequential runs (the
+    # default, num_workers == 1) skip pool creation entirely.
+    pool_context = ProcessPoolExecutor(max_workers=num_workers) if num_workers > 1 else nullcontext(None)
+    with pool_context as executor:
+        _run_training(args, rng, num_workers, executor)
 
 
 if __name__ == "__main__":

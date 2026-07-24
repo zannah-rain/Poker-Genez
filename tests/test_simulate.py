@@ -1,3 +1,5 @@
+from concurrent.futures import ProcessPoolExecutor
+
 import numpy as np
 import pytest
 
@@ -192,6 +194,54 @@ class TestRunGeneration:
             progress_desc="island 2/3 eval",
         )
         assert "island 2/3 eval" in capsys.readouterr().err
+
+
+class TestRunGenerationParallel:
+    """num_workers > 1 runs tables across a real ProcessPoolExecutor -- these
+    exercise the actual multiprocessing path (module-level worker function,
+    pickled Player/GameConfig/rng args, merged per-table HandStats)."""
+
+    def test_matches_sequential_shape_and_invariants(self):
+        players = make_random_players(12)
+        config = GameConfig(max_hands_per_session=5)
+        sim_config = SimConfig(rounds_per_generation=2, table_size=6)
+        fitness, gen_stats = run_generation(
+            players, config, sim_config, np.random.default_rng(0),
+            show_progress=False, num_workers=2,
+        )
+        assert set(fitness.keys()) == {p.player_id for p in players}
+        assert sum(fitness.values()) == pytest.approx(0.0, abs=1e-6)
+        assert gen_stats.total_hands_survived > 0
+        assert gen_stats.total_session_participations > 0
+        assert sum(gen_stats.hand_stats.action_counts.values()) > 0
+        assert len(gen_stats.hand_stats.raises_per_street) > 0
+
+    def test_leftover_players_are_skipped_in_parallel_mode_too(self):
+        players = make_random_players(7)
+        config = GameConfig(max_hands_per_session=3)
+        sim_config = SimConfig(rounds_per_generation=1, table_size=6)
+        fitness, _ = run_generation(
+            players, config, sim_config, np.random.default_rng(0),
+            show_progress=False, num_workers=2,
+        )
+        assert set(fitness.keys()) == {p.player_id for p in players}
+
+    def test_reuses_a_provided_executor_without_closing_it(self):
+        players = make_random_players(12)
+        config = GameConfig(max_hands_per_session=3)
+        sim_config = SimConfig(rounds_per_generation=1, table_size=6)
+        with ProcessPoolExecutor(max_workers=2) as pool:
+            run_generation(
+                players, config, sim_config, np.random.default_rng(0),
+                show_progress=False, num_workers=2, executor=pool,
+            )
+            # Still usable afterward -- run_generation must not shut down an
+            # executor it didn't create itself.
+            fitness2, _ = run_generation(
+                players, config, sim_config, np.random.default_rng(1),
+                show_progress=False, num_workers=2, executor=pool,
+            )
+            assert set(fitness2.keys()) == {p.player_id for p in players}
 
 
 class TestCombineGenerationStats:

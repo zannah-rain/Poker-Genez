@@ -6,6 +6,8 @@ into fitness scores the GA can select on."""
 from __future__ import annotations
 
 import math
+from concurrent.futures import Executor, ProcessPoolExecutor, as_completed
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -16,6 +18,20 @@ from opponent_model import OpponentModel
 from player import Player
 
 TABLE_SIZE = 6
+
+
+def _executor_scope(executor: Executor | None, num_workers: int):
+    """Context manager yielding the Executor to submit table-match tasks to.
+    If the caller already has a long-lived executor (main.py creates one
+    once and reuses it for the whole training run, since spinning up worker
+    processes has real, repeated-per-call overhead), it's reused as-is and
+    left open when the `with` block exits. Otherwise a fresh
+    ProcessPoolExecutor is created just for this call and torn down
+    afterward -- convenient for standalone use (tests, one-off scripts)
+    without requiring the caller to manage a pool."""
+    if executor is not None:
+        return nullcontext(executor)
+    return ProcessPoolExecutor(max_workers=num_workers)
 
 
 @dataclass
@@ -92,6 +108,37 @@ def run_session(
     return {"net": net, "hands_survived": hands_survived, "busted": busted, "winner_id": winner_id}
 
 
+def _play_one_table(
+    table_players: list[Player],
+    game_config: GameConfig,
+    backfill_pool: list[Player],
+    rng: np.random.Generator,
+) -> dict:
+    """One table's worth of work: run_session plus its own private HandStats
+    (rather than one shared across the whole generation, since a
+    ProcessPoolExecutor worker doesn't share memory with the caller or with
+    other workers -- the caller merges every table's HandStats back
+    together afterward via `_merge_hand_stats`). Deliberately a plain
+    module-level function (not a closure/lambda) so it can be pickled and
+    sent to a worker process."""
+    local_stats = HandStats()
+    result = run_session(table_players, game_config, rng, backfill_pool=backfill_pool, stats=local_stats)
+    result["hand_stats"] = local_stats
+    return result
+
+
+def _merge_hand_stats(into: HandStats, other: HandStats) -> None:
+    """Folds `other` (e.g. one table's worth, from a parallel worker) into
+    `into` (the running generation-wide total) -- the same accumulation
+    combine_generation_stats does across islands, just one level down, at
+    the per-table granularity parallel execution needs."""
+    for action, count in other.action_counts.items():
+        into.action_counts[action] = into.action_counts.get(action, 0) + count
+    into.facing_bet_decisions += other.facing_bet_decisions
+    into.facing_bet_folds += other.facing_bet_folds
+    into.raises_per_street.extend(other.raises_per_street)
+
+
 @dataclass
 class GenerationStats:
     """Aggregate sense-check metrics across a whole generation's fitness
@@ -127,12 +174,33 @@ def run_generation(
     rng: np.random.Generator,
     show_progress: bool = True,
     progress_desc: str = "generation eval",
+    num_workers: int = 1,
+    executor: Executor | None = None,
 ) -> tuple[dict[int, float], GenerationStats]:
     """Runs `rounds_per_generation` rounds of random table re-seating across
     the whole population, accumulating each player's net chip result (the
     fitness signal the GA selects on) alongside generation-level sense-check
     metrics (mean hands survived, fold rate facing a bet, bust rate,
-    raises/street)."""
+    raises/street).
+
+    Tables are fully independent of each other within a round (each is its
+    own self-contained 6-max session) and are usually the single largest
+    chunk of CPU-bound work in a training run, which makes them the natural
+    unit of parallelism. `num_workers` (default 1, i.e. fully sequential --
+    identical to this function's original single-process behavior,
+    including exact reproducibility for a given seed) plays tables across
+    that many worker processes instead when set higher. Genuine parallelism
+    means every table needs its own independent random stream rather than
+    all sharing the caller's single `rng` (worker processes don't share
+    memory, and forcing them through one shared stream would serialize them
+    right back into lockstep) -- so a parallel run consumes `rng`
+    differently than a sequential one and will not reproduce the exact same
+    hands for the same seed as num_workers=1 does; it's just as reproducible
+    run-to-run for a fixed (seed, num_workers) pair. Pass a pre-built
+    `executor` to reuse a long-lived worker pool across many calls (e.g.
+    across islands/generations in main.py) instead of paying process
+    start-up cost on every call; otherwise one is created and torn down
+    just for this call."""
     total_fitness = {p.player_id: 0.0 for p in players}
     gen_stats = GenerationStats()
 
@@ -143,23 +211,49 @@ def run_generation(
     total_tables = sim_config.rounds_per_generation * tables_per_round
     progress = tqdm(total=total_tables, desc=progress_desc, unit="table", disable=not show_progress, leave=False)
 
-    for _ in range(sim_config.rounds_per_generation):
-        order = rng.permutation(len(players))
-        shuffled = [players[i] for i in order]
-        for start in range(0, len(shuffled), sim_config.table_size):
-            table = shuffled[start : start + sim_config.table_size]
-            if len(table) < 2:
-                progress.update(1)
-                continue
-            result = run_session(table, game_config, rng, backfill_pool=players, stats=gen_stats.hand_stats)
-            for pid, delta in result["net"].items():
-                total_fitness[pid] += delta
-            for pid, hands in result["hands_survived"].items():
-                gen_stats.total_hands_survived += hands
-                gen_stats.total_session_participations += 1
-                if result["busted"].get(pid):
-                    gen_stats.total_busts += 1
-            progress.update(1)
+    def _accumulate(result: dict) -> None:
+        for pid, delta in result["net"].items():
+            total_fitness[pid] += delta
+        for pid, hands in result["hands_survived"].items():
+            gen_stats.total_hands_survived += hands
+            gen_stats.total_session_participations += 1
+            if result["busted"].get(pid):
+                gen_stats.total_busts += 1
+        progress.update(1)
+
+    if num_workers <= 1:
+        for _ in range(sim_config.rounds_per_generation):
+            order = rng.permutation(len(players))
+            shuffled = [players[i] for i in order]
+            for start in range(0, len(shuffled), sim_config.table_size):
+                table = shuffled[start : start + sim_config.table_size]
+                if len(table) < 2:
+                    progress.update(1)
+                    continue
+                result = run_session(table, game_config, rng, backfill_pool=players, stats=gen_stats.hand_stats)
+                _accumulate(result)
+    else:
+        tables = []
+        for _ in range(sim_config.rounds_per_generation):
+            order = rng.permutation(len(players))
+            shuffled = [players[i] for i in order]
+            for start in range(0, len(shuffled), sim_config.table_size):
+                table = shuffled[start : start + sim_config.table_size]
+                if len(table) >= 2:
+                    tables.append(table)
+                else:
+                    progress.update(1)  # counted in total_tables but never actually played
+
+        table_rngs = rng.spawn(len(tables))
+        with _executor_scope(executor, num_workers) as pool:
+            futures = [
+                pool.submit(_play_one_table, table, game_config, players, table_rng)
+                for table, table_rng in zip(tables, table_rngs)
+            ]
+            for future in as_completed(futures):
+                result = future.result()
+                _merge_hand_stats(gen_stats.hand_stats, result["hand_stats"])
+                _accumulate(result)
 
     progress.close()
     return total_fitness, gen_stats

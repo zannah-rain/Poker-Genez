@@ -163,6 +163,53 @@ class TestRunBenchmarkUntilResolved:
         assert outcome.tables_played == 10
 
 
+class TestRunBenchmarkParallel:
+    """num_workers > 1 plays each batch's tables across a real
+    ProcessPoolExecutor -- exercises the actual multiprocessing path."""
+
+    def test_resolves_correctly_with_multiple_workers(self):
+        current = make_random_players(SEATS_PER_SIDE, seed=0)
+        checkpoint = make_random_players(SEATS_PER_SIDE, seed=1)
+        config = GameConfig(max_hands_per_session=5)
+        outcome = run_benchmark_until_resolved(
+            current, checkpoint, config, np.random.default_rng(0),
+            min_tables=10, max_tables=10, table_batch=10,
+            num_workers=2, show_progress=False,
+        )
+        assert isinstance(outcome, BenchmarkOutcome)
+        assert outcome.tables_played == 10
+
+    def test_never_plays_more_than_max_tables_with_workers(self):
+        current = make_random_players(SEATS_PER_SIDE, seed=0)
+        checkpoint = make_random_players(SEATS_PER_SIDE, seed=1)
+        config = GameConfig(max_hands_per_session=3)
+        outcome = run_benchmark_until_resolved(
+            current, checkpoint, config, np.random.default_rng(4),
+            min_tables=6, max_tables=6, table_batch=3,
+            num_workers=2, show_progress=False,
+        )
+        assert outcome.tables_played == 6
+
+    def test_reuses_a_provided_executor(self):
+        from concurrent.futures import ProcessPoolExecutor
+        current = make_random_players(SEATS_PER_SIDE, seed=0)
+        checkpoint = make_random_players(SEATS_PER_SIDE, seed=1)
+        config = GameConfig(max_hands_per_session=3)
+        with ProcessPoolExecutor(max_workers=2) as pool:
+            outcome = run_benchmark_until_resolved(
+                current, checkpoint, config, np.random.default_rng(0),
+                min_tables=4, max_tables=4, table_batch=4,
+                num_workers=2, executor=pool, show_progress=False,
+            )
+            assert outcome.tables_played == 4
+            outcome2 = run_benchmark_until_resolved(
+                current, checkpoint, config, np.random.default_rng(1),
+                min_tables=4, max_tables=4, table_batch=4,
+                num_workers=2, executor=pool, show_progress=False,
+            )
+            assert outcome2.tables_played == 4
+
+
 class TestBenchmarkProgressReporting:
     def test_progress_bar_is_written_to_stderr_by_default(self, capsys):
         current = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=0)

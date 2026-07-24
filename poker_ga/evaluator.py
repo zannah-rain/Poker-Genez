@@ -43,16 +43,23 @@ def _straight_high(distinct_ranks_desc: list[int]) -> int | None:
 
 
 def evaluate_5(cards: list[Card]) -> tuple:
-    """Evaluate exactly 5 cards. Returns a comparable tuple (category, tiebreakers...)."""
+    """Evaluate exactly 5 cards. Returns a comparable tuple (category, tiebreakers...).
+    Called for every one of the 21 5-card combinations checked per 7-card
+    showdown hand (see evaluate_best), so this is one of the hottest
+    functions in the whole simulation -- kept allocation-light accordingly."""
     assert len(cards) == 5
     ranks = sorted((c.rank for c in cards), reverse=True)
-    suits = [c.suit for c in cards]
-    is_flush = len(set(suits)) == 1
+    is_flush = len({c.suit for c in cards}) == 1
     straight_high = _straight_high(ranks)
 
     counts = Counter(ranks)
-    # (count, rank) sorted by count desc then rank desc -> gives kicker ordering
-    by_count = sorted(counts.items(), key=lambda kv: (-kv[1], -kv[0]))
+    # (count, rank) sorted by count desc then rank desc -> gives kicker
+    # ordering. Sorting ascending by the *un*-negated (count, rank) key and
+    # then reversing the whole comparison (reverse=True) is equivalent to
+    # sorting by (-count, -rank) directly (both are total orders over
+    # distinct ranks, so there are no same-key ties to break differently),
+    # but skips the negation arithmetic per item.
+    by_count = sorted(counts.items(), key=lambda kv: (kv[1], kv[0]), reverse=True)
     count_pattern = [c for _, c in by_count]
     ordered_ranks = [r for r, _ in by_count]
 

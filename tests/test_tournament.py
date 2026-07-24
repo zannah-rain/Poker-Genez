@@ -118,6 +118,37 @@ class TestRunFinalTournament:
         )
         assert capsys.readouterr().err == ""
 
+    def test_num_workers_greater_than_one_produces_equivalent_results(self):
+        players = make_random_players(12)
+        stats = run_final_tournament(
+            players, GameConfig(max_hands_per_session=5),
+            SimConfig(rounds_per_generation=2, table_size=6),
+            np.random.default_rng(0), show_progress=False, num_workers=2,
+        )
+        assert set(stats.keys()) == {p.player_id for p in players}
+        # Every player sits at their own table at least once per round; they
+        # may additionally get drawn as a cross-table backfill replacement
+        # (backfill_pool is the whole population, not just their table), so
+        # this is a floor, not an exact count.
+        for s in stats.values():
+            assert s.sessions_played >= 2
+
+    def test_num_workers_reuses_a_provided_executor(self):
+        from concurrent.futures import ProcessPoolExecutor
+        players = make_random_players(12)
+        config = GameConfig(max_hands_per_session=3)
+        sim_config = SimConfig(rounds_per_generation=1, table_size=6)
+        with ProcessPoolExecutor(max_workers=2) as pool:
+            run_final_tournament(
+                players, config, sim_config, np.random.default_rng(0),
+                show_progress=False, num_workers=2, executor=pool,
+            )
+            stats2 = run_final_tournament(
+                players, config, sim_config, np.random.default_rng(1),
+                show_progress=False, num_workers=2, executor=pool,
+            )
+            assert set(stats2.keys()) == {p.player_id for p in players}
+
 
 class TestRankPlayers:
     def test_ranks_by_mean_net_chips_descending(self):

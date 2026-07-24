@@ -1,6 +1,9 @@
+import random
+from collections import Counter
+
 import pytest
 
-from cards import Card
+from cards import RANKS, SUITS, Card, make_deck
 from evaluator import (
     FLUSH, FULL_HOUSE, HIGH_CARD, PAIR, QUADS, STRAIGHT, STRAIGHT_FLUSH,
     TRIPS, TWO_PAIR,
@@ -219,3 +222,67 @@ class TestBestHandFromAvailable:
         result = best_hand_from_available(hole, board)
         assert result["straight_draw"] is True
         assert result["straight_draw_outs"] == 2
+
+
+def _reference_category(cards_list: list) -> int:
+    """Deliberately-independent, from-scratch category classifier (not the
+    same code path as evaluate_5 -- no Counter-based count_pattern matching,
+    no shared straight-detection helper) used purely to fuzz-check evaluate_5
+    against random hands. This guards against a regression being introduced
+    by a future performance refactor of evaluate_5 -- if the two
+    implementations ever disagree, one of them has a bug."""
+    ranks = [c.rank for c in cards_list]
+    suits = [c.suit for c in cards_list]
+    counts_sorted = sorted(Counter(ranks).values(), reverse=True)
+    is_flush = len(set(suits)) == 1
+
+    distinct_ranks = sorted(set(ranks))
+    is_straight = False
+    if len(distinct_ranks) == 5:
+        if distinct_ranks[-1] - distinct_ranks[0] == 4:
+            is_straight = True
+        elif distinct_ranks == [2, 3, 4, 5, 14]:  # wheel: A-2-3-4-5
+            is_straight = True
+
+    if is_straight and is_flush:
+        return STRAIGHT_FLUSH
+    if counts_sorted == [4, 1]:
+        return QUADS
+    if counts_sorted == [3, 2]:
+        return FULL_HOUSE
+    if is_flush:
+        return FLUSH
+    if is_straight:
+        return STRAIGHT
+    if counts_sorted == [3, 1, 1]:
+        return TRIPS
+    if counts_sorted == [2, 2, 1]:
+        return TWO_PAIR
+    if counts_sorted == [2, 1, 1, 1]:
+        return PAIR
+    return HIGH_CARD
+
+
+class TestEvaluate5AgainstIndependentReference:
+    """A large random fuzz check against a deliberately-separate reference
+    implementation -- see _reference_category's docstring for why this
+    exists independently of the more targeted hand-by-hand tests above."""
+
+    def test_matches_reference_classifier_on_many_random_hands(self):
+        rng = random.Random(12345)
+        deck = make_deck()
+        for _ in range(20000):
+            hand = rng.sample(deck, 5)
+            assert evaluate_5(hand)[0] == _reference_category(hand)
+
+    def test_matches_reference_on_hands_biased_toward_pairs_and_flushes(self):
+        # Uniform random hands rarely land on rarer categories (quads,
+        # full houses, straight flushes) -- deal from a shrunk deck (fewer
+        # distinct ranks/suits) to make those categories common too.
+        rng = random.Random(999)
+        small_ranks = [RANKS[i] for i in range(6)]  # '2'..'7'
+        small_suits = SUITS[:3]
+        shrunk_deck = [Card.from_str(f"{r}{s}") for r in small_ranks for s in small_suits]
+        for _ in range(20000):
+            hand = rng.sample(shrunk_deck, 5)
+            assert evaluate_5(hand)[0] == _reference_category(hand)

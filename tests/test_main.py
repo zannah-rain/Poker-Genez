@@ -36,9 +36,9 @@ class TestParseArgs:
         monkeypatch.setattr("sys.argv", ["main.py"])
         args = parse_args()
         assert args.benchmark_min_tables == 100
-        assert args.benchmark_max_tables == 5000
-        assert args.benchmark_table_batch == 50
-        assert args.benchmark_p_value == 0.05
+        assert args.benchmark_max_tables == 1000
+        assert args.benchmark_table_batch == 100
+        assert args.benchmark_p_value == 0.1
 
     def test_overrides_are_applied(self, monkeypatch):
         monkeypatch.setattr("sys.argv", [
@@ -69,6 +69,16 @@ class TestParseArgs:
         monkeypatch.setattr("sys.argv", ["main.py", "--no-reload-previous"])
         args = parse_args()
         assert args.reload_previous is False
+
+    def test_workers_defaults_to_sequential(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["main.py"])
+        args = parse_args()
+        assert args.workers == 1
+
+    def test_workers_override(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["main.py", "--workers", "4"])
+        args = parse_args()
+        assert args.workers == 4
 
 
 class TestApplySparsityPenalty:
@@ -145,3 +155,29 @@ class TestMainSmoke:
         assert os.path.exists(checkpoint_path)
         output = capsys.readouterr().out
         assert "benchmark vs checkpoint" in output
+
+    def test_main_runs_with_multiple_workers(self, tmp_path, monkeypatch):
+        # Exercises the real ProcessPoolExecutor path: pool creation in
+        # main(), reuse across islands/generations/the final tournament, and
+        # teardown at the end.
+        out_dir = str(tmp_path / "runs")
+        monkeypatch.setattr("sys.argv", [
+            "main.py",
+            "--generations", "1",
+            "--population", "12",
+            "--rounds", "1",
+            "--max-hands", "3",
+            "--final-rounds", "1",
+            "--final-max-hands", "2",
+            "--num-islands", "1",
+            "--benchmark-interval", "0",
+            "--top-n", "1",
+            "--out-dir", out_dir,
+            "--no-reload-previous",
+            "--seed", "0",
+            "--workers", "2",
+        ])
+        main()
+        assert os.path.exists(os.path.join(out_dir, "best_genome_latest.json"))
+        final_dir = os.path.join(out_dir, "final")
+        assert os.path.exists(os.path.join(final_dir, "leaderboard.md"))

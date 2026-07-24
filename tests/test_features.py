@@ -432,7 +432,21 @@ class TestBucketIndicators:
         assert _nearest_bucket_index(0.0) == 0
         assert _nearest_bucket_index(1.0) == 4
         assert _nearest_bucket_index(0.26) == 1
-        assert _nearest_bucket_index(0.6) == 2 or _nearest_bucket_index(0.6) == 3
+        assert _nearest_bucket_index(0.6) == 2
+
+    def test_nearest_bucket_helper_breaks_exact_ties_toward_the_lower_index(self):
+        # 0.125/0.375/0.625/0.875 sit exactly halfway between two bucket
+        # points -- the original min-over-range implementation resolves
+        # such ties to the first (lower) index it encounters, so any
+        # faster reimplementation must match that, not round-half-to-even.
+        assert _nearest_bucket_index(0.125) == 0
+        assert _nearest_bucket_index(0.375) == 1
+        assert _nearest_bucket_index(0.625) == 2
+        assert _nearest_bucket_index(0.875) == 3
+
+    def test_nearest_bucket_helper_clamps_out_of_range_values(self):
+        assert _nearest_bucket_index(-0.1) == 0
+        assert _nearest_bucket_index(1.3) == 4
 
 
 class TestPrivateHelpers:

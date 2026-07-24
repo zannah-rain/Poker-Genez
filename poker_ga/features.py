@@ -17,6 +17,7 @@ single per-value row instead of listing near-duplicate entries.
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -129,8 +130,25 @@ def _linked_bool(key: str, label: str, description: str, linked_to: str, index: 
 _BUCKET_POINTS = (0.0, 0.25, 0.5, 0.75, 1.0)
 
 
+_NUM_BUCKETS = len(_BUCKET_POINTS)  # 5
+_LAST_BUCKET_INDEX = _NUM_BUCKETS - 1
+
+
 def _nearest_bucket_index(value: float) -> int:
-    return min(range(len(_BUCKET_POINTS)), key=lambda i: abs(value - _BUCKET_POINTS[i]))
+    """Index into _BUCKET_POINTS closest to `value`. Since _BUCKET_POINTS is
+    evenly spaced (0, 0.25, 0.5, ..., 1.0), the nearest point can be found
+    with direct arithmetic instead of scanning+comparing all 5 candidates --
+    this is called from extract_features' hottest inner loop (once per
+    continuous feature per decision), so the constant-factor savings add up.
+    `ceil(x - 0.5)` (rather than the more common `round`) is deliberate: it
+    breaks an exact tie between two adjacent points toward the *lower*
+    index, matching what the original `min(range(...), key=...)` scan did
+    (the first-encountered minimum wins ties, and range() visits indices
+    ascending) -- plain `round()` would instead break ties to the nearest
+    *even* index (banker's rounding) and silently disagree at the exact
+    midpoints (0.125, 0.375, 0.625, 0.875)."""
+    idx = math.ceil(value * _LAST_BUCKET_INDEX - 0.5)
+    return 0 if idx < 0 else (_LAST_BUCKET_INDEX if idx > _LAST_BUCKET_INDEX else idx)
 
 
 def _continuous_children(parent_key: str, value_table: tuple) -> list[FeatureSpec]:
@@ -1050,6 +1068,41 @@ def _flop_texture(board: list[Card]) -> dict:
     }
 
 
+# Precomputed, call-invariant key names for extract_features' per-rank and
+# per-bucket one-hot loops below. These are exactly the same FeatureSpec keys
+# already built above (e.g. _HOLE_HIGH_CARD_CHILDREN) -- just indexed by
+# position here instead of being rebuilt from an f-string (and, for the rank
+# ones, a `_rank_key` dict lookup) on every single extract_features call.
+# extract_features runs once per in-game decision, so this recomputation was
+# previously one of the hottest code paths in the whole simulation.
+_HOLE_HIGH_CARD_KEYS = tuple(spec.key for spec in _HOLE_HIGH_CARD_CHILDREN)  # rank 2..14
+_SHARED_HIGH_CARD_KEYS = tuple(spec.key for spec in _SHARED_HIGH_CARD_CHILDREN)  # rank 2..14
+_CONNECTIVITY_GAP_KEYS = tuple(spec.key for spec in _CONNECTIVITY_CHILDREN[1:-1])  # gap 1..CAP-1
+_CONNECTIVITY_GAP_PLUS_KEY = _CONNECTIVITY_CHILDREN[-1].key
+_ACTIVE_PLAYERS_KEYS = tuple(spec.key for spec in _ACTIVE_PLAYERS_CHILDREN)  # n=2..6
+_RAISES_KEYS = tuple(spec.key for spec in _RAISES_CHILDREN[:4])  # r=0..3 ("raises_is_4plus" is already a literal)
+
+_BUCKET_KEY_FAMILIES = {
+    "call_amount_norm": _CALL_SIZE_CHILDREN,
+    "spr_norm": _SPR_CHILDREN,
+    "position_norm": _POSITION_CHILDREN,
+    "stack_depth_norm": _STACK_DEPTH_CHILDREN,
+    "opp_vpip_norm": _OPP_VPIP_CHILDREN,
+    "opp_pfr_norm": _OPP_PFR_CHILDREN,
+    "opp_three_bet_norm": _OPP_THREE_BET_CHILDREN,
+    "opp_fold_to_three_bet_norm": _OPP_FOLD_TO_THREE_BET_CHILDREN,
+    "opp_aggression_freq_norm": _OPP_AGGRESSION_FREQ_CHILDREN,
+    "opp_fold_vs_bet_norm": _OPP_FOLD_VS_BET_CHILDREN,
+    "opp_sample_norm": _OPP_SAMPLE_CHILDREN,
+    "villain_three_bet_norm": _VILLAIN_THREE_BET_CHILDREN,
+    "villain_fold_vs_bet_norm": _VILLAIN_FOLD_VS_BET_CHILDREN,
+    "villain_aggression_freq_norm": _VILLAIN_AGGRESSION_FREQ_CHILDREN,
+}
+_BUCKET_KEYS_BY_FEATURE = {
+    name: tuple(spec.key for spec in children) for name, children in _BUCKET_KEY_FAMILIES.items()
+}
+
+
 def extract_features(sit: Situation) -> np.ndarray:
     hand = best_hand_from_available(sit.hole, sit.board)
     cat = hand["category"]
@@ -1114,23 +1167,23 @@ def extract_features(sit: Situation) -> np.ndarray:
     ):
         values[key] = float(cat == category_value)
 
-    for r in range(2, 15):
-        values[f"hole_high_card_is_{_rank_key(r)}"] = float(hole_high_card_rank == r)
-        values[f"shared_high_card_is_{_rank_key(r)}"] = float(shared_high_card_rank == r)
+    for i, r in enumerate(range(2, 15)):
+        values[_HOLE_HIGH_CARD_KEYS[i]] = float(hole_high_card_rank == r)
+        values[_SHARED_HIGH_CARD_KEYS[i]] = float(shared_high_card_rank == r)
 
     values["hole_paired"] = float(gap == 0)
-    for g in range(1, CONNECTIVITY_GAP_CAP):
-        values[f"connectivity_gap_{g}"] = float(gap == g)
-    values[f"connectivity_gap_{CONNECTIVITY_GAP_CAP}plus"] = float(gap == CONNECTIVITY_GAP_CAP)
+    for i, g in enumerate(range(1, CONNECTIVITY_GAP_CAP)):
+        values[_CONNECTIVITY_GAP_KEYS[i]] = float(gap == g)
+    values[_CONNECTIVITY_GAP_PLUS_KEY] = float(gap == CONNECTIVITY_GAP_CAP)
 
     for i, key in enumerate(("is_preflop", "is_flop", "is_turn", "is_river")):
         values[key] = float(sit.street == i)
 
-    for n in range(2, 7):
-        values[f"active_players_is_{n}"] = float(sit.num_active == n)
+    for i, n in enumerate(range(2, 7)):
+        values[_ACTIVE_PLAYERS_KEYS[i]] = float(sit.num_active == n)
 
-    for r in range(0, 4):
-        values[f"raises_is_{r}"] = float(sit.num_raises_this_street == r)
+    for i, r in enumerate(range(0, 4)):
+        values[_RAISES_KEYS[i]] = float(sit.num_raises_this_street == r)
     values["raises_is_4plus"] = float(sit.num_raises_this_street >= 4)
 
     for i, key in enumerate(("is_unraised_pot", "is_single_raised_pot", "is_3bet_pot", "is_4bet_plus_pot")):
@@ -1151,8 +1204,9 @@ def extract_features(sit: Situation) -> np.ndarray:
         ("villain_aggression_freq_norm", values["villain_aggression_freq_norm"]),
     ):
         nearest = _nearest_bucket_index(raw_value)
-        for i in range(len(_BUCKET_POINTS)):
-            values[f"{feature_key}_bucket_{i}"] = float(i == nearest)
+        bucket_keys = _BUCKET_KEYS_BY_FEATURE[feature_key]
+        for i in range(_NUM_BUCKETS):
+            values[bucket_keys[i]] = float(i == nearest)
 
     values.update(_hand_vs_board_heuristics(sit.hole, sit.board, cat, hand))
     values.update(_flop_texture(sit.board))
