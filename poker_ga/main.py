@@ -35,9 +35,9 @@ def apply_sparsity_penalty(players: list[Player], fitness: dict, coefficient: fl
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evolve poker strategies with a genetic algorithm.")
-    p.add_argument("--generations", type=int, default=30)
+    p.add_argument("--generations", type=int, default=100)
     p.add_argument("--population", type=int, default=180, help="Must be a multiple of 6.")
-    p.add_argument("--rounds", type=int, default=30, help="Random re-seatings per generation.")
+    p.add_argument("--rounds", type=int, default=5, help="Random re-seatings per generation.")
     p.add_argument("--max-hands", type=int, default=200, help="Hand cap per table session.")
     p.add_argument("--starting-stack", type=float, default=200.0)
     p.add_argument("--small-blind", type=float, default=1.0)
@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--reload-path", type=str, default=None,
-        help="Population file to reload. Defaults to <final-out-dir>/population.npy.",
+        help="Population file to reload. Defaults to <final-out-dir>/population.json.",
     )
     p.add_argument(
         "--benchmark-interval", type=int, default=10,
@@ -161,8 +161,8 @@ def main() -> None:
     # bloating disk on long runs) -- this is what lets a run resume from
     # wherever it last got to, rather than only from a fully completed
     # run's final tournament output.
-    latest_population_path = os.path.join(args.out_dir, "latest_population.npy")
-    final_population_path = os.path.join(final_out_dir, "population.npy")
+    latest_population_path = os.path.join(args.out_dir, "latest_population.json")
+    final_population_path = os.path.join(final_out_dir, "population.json")
     default_reload_path = latest_population_path if os.path.exists(latest_population_path) else final_population_path
     reload_path = args.reload_path or default_reload_path
 
@@ -171,7 +171,7 @@ def main() -> None:
     # when a benchmark check confirms improvement (see the training loop
     # below), so it always holds the last population that was actually
     # measured to be better than the one before it.
-    benchmark_checkpoint_path = os.path.join(benchmark_dir, "checkpoint_population.npy")
+    benchmark_checkpoint_path = os.path.join(benchmark_dir, "checkpoint_population.json")
     if args.benchmark_interval > 0:
         os.makedirs(benchmark_dir, exist_ok=True)
 
@@ -179,7 +179,7 @@ def main() -> None:
     if args.reload_previous:
         if os.path.exists(reload_path):
             try:
-                seed_genomes = load_population(reload_path)
+                seed_genomes = load_population(reload_path, rng)
                 print(f"Reloaded {len(seed_genomes)} genomes from previous run at {reload_path}")
             except Exception as exc:
                 print(f"Warning: could not reload population from {reload_path} ({exc}); starting from scratch.")
@@ -224,9 +224,9 @@ def main() -> None:
                 for i in range(len(island_model.islands))
             )
             print(f"         | islands: {per_island}")
-        best_player.genome.save(os.path.join(args.out_dir, "best_genome_latest.npy"))
+        best_player.genome.save(os.path.join(args.out_dir, "best_genome_latest.json"))
         if gen == args.generations - 1:
-            best_player.genome.save(os.path.join(args.out_dir, f"best_genome_gen{gen}.npy"))
+            best_player.genome.save(os.path.join(args.out_dir, f"best_genome_gen{gen}.json"))
 
         # Overwrite the resumable "latest" snapshot every generation (not
         # once per generation as a separate file, to avoid bloating disk on
@@ -236,7 +236,7 @@ def main() -> None:
         reverted = False
         if args.benchmark_interval > 0 and gen % args.benchmark_interval == 0:
             if os.path.exists(benchmark_checkpoint_path):
-                checkpoint_genomes = load_population(benchmark_checkpoint_path)
+                checkpoint_genomes = load_population(benchmark_checkpoint_path, rng)
                 checkpoint_players = [
                     Player(player_id=-(i + 1), genome=g, generation=gen - args.benchmark_interval)
                     for i, g in enumerate(checkpoint_genomes)
@@ -298,7 +298,7 @@ def main() -> None:
     ranked = rank_players(all_players, final_stats, sparsity_penalty=args.sparsity_penalty)
     export_top_n(ranked, final_stats, final_game_config, args.top_n, final_out_dir)
 
-    population_path = os.path.join(final_out_dir, "population.npy")
+    population_path = os.path.join(final_out_dir, "population.json")
     save_population([p.genome for p in ranked], population_path)
     elapsed = time.time() - t0
 

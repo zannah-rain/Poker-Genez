@@ -80,9 +80,11 @@ general trend across every other spot, which it doesn't.
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 
-from features import NUM_FEATURES, Situation, extract_features
+from features import FEATURE_NAMES, NUM_FEATURES, Situation, extract_features
 from gto import GTO_SPOTS, NUM_GTO_SPOTS, resolve_spot_action
 
 FOLD, CHECK_CALL, BET_RAISE = 0, 1, 2
@@ -105,6 +107,26 @@ THETA_BLUFF_INIT = 70.0  # L needed to raise as a bluff: roughly "top 30%" lever
 THETA_CALL_INIT = 40.0  # V needed to continue at all rather than fold: better than roughly average
 BIAS_INIT = 50.0  # the "no information" percentile: a featureless hand reads as average
 KAPPA_INIT = 0.5  # how much having a strong hand (V) suppresses the bluff term
+
+# name -> (init_center, init_spread, take_abs) for each continuous scalar gene,
+# used both by Genome.random() and by from_dict() to freshly initialize a
+# scalar gene that's missing from a saved genome (see from_dict).
+_SCALAR_INIT: dict[str, tuple[float, float, bool]] = {
+    "bias_v": (BIAS_INIT, 20.0, False),
+    "bias_l": (BIAS_INIT, 20.0, False),
+    "theta_value": (THETA_VALUE_INIT, 15.0, False),
+    "theta_bluff": (THETA_BLUFF_INIT, 15.0, False),
+    "theta_call": (THETA_CALL_INIT, 15.0, False),
+    "kappa": (KAPPA_INIT, 0.3, True),
+    "noise_std": (5.0, 3.0, True),
+}
+
+
+def _random_scalar(name: str, rng: np.random.Generator) -> float:
+    center, spread, take_abs = _SCALAR_INIT[name]
+    value = float(rng.normal(center, spread))
+    return abs(value) if take_abs else value
+
 
 # Feature weights (weights_v/weights_l) are constrained to this small alphabet
 # rather than being continuous -- a genome is then just a lookup table of
@@ -226,65 +248,101 @@ class Genome:
         return cls(
             weights_v=weights_v,
             weights_l=weights_l,
-            bias_v=float(rng.normal(BIAS_INIT, 20.0)),
-            bias_l=float(rng.normal(BIAS_INIT, 20.0)),
-            theta_value=float(rng.normal(THETA_VALUE_INIT, 15.0)),
-            theta_bluff=float(rng.normal(THETA_BLUFF_INIT, 15.0)),
-            theta_call=float(rng.normal(THETA_CALL_INIT, 15.0)),
-            kappa=float(abs(rng.normal(KAPPA_INIT, 0.3))),
-            noise_std=float(abs(rng.normal(5.0, 3.0))),
+            **{name: _random_scalar(name, rng) for name in _SCALAR_INIT},
             gto_flags=(rng.random(NUM_GTO_SPOTS) < GTO_INIT_PROB).astype(np.float64),
         )
 
-    def flatten(self) -> np.ndarray:
-        return np.concatenate([
-            self.weights_v, self.weights_l,
-            [self.bias_v, self.bias_l, self.theta_value, self.theta_bluff, self.theta_call,
-             self.kappa, self.noise_std],
-            self.gto_flags,
-        ])
+    def to_dict(self) -> dict:
+        """Named-dictionary save form -- keyed by feature/GTO-spot name
+        rather than array position, so a saved genome survives
+        features.py/gto.py entries being added, removed, or reordered (see
+        from_dict, the corresponding loader)."""
+        return {
+            "weights_v": dict(zip(FEATURE_NAMES, (float(x) for x in self.weights_v))),
+            "weights_l": dict(zip(FEATURE_NAMES, (float(x) for x in self.weights_l))),
+            "scalars": {name: getattr(self, name) for name in _SCALAR_INIT},
+            "gto_flags": {spot.key: float(flag) for spot, flag in zip(GTO_SPOTS, self.gto_flags)},
+        }
 
     @classmethod
-    def unflatten(cls, vec: np.ndarray) -> "Genome":
-        """Reconstructs a Genome from a flat gene vector, re-quantizing the
-        weight slices back onto WEIGHT_ALPHABET. This is the single point
-        every genome passes through after crossover/mutation (see ga.py,
-        which treats genomes as opaque flat vectors), so it's what keeps
-        weights on-alphabet without ga.py needing to know which genes are
-        "feature weights" versus continuous scalars."""
-        expected_len = 2 * NUM_FEATURES + 7 + NUM_GTO_SPOTS
-        if vec.shape[-1] != expected_len:
-            raise ValueError(
-                f"Genome vector has {vec.shape[-1]} genes but the current feature/spot "
-                f"catalog expects {expected_len} (NUM_FEATURES={NUM_FEATURES}, "
-                f"NUM_GTO_SPOTS={NUM_GTO_SPOTS}) -- this population was saved against a "
-                "different feature set and can't be reloaded as-is; start from scratch "
-                "(or drop --reload-previous) instead."
+    def from_dict(cls, data: dict, rng: np.random.Generator) -> "Genome":
+        """Reconstructs a Genome from its named-dictionary save form (see
+        to_dict). Robust to the feature/GTO-spot catalog having changed
+        since this genome was saved: entries whose name no longer exists are
+        dropped (with a warning); entries the current catalog expects but
+        the save doesn't have are freshly initialized exactly as a brand-new
+        random genome would be (with a warning), rather than defaulted to
+        some placeholder value the GA never actually selected for."""
+
+        def load_weight_vector(field_name: str) -> np.ndarray:
+            saved = data.get(field_name, {})
+            unknown = sorted(set(saved) - set(FEATURE_NAMES))
+            if unknown:
+                print(
+                    f"Warning: ignoring {len(unknown)} unknown feature(s) in saved genome's "
+                    f"'{field_name}' (no longer in the feature catalog): {', '.join(unknown)}"
+                )
+            missing = [key for key in FEATURE_NAMES if key not in saved]
+            if missing:
+                print(
+                    f"Warning: {len(missing)} feature(s) missing from saved genome's "
+                    f"'{field_name}' (new since this genome was saved) -- initializing "
+                    f"randomly: {', '.join(missing)}"
+                )
+            random_values = iter(quantize(rng.normal(0, 0.5 * WEIGHT_ALPHABET_SCALE, size=len(missing))))
+            return np.array(
+                [float(saved[key]) if key in saved else next(random_values) for key in FEATURE_NAMES],
+                dtype=np.float64,
             )
-        i = 0
-        weights_v = quantize(vec[i : i + NUM_FEATURES])
-        i += NUM_FEATURES
-        weights_l = quantize(vec[i : i + NUM_FEATURES])
-        i += NUM_FEATURES
-        bias_v = float(vec[i]); i += 1
-        bias_l = float(vec[i]); i += 1
-        theta_value = float(vec[i]); i += 1
-        theta_bluff = float(vec[i]); i += 1
-        theta_call = float(vec[i]); i += 1
-        kappa = float(abs(vec[i])); i += 1
-        noise_std = float(abs(vec[i])); i += 1
-        gto_flags = (vec[i : i + NUM_GTO_SPOTS] > 0.5).astype(np.float64)
-        return cls(
-            weights_v, weights_l, bias_v, bias_l, theta_value, theta_bluff, theta_call,
-            kappa, noise_std, gto_flags,
+
+        weights_v = load_weight_vector("weights_v")
+        weights_l = load_weight_vector("weights_l")
+
+        saved_scalars = data.get("scalars", {})
+        unknown_scalars = sorted(set(saved_scalars) - set(_SCALAR_INIT))
+        if unknown_scalars:
+            print(f"Warning: ignoring unknown scalar gene(s) in saved genome: {', '.join(unknown_scalars)}")
+        scalar_values = {}
+        for name in _SCALAR_INIT:
+            if name in saved_scalars:
+                scalar_values[name] = float(saved_scalars[name])
+            else:
+                print(f"Warning: scalar gene '{name}' missing from saved genome -- initializing randomly.")
+                scalar_values[name] = _random_scalar(name, rng)
+
+        saved_gto = data.get("gto_flags", {})
+        gto_keys = [spot.key for spot in GTO_SPOTS]
+        unknown_gto = sorted(set(saved_gto) - set(gto_keys))
+        if unknown_gto:
+            print(
+                f"Warning: ignoring {len(unknown_gto)} unknown GTO spot(s) in saved genome "
+                f"(no longer in the catalog): {', '.join(unknown_gto)}"
+            )
+        missing_gto = [key for key in gto_keys if key not in saved_gto]
+        if missing_gto:
+            print(
+                f"Warning: {len(missing_gto)} GTO spot(s) missing from saved genome (new "
+                f"since this genome was saved) -- initializing randomly: {', '.join(missing_gto)}"
+            )
+        gto_flags = np.array(
+            [
+                float(saved_gto[key]) if key in saved_gto else float(rng.random() < GTO_INIT_PROB)
+                for key in gto_keys
+            ],
+            dtype=np.float64,
         )
 
+        return cls(weights_v, weights_l, gto_flags=gto_flags, **scalar_values)
+
     def save(self, path: str) -> None:
-        np.save(path, self.flatten())
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.to_dict(), f)
 
     @classmethod
-    def load(cls, path: str) -> "Genome":
-        return cls.unflatten(np.load(path))
+    def load(cls, path: str, rng: np.random.Generator | None = None) -> "Genome":
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return cls.from_dict(data, rng if rng is not None else np.random.default_rng())
 
     def copy(self) -> "Genome":
         return Genome(
@@ -435,9 +493,15 @@ class Genome:
 
 def save_population(genomes: list[Genome], path: str) -> None:
     """Saves a whole generation (best-first, if the caller ranked it) as one
-    file so a later run can reload it wholesale as its starting population."""
-    np.save(path, np.stack([g.flatten() for g in genomes]))
+    JSON file of named-dictionary genomes (see Genome.to_dict), so a later
+    run can reload it wholesale as its starting population even after
+    features.py/gto.py have changed since the save."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump([g.to_dict() for g in genomes], f)
 
 
-def load_population(path: str) -> list[Genome]:
-    return [Genome.unflatten(row) for row in np.load(path)]
+def load_population(path: str, rng: np.random.Generator | None = None) -> list[Genome]:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    rng = rng if rng is not None else np.random.default_rng()
+    return [Genome.from_dict(genome_data, rng) for genome_data in data]

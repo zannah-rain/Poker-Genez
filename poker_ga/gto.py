@@ -39,19 +39,28 @@ class SpotMatcher:
     GTOSpot applies. Every field is optional (None = "don't care"); a
     situation matches only if every specified field agrees.
 
-    Note: `is_aggressor` only distinguishes "I made the last raise" from "I
-    didn't" -- Situation doesn't track *which* seat/position made a raise,
-    so a matcher can express "BTN facing a 3-bet" but not "BTN facing a
-    3-bet specifically from the BB" (there's no opponent-position data to
-    match against)."""
+    `raised_positions` lets a matcher pin down *who* has raised so far this
+    street (not just whether someone has, like `facing_bet`/`is_aggressor`
+    do), e.g. `raised_positions=("UTG",)` for "bb_vs_utg_open" -- BB facing
+    exactly an UTG open, nobody else having entered the pot yet. It's an
+    exact match against Situation.raised_positions (the *other* seats that
+    raised, not me): every position listed must have raised, and no
+    position outside the list may have raised either."""
 
     street: int | None = None  # 0=preflop, 1=flop, 2=turn, 3=river
     pot_type: int | None = None  # 0=unraised, 1=single raised, 2=3-bet, 3=4-bet+ (num_preflop_raises, capped at 3)
     position: str | None = None  # one of seating.SEAT_ROLES, or None for "any position"
     is_aggressor: bool | None = None  # did I make the last bet/raise this street?
     facing_bet: bool | None = None  # is there a nonzero amount required to call?
+    raised_positions: frozenset[str] | None = None  # exact set of other seats' positions that have raised this street
     min_effective_bb: float | None = None  # inclusive, in actual big blinds
     max_effective_bb: float | None = None  # inclusive
+    min_call_bb: float | None = None  # inclusive; size of the amount I'd need to call, in actual big blinds
+    max_call_bb: float | None = None  # inclusive
+
+    def __post_init__(self):
+        if self.raised_positions is not None:
+            object.__setattr__(self, "raised_positions", frozenset(self.raised_positions))
 
     def matches(self, situation: Situation) -> bool:
         if self.street is not None and situation.street != self.street:
@@ -66,11 +75,19 @@ class SpotMatcher:
             return False
         if self.facing_bet is not None and (situation.call_amount > 1e-9) != self.facing_bet:
             return False
+        if self.raised_positions is not None and situation.raised_positions != self.raised_positions:
+            return False
         if self.min_effective_bb is not None or self.max_effective_bb is not None:
             effective_bb = situation.effective_stack / max(situation.big_blind, 1e-9)
             if self.min_effective_bb is not None and effective_bb < self.min_effective_bb:
                 return False
             if self.max_effective_bb is not None and effective_bb > self.max_effective_bb:
+                return False
+        if self.min_call_bb is not None or self.max_call_bb is not None:
+            call_bb = situation.call_amount / max(situation.big_blind, 1e-9)
+            if self.min_call_bb is not None and call_bb < self.min_call_bb:
+                return False
+            if self.max_call_bb is not None and call_bb > self.max_call_bb:
                 return False
         return True
 
@@ -90,12 +107,23 @@ class SpotMatcher:
             parts.append("I'm the last aggressor")
         elif self.is_aggressor is False:
             parts.append("I'm not the last aggressor")
+        if self.raised_positions is not None:
+            if self.raised_positions:
+                parts.append(f"vs {'+'.join(sorted(self.raised_positions))} raise")
+            else:
+                parts.append("vs no raises")
         if self.min_effective_bb is not None and self.max_effective_bb is not None:
             parts.append(f"{self.min_effective_bb:.0f}-{self.max_effective_bb:.0f}BB effective")
         elif self.min_effective_bb is not None:
             parts.append(f">={self.min_effective_bb:.0f}BB effective")
         elif self.max_effective_bb is not None:
             parts.append(f"<={self.max_effective_bb:.0f}BB effective")
+        if self.min_call_bb is not None and self.max_call_bb is not None:
+            parts.append(f"{self.min_call_bb:.1f}-{self.max_call_bb:.1f}BB to call")
+        elif self.min_call_bb is not None:
+            parts.append(f">={self.min_call_bb:.1f}BB to call")
+        elif self.max_call_bb is not None:
+            parts.append(f"<={self.max_call_bb:.1f}BB to call")
         return ", ".join(parts) if parts else "any situation"
 
 
@@ -242,27 +270,91 @@ GTO_SPOTS: list[GTOSpot] = [
         default_action="fold",
     ),
     GTOSpot(
-        key="bb_vs_single_raise_100bb",
-        label="BB Facing A Single Raise -- 100BB stack",
+        key="HJ_vs_utg_open_100bb",
+        label="HJ vs UTG Open -- 100BB stack",
         matcher=SpotMatcher(
-            street=0, pot_type=1, position="BB", facing_bet=True, is_aggressor=False,
+            # `raised_positions=("UTG",)` pins this to *exactly* an UTG open
+            # reaching the BB unopposed -- pot_type=1 alone would also match
+            # "everyone else folded to a HJ/CO/BTN/SB open," which needs a
+            # different (wider) defense.
+            street=0, pot_type=1, position="HJ", facing_bet=True, is_aggressor=False,
+            raised_positions=("UTG",),
             min_effective_bb=80, max_effective_bb=120,
         ),
         action_ranges=(
-            ("raise_300", "TT+, AQs+, AKo"),
-            ("call", "22-99, A2s+, K9s+, Q9s+, J9s+, T8s+, 97s+, 86s+, 75s+, ATo+, KJo+"),
+            ("raise_6.5bb", "TT+, ATs+, A8s, A5s, A4s, A3s, KTs+, K5s, AQo+, KQo"),
         ),
         default_action="fold",
     ),
     GTOSpot(
-        key="btn_vs_3bet_20bb",
-        label="BTN Facing A 3-Bet -- 20BB stack",
+        key="CO_vs_utg_open_100bb",
+        label="CO vs UTG Open -- 100BB stack",
         matcher=SpotMatcher(
-            street=0, pot_type=2, position="BTN", facing_bet=True, is_aggressor=False,
-            min_effective_bb=15, max_effective_bb=25,
+            # `raised_positions=("UTG",)` pins this to *exactly* an UTG open
+            # reaching the BB unopposed -- pot_type=1 alone would also match
+            # "everyone else folded to a HJ/CO/BTN/SB open," which needs a
+            # different (wider) defense.
+            street=0, pot_type=1, position="CO", facing_bet=True, is_aggressor=False,
+            raised_positions=("UTG",),
+            min_effective_bb=80, max_effective_bb=120,
         ),
         action_ranges=(
-            ("allin", "88+, AJs+, KQs, AQo+"),
+            ("raise_6.5bb", "99+, AQs+, A8s, A7s, A5s, A4s, A3s, KJs, KTs, K5s, AQo+, KQo"),
+            ("call", "88, ATs-AQs, KQs, QTs, JTs, 54s"),
+        ),
+        default_action="fold",
+    ),
+    GTOSpot(
+        key="BTN_vs_utg_open_100bb",
+        label="BTN vs UTG Open -- 100BB stack",
+        matcher=SpotMatcher(
+            # `raised_positions=("UTG",)` pins this to *exactly* an UTG open
+            # reaching the BB unopposed -- pot_type=1 alone would also match
+            # "everyone else folded to a HJ/CO/BTN/SB open," which needs a
+            # different (wider) defense.
+            street=0, pot_type=1, position="BTN", facing_bet=True, is_aggressor=False,
+            raised_positions=("UTG",),
+            min_effective_bb=80, max_effective_bb=120,
+        ),
+        action_ranges=(
+            ("raise_7.5bb", "QQ+, AKs+, A8s, A7s, A5s, A4s, A3s, A2s, K5s, AKo, KQo"),
+            ("call", "66-QQ, A5s, A9s-AQs, K9s-KQs, QTs-QJs, JTs, T9s, 65s, 54s, AQo"),
+        ),
+        default_action="fold",
+    ),
+    GTOSpot(
+        key="sb_vs_utg_open_100bb",
+        label="SB vs UTG Open -- 100BB stack",
+        matcher=SpotMatcher(
+            # `raised_positions=("UTG",)` pins this to *exactly* an UTG open
+            # reaching the BB unopposed -- pot_type=1 alone would also match
+            # "everyone else folded to a HJ/CO/BTN/SB open," which needs a
+            # different (wider) defense.
+            street=0, pot_type=1, position="SB", facing_bet=True, is_aggressor=False,
+            raised_positions=("UTG",),
+            min_effective_bb=80, max_effective_bb=120,
+        ),
+        action_ranges=(
+            ("raise_10bb", "QQ+, AQs+, A8s, A4s, A3s, AKo"),
+            ("call", "66-JJ, A5s, A7s-AJs, KTs-KQs, QTs-QJs, JTs, T9s"),
+        ),
+        default_action="fold",
+        ),
+    GTOSpot(
+        key="bb_vs_utg_open_100bb",
+        label="BB vs UTG Open -- 100BB stack",
+        matcher=SpotMatcher(
+            # `raised_positions=("UTG",)` pins this to *exactly* an UTG open
+            # reaching the BB unopposed -- pot_type=1 alone would also match
+            # "everyone else folded to a HJ/CO/BTN/SB open," which needs a
+            # different (wider) defense.
+            street=0, pot_type=1, position="BB", facing_bet=True, is_aggressor=False,
+            raised_positions=("UTG",),
+            min_effective_bb=80, max_effective_bb=120,
+        ),
+        action_ranges=(
+            ("raise_12bb", "KK+, AKs+, AKo"),
+            ("call", "22-QQ, A2s+, K2s+, Q2s+, J5s+, T6s+, 95s+, 84s+, 74s+, 63s+, 52s+, 42s+, 32s+, A5o, A8o+, KTo+, QTo+, JTo+, T9o+, 98o"),
         ),
         default_action="fold",
     ),

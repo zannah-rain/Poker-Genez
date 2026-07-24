@@ -905,6 +905,12 @@ class Situation:
     is_aggressor: bool  # did I make the last bet/raise this street?
     starting_stack: float
     big_blind: float = 2.0  # lets stack depth be expressed in actual BB (see gto.py's SpotMatcher)
+    # Starting positions (seating.SEAT_ROLES) of every *other* seat that has
+    # bet/raised this street so far, e.g. frozenset({"UTG"}) for "folds to me
+    # in the BB after UTG opens" -- lets gto.py's SpotMatcher express spots
+    # like "bb_vs_utg_open" that need to know *who* raised, not just whether
+    # someone did.
+    raised_positions: frozenset[str] = field(default_factory=frozenset)
 
     # Opponent-tendency reads (see opponent_model.py), already 0-1 rates --
     # all default to a neutral 0.5 (0.0 for sample size) so any caller that

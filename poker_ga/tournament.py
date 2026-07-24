@@ -361,4 +361,4 @@ def export_top_n(
         base = f"rank{rank:02d}_player{p.player_id}"
         with open(os.path.join(out_dir, f"{base}_strategy.md"), "w", encoding="utf-8") as f:
             f.write(report)
-        p.genome.save(os.path.join(out_dir, f"{base}_genome.npy"))
+        p.genome.save(os.path.join(out_dir, f"{base}_genome.json"))

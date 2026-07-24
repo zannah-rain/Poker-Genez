@@ -16,7 +16,7 @@ from features import Situation
 from genome import BET_RAISE, CHECK_CALL, FOLD
 from opponent_model import OpponentModel, compute_opponent_features
 from player import Player
-from seating import blind_indices, preflop_order
+from seating import blind_indices, preflop_order, seat_role
 
 PREFLOP, FLOP, TURN, RIVER = 0, 1, 2, 3
 STREET_DEAL_COUNTS = {FLOP: 3, TURN: 1, RIVER: 1}
@@ -130,6 +130,7 @@ def betting_round(
     last_raise_increment = min_bet
     last_aggressor: int | None = None
     num_raises = 0
+    raiser_seats: set[int] = set()
 
     to_act = deque(i for i in order if not seats[i].all_in and not seats[i].folded)
 
@@ -171,6 +172,9 @@ def betting_round(
             is_aggressor=(last_aggressor == i),
             starting_stack=starting_stack,
             big_blind=min_bet,
+            raised_positions=frozenset(
+                seat_role(j, button_idx, len(seats)) for j in raiser_seats if j != i
+            ),
             opp_vpip=opp_features.opp_vpip,
             opp_pfr=opp_features.opp_pfr,
             opp_three_bet=opp_features.opp_three_bet,
@@ -218,6 +222,7 @@ def betting_round(
             last_raise_increment = max(new_bet - current_bet, min_bet)
             current_bet = new_bet
             last_aggressor = i
+            raiser_seats.add(i)
             num_raises += 1
             if log is not None:
                 log.append((i, "raise", new_bet))

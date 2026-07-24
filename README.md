@@ -46,11 +46,11 @@ A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
   every weight vector's shape automatically, whatever `features.py`
   defines. The feature weights themselves (`weights_v`/`weights_l`) are
   quantized to a small fixed alphabet — `WEIGHT_ALPHABET = {-30, -20, -10,
-  -5, 0, 5, 10, 20, 30}` — via `quantize()`, applied centrally in
-  `Genome.unflatten()` so every genome coming out of crossover/mutation
-  snaps back onto the alphabet without `ga.py` needing to know which genes
-  are weights. This turns a genome into something closer to a lookup table
-  a human could memorize, rather than an arbitrary-float vector.
+  -5, 0, 5, 10, 20, 30}` — via `quantize()`, applied inside `mutate_weights()`
+  and `Genome.random()` so every weight gene snaps back onto the alphabet
+  without `ga.py` needing to know which genes are weights. This turns a
+  genome into something closer to a lookup table a human could memorize,
+  rather than an arbitrary-float vector.
 - **Ranges** (`poker_ga/ranges.py`): parses human-readable starting-hand
   range strings, e.g. `"AA-77, AJs+, AQo+, KQs"`, into the standard 169-hand
   abstraction (13 pocket pairs + 78 suited + 78 offsuit two-card combos,
@@ -270,8 +270,8 @@ Key flags (see `python main.py --help` for all of them):
 - `--reload-previous` (default on) — seeds generation 0 from a previous
   run's saved population instead of starting from scratch, so consecutive
   runs against the same `--out-dir` keep evolving where the last one left
-  off. Prefers `<out-dir>/latest_population.npy` (updated every generation
-  -- see below) if present, falling back to `<final-out-dir>/population.npy`
+  off. Prefers `<out-dir>/latest_population.json` (updated every generation
+  -- see below) if present, falling back to `<final-out-dir>/population.json`
   (only written once, when a run finishes its final tournament) otherwise.
   If population sizes differ, the reloaded genomes (best-first) are
   truncated or padded with fresh random genomes to fit. Pass
@@ -282,31 +282,39 @@ Key flags (see `python main.py --help` for all of them):
   training stops early. 0 disables stopping (reverting on non-improvement
   still happens, training just never gives up).
 
-The best genome is saved after every generation to `<out-dir>/best_genome_latest.npy`.
+The best genome is saved after every generation to `<out-dir>/best_genome_latest.json`.
 Load it back with:
 
 ```python
 from genome import Genome
-best = Genome.load("runs/best_genome_latest.npy")
+best = Genome.load("runs/best_genome_latest.json")
 ```
+
+Genomes are saved as a named JSON dictionary (feature/GTO-spot key -> value),
+not a raw positional array, so a saved genome survives `features.py`/`gto.py`
+changing in a later version of the code: `Genome.load`/`load_population`
+drop any saved entry whose name no longer exists (printing a warning) and
+freshly randomize any entry the current catalog expects but the save doesn't
+have (also with a warning), rather than erroring out or silently
+misaligning weights to the wrong features.
 
 ### Resuming and benchmark checkpoints
 
 Two population snapshots are kept on disk, both **continuously overwritten
 in place** (never one file per generation, so long runs don't bloat disk):
 
-- `<out-dir>/latest_population.npy` — the full population, saved after
+- `<out-dir>/latest_population.json` — the full population, saved after
   *every* generation. This is what `--reload-previous` prefers, so an
   interrupted or killed run can resume from wherever it last got to, not
   just from a fully completed run's final tournament output.
-- `<out-dir>/benchmarks/checkpoint_population.npy` — a full population
+- `<out-dir>/benchmarks/checkpoint_population.json` — a full population
   snapshot, but only ever advanced when a benchmark check (below) confirms
   the current population actually beat it. It always holds the last
   population that was *measured* to be an improvement, not just the most
   recent one.
 
 Every `--benchmark-interval` generations (default 10, 0 disables), the live
-population is played head-to-head against `checkpoint_population.npy` in
+population is played head-to-head against `checkpoint_population.json` in
 `--benchmark-tables` independent 3-vs-3 tables (`benchmark.run_benchmark`;
 3 random players from each side per table, refilling any busted seat with a
 fresh player from its own side so the match stays 3v3 for the whole
@@ -323,11 +331,11 @@ against each other's own random opponents that generation, so "500" at gen
 zero-sum (chips only move between the seated players, refilling never
 creates or destroys any), so "improved" is exactly `current_net_total > 0`:
 
-- **Improved** — `checkpoint_population.npy` is overwritten with the
+- **Improved** — `checkpoint_population.json` is overwritten with the
   current population (the checkpoint advances), and the consecutive
   non-improvement counter resets to 0.
 - **Not improved** — training reverts: the live population is discarded and
-  replaced with the checkpoint's (both `latest_population.npy` and the
+  replaced with the checkpoint's (both `latest_population.json` and the
   in-memory population), so the next generation retries evolution from the
   same starting point with fresh randomness rather than building further on
   a population that got measurably worse. The consecutive non-improvement
@@ -362,8 +370,8 @@ After the last generation, `<out-dir>/final/` contains:
   (and quantized, per WEIGHT_ALPHABET), not literal V/L percentage points. A
   reference section defines each generalized/standalone feature precisely,
   grouped the same way (36 entries, not 130).
-- `rankNN_playerID_genome.npy` — the raw weights, loadable via `Genome.load`.
-- `population.npy` — the entire final generation, ranked best-first, saved
+- `rankNN_playerID_genome.json` — the named-dictionary weights, loadable via `Genome.load`.
+- `population.json` — the entire final generation, ranked best-first, saved
   via `genome.save_population`. This is what `--reload-previous` picks up
   on the next run.
 
