@@ -12,7 +12,7 @@ import time
 
 import numpy as np
 
-from benchmark import run_benchmark
+from benchmark import run_benchmark_until_resolved
 from ga import GAConfig, IslandConfig, IslandModel
 from game import GameConfig
 from genome import load_population, save_population
@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--out-dir", type=str, default="runs", help="Where to save the best genome each generation.")
     p.add_argument(
-        "--final-rounds", type=int, default=200,
+        "--final-rounds", type=int, default=100,
         help="Random re-seatings in the final scoring tournament (more than --rounds for a low-variance ranking).",
     )
     p.add_argument(
@@ -79,15 +79,39 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--benchmark-interval", type=int, default=10,
         help="Every this many generations, play the current population head-to-head against "
-        "a saved checkpoint from --benchmark-interval generations ago, in 3-vs-3 tables, and "
-        "print aggregate net chips + bb/100 for each side. Unlike the per-generation fitness "
-        "number (only comparable against that generation's own random opponents), this is a "
-        "direct, apples-to-apples measure of whether evolution is actually improving. Set to "
-        "0 to disable.",
+        "a saved checkpoint from --benchmark-interval generations ago, in 3-vs-3 tables, until "
+        "the result is statistically resolved (see --benchmark-min/max-tables, "
+        "--benchmark-p-value). Unlike the per-generation fitness number (only comparable "
+        "against that generation's own random opponents), this is a direct, apples-to-apples "
+        "measure of whether evolution is actually improving. Set to 0 to disable.",
     )
     p.add_argument(
-        "--benchmark-tables", type=int, default=200,
-        help="Number of independent 3-vs-3 tables played for each --benchmark-interval checkpoint match.",
+        "--benchmark-min-tables", type=int, default=100,
+        help="Minimum number of 3-vs-3 tables played against the checkpoint before checking "
+        "whether the result is statistically resolved (see --benchmark-p-value). Poker has "
+        "enough hand-to-hand variance that fewer tables than this makes the improve/regress "
+        "call mostly noise.",
+    )
+    p.add_argument(
+        "--benchmark-max-tables", type=int, default=5000,
+        help="Hard cap on 3-vs-3 tables played in one benchmark check. If the confidence "
+        "interval still straddles 0 at this point (a genuinely-near-zero edge can take a very "
+        "long time to resolve), the check ends anyway and is conservatively treated as 'not "
+        "improved'.",
+    )
+    p.add_argument(
+        "--benchmark-table-batch", type=int, default=50,
+        help="Additional tables played per round once --benchmark-min-tables isn't enough to "
+        "resolve the confidence interval (repeats until it resolves or --benchmark-max-tables "
+        "is hit).",
+    )
+    p.add_argument(
+        "--benchmark-p-value", type=float, default=0.05,
+        help="Improvement p-value threshold (N): the benchmark keeps playing tables until the "
+        "(1 - N) confidence interval of the current population's mean bb/100 edge over the "
+        "checkpoint no longer includes 0, i.e. until the direction of the edge is resolved to "
+        "this confidence level. Lower values demand stronger evidence before calling a "
+        "generation improved or regressed (and so tend to need more tables to resolve).",
     )
     p.add_argument(
         "--early-stop-patience", type=int, default=3,
@@ -241,20 +265,24 @@ def main() -> None:
                     Player(player_id=-(i + 1), genome=g, generation=gen - args.benchmark_interval)
                     for i, g in enumerate(checkpoint_genomes)
                 ]
-                bench = run_benchmark(
+                outcome = run_benchmark_until_resolved(
                     all_players, checkpoint_players, game_config, rng,
-                    num_tables=args.benchmark_tables,
+                    min_tables=args.benchmark_min_tables,
+                    max_tables=args.benchmark_max_tables,
+                    table_batch=args.benchmark_table_batch,
+                    p_value=args.benchmark_p_value,
                 )
-                # The match is zero-sum (chips only move between the seated
-                # players, none created/destroyed by refilling), so beating
-                # the checkpoint at all is exactly current_net_total > 0.
-                improved = bench.current_net_total > 0
+                if outcome.resolved:
+                    verdict = "IMPROVED" if outcome.improved else "REGRESSED"
+                else:
+                    verdict = "INCONCLUSIVE (table cap hit; treated as not improved)"
+                confidence_pct = (1.0 - args.benchmark_p_value) * 100.0
                 print(
-                    f"         | benchmark vs checkpoint | "
-                    f"current {bench.current_net_total:+9.1f} chips ({bench.bb_per_100('current', args.big_blind):+7.2f} bb/100) "
-                    f"| checkpoint {bench.checkpoint_net_total:+9.1f} chips ({bench.bb_per_100('checkpoint', args.big_blind):+7.2f} bb/100) "
-                    f"| {'IMPROVED' if improved else 'NOT IMPROVED'}"
+                    f"         | benchmark vs checkpoint | {outcome.tables_played} tables | "
+                    f"current edge {outcome.mean_bb_per_100:+7.2f} bb/100 "
+                    f"({confidence_pct:.0f}% CI [{outcome.ci_low:+7.2f}, {outcome.ci_high:+7.2f}]) | {verdict}"
                 )
+                improved = outcome.improved
                 if improved:
                     consecutive_non_improvements = 0
                     save_population([p.genome for p in all_players], benchmark_checkpoint_path)

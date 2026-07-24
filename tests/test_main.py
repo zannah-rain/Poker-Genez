@@ -32,6 +32,14 @@ class TestParseArgs:
         assert args.num_islands == 3
         assert args.reload_previous is True
 
+    def test_benchmark_defaults(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["main.py"])
+        args = parse_args()
+        assert args.benchmark_min_tables == 100
+        assert args.benchmark_max_tables == 5000
+        assert args.benchmark_table_batch == 50
+        assert args.benchmark_p_value == 0.05
+
     def test_overrides_are_applied(self, monkeypatch):
         monkeypatch.setattr("sys.argv", [
             "main.py", "--generations", "5", "--population", "30",
@@ -42,6 +50,20 @@ class TestParseArgs:
         assert args.population == 30
         assert args.sparsity_penalty == 0.0
         assert args.num_islands == 1
+
+    def test_benchmark_overrides_are_applied(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", [
+            "main.py",
+            "--benchmark-min-tables", "50",
+            "--benchmark-max-tables", "500",
+            "--benchmark-table-batch", "25",
+            "--benchmark-p-value", "0.01",
+        ])
+        args = parse_args()
+        assert args.benchmark_min_tables == 50
+        assert args.benchmark_max_tables == 500
+        assert args.benchmark_table_batch == 25
+        assert args.benchmark_p_value == 0.01
 
     def test_no_reload_previous_flag(self, monkeypatch):
         monkeypatch.setattr("sys.argv", ["main.py", "--no-reload-previous"])
@@ -97,3 +119,29 @@ class TestMainSmoke:
         final_dir = os.path.join(out_dir, "final")
         assert os.path.exists(os.path.join(final_dir, "leaderboard.md"))
         assert os.path.exists(os.path.join(final_dir, "population.json"))
+
+    def test_main_exercises_the_benchmark_and_checkpoint_path(self, tmp_path, monkeypatch, capsys):
+        out_dir = str(tmp_path / "runs")
+        monkeypatch.setattr("sys.argv", [
+            "main.py",
+            "--generations", "2",
+            "--population", "6",
+            "--rounds", "1",
+            "--max-hands", "3",
+            "--final-rounds", "1",
+            "--final-max-hands", "2",
+            "--num-islands", "1",
+            "--benchmark-interval", "1",
+            "--benchmark-min-tables", "4",
+            "--benchmark-max-tables", "4",
+            "--benchmark-table-batch", "4",
+            "--top-n", "1",
+            "--out-dir", out_dir,
+            "--no-reload-previous",
+            "--seed", "0",
+        ])
+        main()
+        checkpoint_path = os.path.join(out_dir, "benchmarks", "checkpoint_population.json")
+        assert os.path.exists(checkpoint_path)
+        output = capsys.readouterr().out
+        assert "benchmark vs checkpoint" in output

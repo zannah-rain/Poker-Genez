@@ -4,10 +4,23 @@ a tangible, apples-to-apples measure of whether evolution is actually
 improving play. The per-generation fitness number isn't useful for this --
 it only ranks genomes against that generation's own random opponents, so a
 "fitness" of 500 at generation 10 and 500 at generation 50 aren't
-comparable. A direct match against a fixed past checkpoint is."""
+comparable. A direct match against a fixed past checkpoint is.
+
+Poker has enough hand-to-hand variance that judging a match by a fixed
+number of tables is unreliable: too few tables and a lucky/unlucky run of
+cards decides the verdict as much as actual skill does; too many and
+obvious results waste time that could go into more evolution. Instead,
+`run_benchmark_until_resolved` runs a simple sequential test: it keeps
+adding 3-vs-3 tables, tracking the current side's bb/100 edge as one
+independent sample per table, until a confidence interval around the mean
+edge no longer straddles zero (the sign of the edge is statistically
+resolved) -- or until a hard cap on tables is reached, whichever comes
+first.
+"""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -17,21 +30,6 @@ from opponent_model import OpponentModel
 from player import Player
 
 SEATS_PER_SIDE = 3
-
-
-@dataclass
-class BenchmarkResult:
-    current_net_total: float = 0.0
-    checkpoint_net_total: float = 0.0
-    current_hands_total: int = 0
-    checkpoint_hands_total: int = 0
-
-    def bb_per_100(self, side: str, big_blind: float) -> float:
-        net = self.current_net_total if side == "current" else self.checkpoint_net_total
-        hands = self.current_hands_total if side == "current" else self.checkpoint_hands_total
-        if hands == 0:
-            return 0.0
-        return (net / big_blind) / hands * 100.0
 
 
 def _play_side_match(
@@ -91,23 +89,125 @@ def _play_side_match(
     return current_net, checkpoint_net, current_hands, checkpoint_hands
 
 
-def run_benchmark(
+def _inverse_normal_cdf(p: float) -> float:
+    """Approximates the inverse standard normal CDF (the probit function)
+    via Peter Acklam's rational approximation (accurate to ~1.15e-9), so
+    confidence intervals can be computed with only numpy/math -- no scipy
+    dependency needed for this one calculation."""
+    if not 0.0 < p < 1.0:
+        raise ValueError(f"p must be strictly between 0 and 1, got {p}")
+
+    a = (-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
+         1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00)
+    b = (-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
+         6.680131188771972e+01, -1.328068155288572e+01)
+    c = (-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
+         -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00)
+    d = (7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
+         3.754408661907416e+00)
+    p_low, p_high = 0.02425, 1 - 0.02425
+
+    if p < p_low:
+        q = math.sqrt(-2 * math.log(p))
+        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / (
+            (((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1
+        )
+    if p <= p_high:
+        q = p - 0.5
+        r = q * q
+        return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / (
+            (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1)
+        )
+    q = math.sqrt(-2 * math.log(1 - p))
+    return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / (
+        (((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1
+    )
+
+
+def confidence_interval(samples: list[float], p_value: float) -> tuple[float, float]:
+    """Two-sided (1 - p_value) confidence interval around the sample mean.
+    Uses a normal approximation rather than a Student's t interval -- with
+    the tens-to-hundreds of tables this is used for, the two are close
+    enough that the extra machinery (and a scipy dependency) isn't worth
+    it."""
+    n = len(samples)
+    if n < 2:
+        raise ValueError("Need at least 2 samples to compute a confidence interval.")
+    mean = float(np.mean(samples))
+    std = float(np.std(samples, ddof=1))
+    se = std / math.sqrt(n)
+    z = _inverse_normal_cdf(1.0 - p_value / 2.0)
+    margin = z * se
+    return mean - margin, mean + margin
+
+
+@dataclass
+class BenchmarkOutcome:
+    """Result of a sequential benchmark match against a checkpoint.
+    `mean_bb_per_100`/`ci_low`/`ci_high` describe the CURRENT side's edge
+    over the checkpoint -- the checkpoint's own edge is exactly the
+    negation, since each table is zero-sum and both sides always see the
+    same number of hands (see `_play_side_match`), so there's no need to
+    track a separate distribution for it."""
+
+    tables_played: int
+    mean_bb_per_100: float
+    ci_low: float
+    ci_high: float
+    resolved: bool  # True if the CI excluded 0 before hitting max_tables
+    improved: bool  # the resolved verdict; conservatively False if unresolved
+    hit_table_cap: bool  # True if max_tables was reached without resolving
+
+
+def run_benchmark_until_resolved(
     current_players: list[Player],
     checkpoint_players: list[Player],
     game_config: GameConfig,
     rng: np.random.Generator,
-    num_tables: int = 60,
-) -> BenchmarkResult:
-    """Plays `num_tables` independent 3-vs-3 tables, each seating a random
-    sample of 3 from `current_players` against a random sample of 3 from
-    `checkpoint_players`, and aggregates net chips + bb/100 for each side."""
-    result = BenchmarkResult()
-    for _ in range(num_tables):
-        cur_net, chk_net, cur_hands, chk_hands = _play_side_match(
-            current_players, checkpoint_players, game_config, rng
-        )
-        result.current_net_total += cur_net
-        result.checkpoint_net_total += chk_net
-        result.current_hands_total += cur_hands
-        result.checkpoint_hands_total += chk_hands
-    return result
+    min_tables: int = 100,
+    max_tables: int = 5000,
+    table_batch: int = 50,
+    p_value: float = 0.05,
+) -> BenchmarkOutcome:
+    """Plays 3-vs-3 tables against the checkpoint one at a time, treating
+    each table's current-side bb/100 as one independent sample. After the
+    first `min_tables`, and again every `table_batch` tables after that, it
+    checks whether the `1 - p_value` confidence interval around the mean
+    sample still straddles zero: if not, the sign of the edge is considered
+    statistically resolved and the match ends immediately (no need to keep
+    playing once the direction is clear). If the CI still contains zero
+    once `max_tables` is reached, the match ends anyway (`hit_table_cap`),
+    conservatively reported as "not improved" -- the caller should treat
+    that the same as a confirmed regression, since improvement was never
+    actually established."""
+    if min_tables < 2:
+        raise ValueError("min_tables must be at least 2 to compute a confidence interval.")
+    if table_batch < 1:
+        raise ValueError("table_batch must be at least 1.")
+
+    samples: list[float] = []
+    target = min_tables
+    while True:
+        while len(samples) < target:
+            cur_net, _chk_net, cur_hands, _chk_hands = _play_side_match(
+                current_players, checkpoint_players, game_config, rng,
+            )
+            bb100 = (cur_net / game_config.big_blind) / cur_hands * 100.0 if cur_hands else 0.0
+            samples.append(bb100)
+
+        ci_low, ci_high = confidence_interval(samples, p_value)
+        mean = float(np.mean(samples))
+
+        if ci_low > 0.0 or ci_high < 0.0:
+            return BenchmarkOutcome(
+                tables_played=len(samples), mean_bb_per_100=mean,
+                ci_low=ci_low, ci_high=ci_high, resolved=True,
+                improved=ci_low > 0.0, hit_table_cap=False,
+            )
+        if len(samples) >= max_tables:
+            return BenchmarkOutcome(
+                tables_played=len(samples), mean_bb_per_100=mean,
+                ci_low=ci_low, ci_high=ci_high, resolved=False,
+                improved=False, hit_table_cap=True,
+            )
+        target = min(len(samples) + table_batch, max_tables)
