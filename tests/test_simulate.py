@@ -169,6 +169,30 @@ class TestRunGeneration:
         # just never actually plays this round.
         assert set(fitness.keys()) == {p.player_id for p in players}
 
+    def test_progress_bar_is_written_to_stderr_by_default(self, capsys):
+        players = make_random_players(6)
+        config = GameConfig(max_hands_per_session=3)
+        sim_config = SimConfig(rounds_per_generation=1, table_size=6)
+        run_generation(players, config, sim_config, np.random.default_rng(0))
+        assert "generation eval" in capsys.readouterr().err
+
+    def test_show_progress_false_suppresses_the_bar(self, capsys):
+        players = make_random_players(6)
+        config = GameConfig(max_hands_per_session=3)
+        sim_config = SimConfig(rounds_per_generation=1, table_size=6)
+        run_generation(players, config, sim_config, np.random.default_rng(0), show_progress=False)
+        assert capsys.readouterr().err == ""
+
+    def test_custom_progress_desc_is_used(self, capsys):
+        players = make_random_players(6)
+        config = GameConfig(max_hands_per_session=3)
+        sim_config = SimConfig(rounds_per_generation=1, table_size=6)
+        run_generation(
+            players, config, sim_config, np.random.default_rng(0),
+            progress_desc="island 2/3 eval",
+        )
+        assert "island 2/3 eval" in capsys.readouterr().err
+
 
 class TestCombineGenerationStats:
     def test_sums_scalar_totals(self):

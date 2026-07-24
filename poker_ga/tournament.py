@@ -6,10 +6,12 @@ genomes as human-readable strategy reports plus performance statistics.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 
 import numpy as np
+from tqdm import tqdm
 
 from features import FEATURE_GROUPS, FEATURE_SPECS, group_of
 from game import GameConfig
@@ -59,6 +61,7 @@ def run_final_tournament(
     game_config: GameConfig,
     sim_config: SimConfig,
     rng: np.random.Generator,
+    show_progress: bool = True,
 ) -> dict[int, PlayerStats]:
     """Runs many rounds of random re-seating (more than a normal GA
     generation) and accumulates detailed per-player statistics, using
@@ -66,12 +69,20 @@ def run_final_tournament(
     from the whole population rather than ending the session early)."""
     stats = {p.player_id: PlayerStats(player_id=p.player_id, label=p.label) for p in players}
 
+    # This is usually the single slowest step of a run (many more rounds
+    # than a per-generation fitness pass, for a low-variance final ranking),
+    # so a progress bar over its fixed table count is worth the noise.
+    tables_per_round = math.ceil(len(players) / sim_config.table_size)
+    total_tables = sim_config.rounds_per_generation * tables_per_round
+    progress = tqdm(total=total_tables, desc="final tournament", unit="table", disable=not show_progress)
+
     for _ in range(sim_config.rounds_per_generation):
         order = rng.permutation(len(players))
         shuffled = [players[i] for i in order]
         for start in range(0, len(shuffled), sim_config.table_size):
             table = shuffled[start : start + sim_config.table_size]
             if len(table) < 2:
+                progress.update(1)
                 continue
             result = run_session(table, game_config, rng, backfill_pool=players)
             for pid, net in result["net"].items():
@@ -84,7 +95,9 @@ def run_final_tournament(
                     s.busts += 1
                 if result["winner_id"] == pid:
                     s.sessions_won += 1
+            progress.update(1)
 
+    progress.close()
     return stats
 
 

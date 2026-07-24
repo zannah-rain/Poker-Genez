@@ -5,9 +5,11 @@ into fitness scores the GA can select on."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
+from tqdm import tqdm
 
 from game import GameConfig, HandStats, SeatState, play_hand
 from opponent_model import OpponentModel
@@ -123,6 +125,8 @@ def run_generation(
     game_config: GameConfig,
     sim_config: SimConfig,
     rng: np.random.Generator,
+    show_progress: bool = True,
+    progress_desc: str = "generation eval",
 ) -> tuple[dict[int, float], GenerationStats]:
     """Runs `rounds_per_generation` rounds of random table re-seating across
     the whole population, accumulating each player's net chip result (the
@@ -132,12 +136,20 @@ def run_generation(
     total_fitness = {p.player_id: 0.0 for p in players}
     gen_stats = GenerationStats()
 
+    # One table match (a full session, up to max_hands_per_session hands) is
+    # the actual slow unit of work here -- a fixed, known count up front, so
+    # a tqdm bar over it gives an honest ETA instead of just "still going".
+    tables_per_round = math.ceil(len(players) / sim_config.table_size)
+    total_tables = sim_config.rounds_per_generation * tables_per_round
+    progress = tqdm(total=total_tables, desc=progress_desc, unit="table", disable=not show_progress, leave=False)
+
     for _ in range(sim_config.rounds_per_generation):
         order = rng.permutation(len(players))
         shuffled = [players[i] for i in order]
         for start in range(0, len(shuffled), sim_config.table_size):
             table = shuffled[start : start + sim_config.table_size]
             if len(table) < 2:
+                progress.update(1)
                 continue
             result = run_session(table, game_config, rng, backfill_pool=players, stats=gen_stats.hand_stats)
             for pid, delta in result["net"].items():
@@ -147,7 +159,9 @@ def run_generation(
                 gen_stats.total_session_participations += 1
                 if result["busted"].get(pid):
                     gen_stats.total_busts += 1
+            progress.update(1)
 
+    progress.close()
     return total_fitness, gen_stats
 
 

@@ -24,6 +24,7 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
+from tqdm import tqdm
 
 from game import GameConfig, SeatState, play_hand
 from opponent_model import OpponentModel
@@ -168,6 +169,7 @@ def run_benchmark_until_resolved(
     max_tables: int = 5000,
     table_batch: int = 50,
     p_value: float = 0.05,
+    show_progress: bool = True,
 ) -> BenchmarkOutcome:
     """Plays 3-vs-3 tables against the checkpoint one at a time, treating
     each table's current-side bb/100 as one independent sample. After the
@@ -179,7 +181,14 @@ def run_benchmark_until_resolved(
     once `max_tables` is reached, the match ends anyway (`hit_table_cap`),
     conservatively reported as "not improved" -- the caller should treat
     that the same as a confirmed regression, since improvement was never
-    actually established."""
+    actually established.
+
+    Since this can take an unpredictable (and potentially large) number of
+    tables to resolve, `show_progress` (on by default) both draws a tqdm bar
+    across each batch and prints an interim status line -- tables played so
+    far, the running bb/100 edge and its CI, resolved or not -- after every
+    batch, so a slow run isn't silent while it works out which way the
+    edge points."""
     if min_tables < 2:
         raise ValueError("min_tables must be at least 2 to compute a confidence interval.")
     if table_batch < 1:
@@ -188,26 +197,50 @@ def run_benchmark_until_resolved(
     samples: list[float] = []
     target = min_tables
     while True:
-        while len(samples) < target:
-            cur_net, _chk_net, cur_hands, _chk_hands = _play_side_match(
-                current_players, checkpoint_players, game_config, rng,
-            )
-            bb100 = (cur_net / game_config.big_blind) / cur_hands * 100.0 if cur_hands else 0.0
-            samples.append(bb100)
+        batch_size = target - len(samples)
+        with tqdm(
+            total=batch_size, desc=f"benchmark ({len(samples)}-{target} tables)",
+            unit="table", disable=not show_progress, leave=False,
+        ) as progress:
+            while len(samples) < target:
+                cur_net, _chk_net, cur_hands, _chk_hands = _play_side_match(
+                    current_players, checkpoint_players, game_config, rng,
+                )
+                bb100 = (cur_net / game_config.big_blind) / cur_hands * 100.0 if cur_hands else 0.0
+                samples.append(bb100)
+                progress.update(1)
 
         ci_low, ci_high = confidence_interval(samples, p_value)
         mean = float(np.mean(samples))
 
         if ci_low > 0.0 or ci_high < 0.0:
+            if show_progress:
+                verdict = "IMPROVED" if ci_low > 0.0 else "REGRESSED"
+                print(
+                    f"    benchmark resolved after {len(samples)} tables | "
+                    f"current edge {mean:+.2f} bb/100 (CI [{ci_low:+.2f}, {ci_high:+.2f}]) | {verdict}"
+                )
             return BenchmarkOutcome(
                 tables_played=len(samples), mean_bb_per_100=mean,
                 ci_low=ci_low, ci_high=ci_high, resolved=True,
                 improved=ci_low > 0.0, hit_table_cap=False,
             )
         if len(samples) >= max_tables:
+            if show_progress:
+                print(
+                    f"    benchmark hit the {max_tables}-table cap without resolving | "
+                    f"current edge {mean:+.2f} bb/100 (CI [{ci_low:+.2f}, {ci_high:+.2f}]) | "
+                    "treating as NOT IMPROVED"
+                )
             return BenchmarkOutcome(
                 tables_played=len(samples), mean_bb_per_100=mean,
                 ci_low=ci_low, ci_high=ci_high, resolved=False,
                 improved=False, hit_table_cap=True,
+            )
+        if show_progress:
+            print(
+                f"    benchmark inconclusive after {len(samples)} tables | "
+                f"current edge {mean:+.2f} bb/100 (CI [{ci_low:+.2f}, {ci_high:+.2f}]) | "
+                f"still includes 0 -- playing {table_batch} more..."
             )
         target = min(len(samples) + table_batch, max_tables)

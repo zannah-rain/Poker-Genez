@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evolve poker strategies with a genetic algorithm.")
     p.add_argument("--generations", type=int, default=100)
     p.add_argument("--population", type=int, default=180, help="Must be a multiple of 6.")
-    p.add_argument("--rounds", type=int, default=5, help="Random re-seatings per generation.")
+    p.add_argument("--rounds", type=int, default=30, help="Random re-seatings per generation.")
     p.add_argument("--max-hands", type=int, default=200, help="Hand cap per table session.")
     p.add_argument("--starting-stack", type=float, default=200.0)
     p.add_argument("--small-blind", type=float, default=1.0)
@@ -93,20 +93,20 @@ def parse_args() -> argparse.Namespace:
         "call mostly noise.",
     )
     p.add_argument(
-        "--benchmark-max-tables", type=int, default=5000,
+        "--benchmark-max-tables", type=int, default=1000,
         help="Hard cap on 3-vs-3 tables played in one benchmark check. If the confidence "
         "interval still straddles 0 at this point (a genuinely-near-zero edge can take a very "
         "long time to resolve), the check ends anyway and is conservatively treated as 'not "
         "improved'.",
     )
     p.add_argument(
-        "--benchmark-table-batch", type=int, default=50,
+        "--benchmark-table-batch", type=int, default=100,
         help="Additional tables played per round once --benchmark-min-tables isn't enough to "
         "resolve the confidence interval (repeats until it resolves or --benchmark-max-tables "
         "is hit).",
     )
     p.add_argument(
-        "--benchmark-p-value", type=float, default=0.05,
+        "--benchmark-p-value", type=float, default=0.1,
         help="Improvement p-value threshold (N): the benchmark keeps playing tables until the "
         "(1 - N) confidence interval of the current population's mean bb/100 edge over the "
         "checkpoint no longer includes 0, i.e. until the direction of the edge is resolved to "
@@ -114,7 +114,7 @@ def parse_args() -> argparse.Namespace:
         "generation improved or regressed (and so tend to need more tables to resolve).",
     )
     p.add_argument(
-        "--early-stop-patience", type=int, default=3,
+        "--early-stop-patience", type=int, default=2,
         help="Whenever a --benchmark-interval check shows the current population hasn't beaten "
         "the previous benchmark checkpoint, training reverts to that checkpoint instead of "
         "continuing from the (worse) current population. If this happens this many times in a "
@@ -217,8 +217,10 @@ def main() -> None:
         t0 = time.time()
         fitness_by_island = []
         gen_stats_by_island = []
-        for island in island_model.islands:
-            raw_fitness, gen_stats = run_generation(island.players, game_config, sim_config, rng)
+        for i, island in enumerate(island_model.islands):
+            desc = f"gen {gen} eval (island {i + 1}/{len(island_model.islands)})" if len(island_model.islands) > 1 \
+                else f"gen {gen} eval"
+            raw_fitness, gen_stats = run_generation(island.players, game_config, sim_config, rng, progress_desc=desc)
             fitness_by_island.append(apply_sparsity_penalty(island.players, raw_fitness, args.sparsity_penalty))
             gen_stats_by_island.append(gen_stats)
 

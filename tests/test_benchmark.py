@@ -161,3 +161,59 @@ class TestRunBenchmarkUntilResolved:
             min_tables=10, max_tables=10, table_batch=5,
         )
         assert outcome.tables_played == 10
+
+
+class TestBenchmarkProgressReporting:
+    def test_progress_bar_is_written_to_stderr_by_default(self, capsys):
+        current = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=0)
+        checkpoint = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=100)
+        config = GameConfig(max_hands_per_session=3)
+        run_benchmark_until_resolved(
+            current, checkpoint, config, np.random.default_rng(0),
+            min_tables=5, max_tables=5, table_batch=5,
+        )
+        assert "benchmark (" in capsys.readouterr().err
+
+    def test_interim_message_printed_when_batch_is_inconclusive(self, capsys):
+        # Identical strategies on both sides -> true edge is 0, so the first
+        # (tiny) batch should almost always come back inconclusive, printing
+        # an interim status before playing another batch.
+        current = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=0)
+        checkpoint = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=100)
+        config = GameConfig(max_hands_per_session=3)
+        outcome = run_benchmark_until_resolved(
+            current, checkpoint, config, np.random.default_rng(0),
+            min_tables=5, max_tables=10, table_batch=5,
+        )
+        out = capsys.readouterr().out
+        if not outcome.resolved:
+            assert "table cap" in out
+        else:
+            # Whether or not it happened to resolve on the first batch, some
+            # interim/final status line should always be printed.
+            assert "benchmark" in out
+
+    def test_show_progress_false_suppresses_all_output(self, capsys):
+        current = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=0)
+        checkpoint = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=100)
+        config = GameConfig(max_hands_per_session=3)
+        run_benchmark_until_resolved(
+            current, checkpoint, config, np.random.default_rng(0),
+            min_tables=5, max_tables=10, table_batch=5, show_progress=False,
+        )
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+
+    def test_resolved_verdict_is_printed(self, capsys):
+        current = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=0)
+        checkpoint = make_fixed_players(SEATS_PER_SIDE, FOLD, id_offset=100)
+        config = GameConfig(max_hands_per_session=20, starting_stack=200.0)
+        outcome = run_benchmark_until_resolved(
+            current, checkpoint, config, np.random.default_rng(0),
+            min_tables=20, max_tables=200, table_batch=20,
+        )
+        assert outcome.resolved is True
+        out = capsys.readouterr().out
+        assert "resolved after" in out
+        assert "IMPROVED" in out

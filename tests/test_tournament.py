@@ -100,6 +100,24 @@ class TestRunFinalTournament:
         for s in stats.values():
             assert len(s.session_results) == 2
 
+    def test_progress_bar_is_written_to_stderr_by_default(self, capsys):
+        players = make_random_players(6)
+        run_final_tournament(
+            players, GameConfig(max_hands_per_session=3),
+            SimConfig(rounds_per_generation=1, table_size=6),
+            np.random.default_rng(0),
+        )
+        assert "final tournament" in capsys.readouterr().err
+
+    def test_show_progress_false_suppresses_the_bar(self, capsys):
+        players = make_random_players(6)
+        run_final_tournament(
+            players, GameConfig(max_hands_per_session=3),
+            SimConfig(rounds_per_generation=1, table_size=6),
+            np.random.default_rng(0), show_progress=False,
+        )
+        assert capsys.readouterr().err == ""
+
 
 class TestRankPlayers:
     def test_ranks_by_mean_net_chips_descending(self):
