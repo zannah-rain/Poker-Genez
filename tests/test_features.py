@@ -408,16 +408,24 @@ class TestOpponentTendencyFeatures:
 
     def test_passes_through_situation_values(self):
         values = values_by_key(make_situation(
-            opp_vpip=0.8, opp_pfr=0.3, villain_three_bet=0.9,
+            opp_vpip=0.8, opp_pfr=0.3,
         ))
         assert values["opp_vpip_norm"] == pytest.approx(0.8)
         assert values["opp_pfr_norm"] == pytest.approx(0.3)
-        assert values["villain_three_bet_norm"] == pytest.approx(0.9)
 
     def test_opponent_sample_size_feature_was_removed(self):
         # "doesn't interact with any other features" -- dropped as a genome
         # feature entirely, not just left unused.
         assert "opp_sample_norm" not in FEATURE_NAMES
+
+    def test_villain_features_were_removed(self):
+        # "Current Aggressor" reads were redundant with the table-average
+        # versions (and, for 3-bet %, incoherent -- the current aggressor
+        # can't have 3-bet before the player evaluating this feature) --
+        # dropped entirely, not just left unused.
+        assert "villain_three_bet_norm" not in FEATURE_NAMES
+        assert "villain_fold_vs_bet_norm" not in FEATURE_NAMES
+        assert "villain_aggression_freq_norm" not in FEATURE_NAMES
 
     def test_clips_out_of_range_values(self):
         values = values_by_key(make_situation(opp_vpip=1.5))

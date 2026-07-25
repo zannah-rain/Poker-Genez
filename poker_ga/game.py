@@ -151,8 +151,7 @@ def betting_round(
 
         position = order.index(i)
         opponent_ids = [seats[j].player.player_id for j in non_folded if j != i]
-        villain_id = seats[last_aggressor].player.player_id if last_aggressor is not None else None
-        opp_features = compute_opponent_features(opp_model, opponent_ids, villain_id)
+        opp_features = compute_opponent_features(opp_model, opponent_ids)
         situation = Situation(
             hole=seats[i].hole,
             board=board,
@@ -181,9 +180,6 @@ def betting_round(
             opp_fold_to_three_bet=opp_features.opp_fold_to_three_bet,
             opp_aggression_freq=opp_features.opp_aggression_freq,
             opp_fold_vs_bet=opp_features.opp_fold_vs_bet,
-            villain_three_bet=opp_features.villain_three_bet,
-            villain_fold_vs_bet=opp_features.villain_fold_vs_bet,
-            villain_aggression_freq=opp_features.villain_aggression_freq,
         )
         action, raw_bet_size = seats[i].player.genome.decide(situation, legal_actions, rng)
 

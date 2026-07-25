@@ -172,13 +172,12 @@ class TestRecordActionPostflop:
 
 class TestComputeOpponentFeatures:
     def test_no_model_returns_all_neutral_defaults(self):
-        features = compute_opponent_features(None, [2, 3], villain_id=2)
+        features = compute_opponent_features(None, [2, 3])
         assert features.opp_vpip == NEUTRAL
-        assert features.villain_three_bet == NEUTRAL
 
     def test_no_active_opponents_returns_defaults(self):
         model = OpponentModel()
-        features = compute_opponent_features(model, [], villain_id=None)
+        features = compute_opponent_features(model, [])
         assert features.opp_vpip == NEUTRAL
 
     def test_averages_across_active_opponents(self):
@@ -189,21 +188,13 @@ class TestComputeOpponentFeatures:
             model.start_hand([2, 3])
             model.record_action(2, True, CHECK_CALL, call_amount=2.0, num_raises_before=0, legal_actions=[CHECK_CALL, FOLD])
             model.record_action(3, True, FOLD, call_amount=2.0, num_raises_before=0, legal_actions=[CHECK_CALL, FOLD])
-        features = compute_opponent_features(model, [2, 3], villain_id=None)
+        features = compute_opponent_features(model, [2, 3])
         assert features.opp_vpip == pytest.approx(0.5, abs=0.05)
 
-    def test_villain_defaults_to_neutral_when_nobody_has_acted(self):
-        model = OpponentModel()
-        model.start_hand([2])
-        features = compute_opponent_features(model, [2], villain_id=None)
-        assert features.villain_three_bet == NEUTRAL
-        assert features.villain_fold_vs_bet == NEUTRAL
-        assert features.villain_aggression_freq == NEUTRAL
-
-    def test_villain_reads_specific_players_stats(self):
-        model = OpponentModel()
-        for _ in range(500):
-            model.start_hand([2, 3])
-            model.record_action(2, False, BET_RAISE, call_amount=0.0, num_raises_before=0, legal_actions=[CHECK_CALL, BET_RAISE])
-        features = compute_opponent_features(model, [2, 3], villain_id=2)
-        assert features.villain_aggression_freq == pytest.approx(1.0, abs=0.05)
+    def test_villain_features_were_removed(self):
+        # "Current Aggressor" reads were dropped as redundant with the
+        # table-average versions -- not just left unused.
+        features = compute_opponent_features(None, [2, 3])
+        assert not hasattr(features, "villain_three_bet")
+        assert not hasattr(features, "villain_fold_vs_bet")
+        assert not hasattr(features, "villain_aggression_freq")

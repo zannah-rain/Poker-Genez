@@ -152,11 +152,8 @@ class OpponentModel:
 @dataclass(frozen=True)
 class OpponentFeatures:
     """Exploitative feature values for one decision -- see features.py's
-    Situation fields of the same names. `opp_*` averages over every
-    currently active opponent (the field/table read); `villain_*` reads
-    specifically the player who made the last bet/raise this street (who
-    you're actually reacting to), defaulting to NEUTRAL when nobody has bet
-    yet this street."""
+    Situation fields of the same names. Each averages over every currently
+    active opponent."""
 
     opp_vpip: float = NEUTRAL
     opp_pfr: float = NEUTRAL
@@ -164,15 +161,11 @@ class OpponentFeatures:
     opp_fold_to_three_bet: float = NEUTRAL
     opp_aggression_freq: float = NEUTRAL
     opp_fold_vs_bet: float = NEUTRAL
-    villain_three_bet: float = NEUTRAL
-    villain_fold_vs_bet: float = NEUTRAL
-    villain_aggression_freq: float = NEUTRAL
 
 
 def compute_opponent_features(
     model: "OpponentModel | None",
     opponent_ids: list,
-    villain_id,
 ) -> OpponentFeatures:
     """Aggregates `model`'s stats into the values a Situation needs for one
     decision. Returns all-NEUTRAL defaults if there's no model (e.g. a
@@ -182,21 +175,11 @@ def compute_opponent_features(
 
     opponent_stats = [model.get(pid) for pid in opponent_ids]
     n = len(opponent_stats)
-    opp = OpponentFeatures(
+    return OpponentFeatures(
         opp_vpip=sum(s.vpip_rate() for s in opponent_stats) / n,
         opp_pfr=sum(s.pfr_rate() for s in opponent_stats) / n,
         opp_three_bet=sum(s.three_bet_rate() for s in opponent_stats) / n,
         opp_fold_to_three_bet=sum(s.fold_to_three_bet_rate() for s in opponent_stats) / n,
         opp_aggression_freq=sum(s.aggression_freq() for s in opponent_stats) / n,
         opp_fold_vs_bet=sum(s.fold_vs_bet_rate() for s in opponent_stats) / n,
-    )
-    if villain_id is None:
-        return opp
-    villain_stats = model.get(villain_id)
-    return OpponentFeatures(
-        **{**opp.__dict__, **{
-            "villain_three_bet": villain_stats.three_bet_rate(),
-            "villain_fold_vs_bet": villain_stats.fold_vs_bet_rate(),
-            "villain_aggression_freq": villain_stats.aggression_freq(),
-        }},
     )

@@ -258,10 +258,6 @@ _OPP_FOLD_VS_BET_VALUES = (
     (0.75, "Somewhat more likely than average to fold postflop"),
     (1.0, "Active opponents almost always fold to a postflop bet"),
 )
-_VILLAIN_THREE_BET_VALUES = _OPP_THREE_BET_VALUES
-_VILLAIN_FOLD_VS_BET_VALUES = _OPP_FOLD_VS_BET_VALUES
-_VILLAIN_AGGRESSION_FREQ_VALUES = _OPP_AGGRESSION_FREQ_VALUES
-
 _OPP_VPIP_CHILDREN = _continuous_children("opp_vpip_norm", _OPP_VPIP_VALUES)
 _OPP_PFR_CHILDREN = _continuous_children("opp_pfr_norm", _OPP_PFR_VALUES)
 _OPP_THREE_BET_CHILDREN = _continuous_children("opp_three_bet_norm", _OPP_THREE_BET_VALUES)
@@ -270,11 +266,6 @@ _OPP_FOLD_TO_THREE_BET_CHILDREN = _continuous_children(
 )
 _OPP_AGGRESSION_FREQ_CHILDREN = _continuous_children("opp_aggression_freq_norm", _OPP_AGGRESSION_FREQ_VALUES)
 _OPP_FOLD_VS_BET_CHILDREN = _continuous_children("opp_fold_vs_bet_norm", _OPP_FOLD_VS_BET_VALUES)
-_VILLAIN_THREE_BET_CHILDREN = _continuous_children("villain_three_bet_norm", _VILLAIN_THREE_BET_VALUES)
-_VILLAIN_FOLD_VS_BET_CHILDREN = _continuous_children("villain_fold_vs_bet_norm", _VILLAIN_FOLD_VS_BET_VALUES)
-_VILLAIN_AGGRESSION_FREQ_CHILDREN = _continuous_children(
-    "villain_aggression_freq_norm", _VILLAIN_AGGRESSION_FREQ_VALUES
-)
 
 _SEAT_ROLE_LABELS = {
     "UTG": "Under The Gun (UTG)", "HJ": "Hijack (HJ)", "CO": "Cutoff (CO)",
@@ -834,34 +825,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         kind="continuous", value_table=_OPP_FOLD_VS_BET_VALUES, group="Opponent Tendency Features",
     ),
     *_OPP_FOLD_VS_BET_CHILDREN,
-
-    FeatureSpec(
-        "villain_three_bet_norm", "Current Aggressor's 3-Bet %",
-        "The observed 3-bet rate (see Opponent 3-Bet %) of specifically whichever player "
-        "made the last bet/raise this street -- the single opponent actually applying "
-        "pressure right now, not a table average. Neutral 0.5 if nobody has bet/raised "
-        "yet this street.",
-        kind="continuous", value_table=_VILLAIN_THREE_BET_VALUES, group="Opponent Tendency Features",
-    ),
-    *_VILLAIN_THREE_BET_CHILDREN,
-
-    FeatureSpec(
-        "villain_fold_vs_bet_norm", "Current Aggressor's Fold vs Bet, Postflop",
-        "The observed postflop fold-vs-bet rate (see Opponent Fold vs Bet, Postflop) of "
-        "specifically whichever player made the last bet/raise this street. Neutral 0.5 "
-        "if nobody has bet/raised yet this street.",
-        kind="continuous", value_table=_VILLAIN_FOLD_VS_BET_VALUES, group="Opponent Tendency Features",
-    ),
-    *_VILLAIN_FOLD_VS_BET_CHILDREN,
-
-    FeatureSpec(
-        "villain_aggression_freq_norm", "Current Aggressor's Postflop Aggression Frequency",
-        "The observed postflop aggression frequency (see Opponent Postflop Aggression "
-        "Frequency) of specifically whichever player made the last bet/raise this "
-        "street. Neutral 0.5 if nobody has bet/raised yet this street.",
-        kind="continuous", value_table=_VILLAIN_AGGRESSION_FREQ_VALUES, group="Opponent Tendency Features",
-    ),
-    *_VILLAIN_AGGRESSION_FREQ_CHILDREN,
 ]
 
 FEATURE_NAMES = [spec.key for spec in FEATURE_SPECS]
@@ -919,9 +882,6 @@ class Situation:
     opp_fold_to_three_bet: float = 0.5
     opp_aggression_freq: float = 0.5
     opp_fold_vs_bet: float = 0.5
-    villain_three_bet: float = 0.5
-    villain_fold_vs_bet: float = 0.5
-    villain_aggression_freq: float = 0.5
 
 
 def _clip01(x: float) -> float:
@@ -1072,9 +1032,6 @@ _BUCKET_KEY_FAMILIES = {
     "opp_fold_to_three_bet_norm": _OPP_FOLD_TO_THREE_BET_CHILDREN,
     "opp_aggression_freq_norm": _OPP_AGGRESSION_FREQ_CHILDREN,
     "opp_fold_vs_bet_norm": _OPP_FOLD_VS_BET_CHILDREN,
-    "villain_three_bet_norm": _VILLAIN_THREE_BET_CHILDREN,
-    "villain_fold_vs_bet_norm": _VILLAIN_FOLD_VS_BET_CHILDREN,
-    "villain_aggression_freq_norm": _VILLAIN_AGGRESSION_FREQ_CHILDREN,
 }
 _BUCKET_KEYS_BY_FEATURE = {
     name: tuple(spec.key for spec in children) for name, children in _BUCKET_KEY_FAMILIES.items()
@@ -1129,9 +1086,6 @@ def extract_features(sit: Situation) -> np.ndarray:
         "opp_fold_to_three_bet_norm": _clip01(sit.opp_fold_to_three_bet),
         "opp_aggression_freq_norm": _clip01(sit.opp_aggression_freq),
         "opp_fold_vs_bet_norm": _clip01(sit.opp_fold_vs_bet),
-        "villain_three_bet_norm": _clip01(sit.villain_three_bet),
-        "villain_fold_vs_bet_norm": _clip01(sit.villain_fold_vs_bet),
-        "villain_aggression_freq_norm": _clip01(sit.villain_aggression_freq),
     }
     for i, seat_role_name in enumerate(SEAT_ROLES):
         values[_SEAT_ROLE_KEYS[seat_role_name]] = float(role_index == i)
@@ -1175,9 +1129,6 @@ def extract_features(sit: Situation) -> np.ndarray:
         ("opp_fold_to_three_bet_norm", values["opp_fold_to_three_bet_norm"]),
         ("opp_aggression_freq_norm", values["opp_aggression_freq_norm"]),
         ("opp_fold_vs_bet_norm", values["opp_fold_vs_bet_norm"]),
-        ("villain_three_bet_norm", values["villain_three_bet_norm"]),
-        ("villain_fold_vs_bet_norm", values["villain_fold_vs_bet_norm"]),
-        ("villain_aggression_freq_norm", values["villain_aggression_freq_norm"]),
     ):
         nearest = _nearest_bucket_index(raw_value)
         bucket_keys = _BUCKET_KEYS_BY_FEATURE[feature_key]
