@@ -217,46 +217,46 @@ _STACK_DEPTH_VALUES = (
     (1.0, "2x the starting stack or more (clipped)"),
 )
 _OPP_VPIP_VALUES = (
-    (0.0, "Active opponents almost never voluntarily play a hand (very tight)"),
-    (0.25, "Active opponents play somewhat tighter than average"),
-    (0.5, "Average looseness (or no reads yet this session)"),
-    (0.75, "Active opponents play somewhat looser than average"),
-    (1.0, "Active opponents voluntarily play almost every hand (very loose)"),
+    (0.0, "Active opponents never voluntarily play a hand (0% VPIP)"),
+    (0.25, "Active opponents voluntarily play about 1 in 4 hands (25% VPIP)"),
+    (0.5, "Active opponents voluntarily play about half their hands (50% VPIP), or no reads yet this session"),
+    (0.75, "Active opponents voluntarily play about 3 in 4 hands (75% VPIP)"),
+    (1.0, "Active opponents voluntarily play (almost) every hand (100% VPIP)"),
 )
 _OPP_PFR_VALUES = (
-    (0.0, "Active opponents almost never raise preflop (passive)"),
-    (0.25, "Somewhat less preflop raising than average"),
-    (0.5, "Average preflop aggression (or no reads yet this session)"),
-    (0.75, "Somewhat more preflop raising than average"),
-    (1.0, "Active opponents raise preflop almost every time they play (very aggressive)"),
+    (0.0, "Active opponents never raise preflop (0% PFR)"),
+    (0.25, "Active opponents raise preflop about 1 in 4 hands (25% PFR)"),
+    (0.5, "Active opponents raise preflop about half their hands (50% PFR), or no reads yet this session"),
+    (0.75, "Active opponents raise preflop about 3 in 4 hands (75% PFR)"),
+    (1.0, "Active opponents raise preflop (almost) every hand they play (100% PFR)"),
 )
 _OPP_THREE_BET_VALUES = (
-    (0.0, "Active opponents almost never 3-bet when given the chance"),
-    (0.25, "Somewhat less 3-betting than average"),
-    (0.5, "Average 3-bet frequency (or no reads yet this session)"),
-    (0.75, "Somewhat more 3-betting than average"),
-    (1.0, "Active opponents 3-bet almost every chance they get"),
+    (0.0, "Active opponents never 3-bet when given the chance (0% 3-bet)"),
+    (0.25, "Active opponents 3-bet about 1 in 4 chances (25% 3-bet)"),
+    (0.5, "Active opponents 3-bet about half their chances (50% 3-bet), or no reads yet this session"),
+    (0.75, "Active opponents 3-bet about 3 in 4 chances (75% 3-bet)"),
+    (1.0, "Active opponents 3-bet (almost) every chance they get (100% 3-bet)"),
 )
 _OPP_FOLD_TO_THREE_BET_VALUES = (
-    (0.0, "Active opponents almost never fold to a 3-bet"),
-    (0.25, "Somewhat less likely than average to fold to a 3-bet"),
-    (0.5, "Average fold-to-3-bet rate (or no reads yet this session)"),
-    (0.75, "Somewhat more likely than average to fold to a 3-bet"),
-    (1.0, "Active opponents almost always fold to a 3-bet"),
+    (0.0, "Active opponents never fold to a 3-bet (0% fold-to-3-bet)"),
+    (0.25, "Active opponents fold to a 3-bet about 1 in 4 times (25% fold-to-3-bet)"),
+    (0.5, "Active opponents fold to a 3-bet about half the time (50% fold-to-3-bet), or no reads yet this session"),
+    (0.75, "Active opponents fold to a 3-bet about 3 in 4 times (75% fold-to-3-bet)"),
+    (1.0, "Active opponents (almost) always fold to a 3-bet (100% fold-to-3-bet)"),
 )
 _OPP_AGGRESSION_FREQ_VALUES = (
-    (0.0, "Active opponents almost never bet/raise postflop when they act (all calls)"),
-    (0.25, "Somewhat more call-heavy than average postflop"),
-    (0.5, "Average postflop aggression (or no reads yet this session)"),
-    (0.75, "Somewhat more bet/raise-heavy than average postflop"),
-    (1.0, "Active opponents almost always bet/raise rather than call postflop"),
+    (0.0, "Active opponents never bet/raise postflop when they act (0% aggression, all calls)"),
+    (0.25, "Active opponents bet/raise postflop about 1 in 4 times they act (25% aggression)"),
+    (0.5, "Active opponents bet/raise postflop about half the time (50% aggression), or no reads yet this session"),
+    (0.75, "Active opponents bet/raise postflop about 3 in 4 times (75% aggression)"),
+    (1.0, "Active opponents (almost) always bet/raise rather than call postflop (100% aggression)"),
 )
 _OPP_FOLD_VS_BET_VALUES = (
-    (0.0, "Active opponents almost never fold to a postflop bet (very sticky)"),
-    (0.25, "Somewhat less likely than average to fold postflop"),
-    (0.5, "Average postflop fold rate (or no reads yet this session)"),
-    (0.75, "Somewhat more likely than average to fold postflop"),
-    (1.0, "Active opponents almost always fold to a postflop bet"),
+    (0.0, "Active opponents never fold to a postflop bet (0% fold, very sticky)"),
+    (0.25, "Active opponents fold to a postflop bet about 1 in 4 times (25%)"),
+    (0.5, "Active opponents fold to a postflop bet about half the time (50%), or no reads yet this session"),
+    (0.75, "Active opponents fold to a postflop bet about 3 in 4 times (75%)"),
+    (1.0, "Active opponents (almost) always fold to a postflop bet (100%)"),
 )
 _OPP_VPIP_CHILDREN = _continuous_children("opp_vpip_norm", _OPP_VPIP_VALUES)
 _OPP_PFR_CHILDREN = _continuous_children("opp_pfr_norm", _OPP_PFR_VALUES)

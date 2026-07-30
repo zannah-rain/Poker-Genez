@@ -39,13 +39,13 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evolve poker strategies with a genetic algorithm.")
     p.add_argument("--generations", type=int, default=100)
     p.add_argument("--population", type=int, default=180, help="Must be a multiple of 6.")
-    p.add_argument("--rounds", type=int, default=30, help="Random re-seatings per generation.")
+    p.add_argument("--rounds", type=int, default=100, help="Random re-seatings per generation.")
     p.add_argument("--max-hands", type=int, default=200, help="Hand cap per table session.")
     p.add_argument("--starting-stack", type=float, default=200.0)
     p.add_argument("--small-blind", type=float, default=1.0)
     p.add_argument("--big-blind", type=float, default=2.0)
     p.add_argument("--elite", type=int, default=0)
-    p.add_argument("--mutation-rate", type=float, default=0.001)
+    p.add_argument("--mutation-rate", type=float, default=0.005)
     p.add_argument("--mutation-scale", type=float, default=0.3)
     p.add_argument(
         "--sparsity-penalty", type=float, default=2.0,
@@ -88,21 +88,21 @@ def parse_args() -> argparse.Namespace:
         "measure of whether evolution is actually improving. Set to 0 to disable.",
     )
     p.add_argument(
-        "--benchmark-min-tables", type=int, default=100,
+        "--benchmark-min-tables", type=int, default=500,
         help="Minimum number of 3-vs-3 tables played against the checkpoint before checking "
         "whether the result is statistically resolved (see --benchmark-p-value). Poker has "
         "enough hand-to-hand variance that fewer tables than this makes the improve/regress "
         "call mostly noise.",
     )
     p.add_argument(
-        "--benchmark-max-tables", type=int, default=1000,
+        "--benchmark-max-tables", type=int, default=2000,
         help="Hard cap on 3-vs-3 tables played in one benchmark check. If the confidence "
         "interval still straddles 0 at this point (a genuinely-near-zero edge can take a very "
         "long time to resolve), the check ends anyway and is conservatively treated as 'not "
         "improved'.",
     )
     p.add_argument(
-        "--benchmark-table-batch", type=int, default=100,
+        "--benchmark-table-batch", type=int, default=200,
         help="Additional tables played per round once --benchmark-min-tables isn't enough to "
         "resolve the confidence interval (repeats until it resolves or --benchmark-max-tables "
         "is hit).",
