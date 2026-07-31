@@ -144,6 +144,71 @@ class TestHoleCardFeatures:
         assert values["hole_high_card_is_king"] == 0.0
 
 
+class TestHoleHandCategoryFeature:
+    def test_premium_and_high_and_average_pairs(self):
+        assert values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("Ad")]))[
+            "hole_category_premium_pair"] == 1.0
+        assert values_by_key(make_situation(hole=[Card.from_str("Th"), Card.from_str("Td")]))[
+            "hole_category_high_pair"] == 1.0
+        assert values_by_key(make_situation(hole=[Card.from_str("5h"), Card.from_str("5d")]))[
+            "hole_category_average_pair"] == 1.0
+
+    def test_ace_suited_vs_offsuit(self):
+        assert values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("4h")]))[
+            "hole_category_axs"] == 1.0
+        assert values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("4d")]))[
+            "hole_category_axo"] == 1.0
+
+    def test_ace_king_suited_is_axs_not_kxs(self):
+        values = values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("Kh")]))
+        assert values["hole_category_axs"] == 1.0
+        assert values["hole_category_kxs"] == 0.0
+
+    def test_king_suited_and_queen_suited_kickers(self):
+        assert values_by_key(make_situation(hole=[Card.from_str("Kh"), Card.from_str("4h")]))[
+            "hole_category_kxs"] == 1.0
+        assert values_by_key(make_situation(hole=[Card.from_str("Qh"), Card.from_str("4h")]))[
+            "hole_category_qxs"] == 1.0
+
+    def test_king_queen_suited_is_kxs_not_qxs(self):
+        values = values_by_key(make_situation(hole=[Card.from_str("Kh"), Card.from_str("Qh")]))
+        assert values["hole_category_kxs"] == 1.0
+        assert values["hole_category_qxs"] == 0.0
+
+    def test_suited_connectors_gappers(self):
+        assert values_by_key(make_situation(hole=[Card.from_str("Jh"), Card.from_str("Th")]))[
+            "hole_category_suited_connector"] == 1.0
+        assert values_by_key(make_situation(hole=[Card.from_str("Jh"), Card.from_str("9h")]))[
+            "hole_category_suited_one_gapper"] == 1.0
+        assert values_by_key(make_situation(hole=[Card.from_str("Jh"), Card.from_str("8h")]))[
+            "hole_category_suited_two_gapper"] == 1.0
+
+    def test_unsuited_connectors(self):
+        values = values_by_key(make_situation(hole=[Card.from_str("Jh"), Card.from_str("Td")]))
+        assert values["hole_category_unsuited_connector"] == 1.0
+
+    def test_junk_hand(self):
+        values = values_by_key(make_situation(hole=[Card.from_str("Jh"), Card.from_str("5d")]))
+        assert values["hole_category_junk"] == 1.0
+
+    def test_exactly_one_category_indicator_active(self):
+        indicator_keys = [
+            "hole_category_junk", "hole_category_unsuited_connector", "hole_category_suited_two_gapper",
+            "hole_category_suited_one_gapper", "hole_category_suited_connector", "hole_category_qxs",
+            "hole_category_kxs", "hole_category_axo", "hole_category_axs", "hole_category_average_pair",
+            "hole_category_high_pair", "hole_category_premium_pair",
+        ]
+        values = values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("Kh")]))
+        active = [k for k in indicator_keys if values[k] == 1.0]
+        assert active == ["hole_category_axs"]
+
+    def test_norm_matches_indicator_index(self):
+        values = values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("Ad")]))
+        assert values["hole_hand_category_norm"] == pytest.approx(11 / 11)
+        values = values_by_key(make_situation(hole=[Card.from_str("Jh"), Card.from_str("5d")]))
+        assert values["hole_hand_category_norm"] == pytest.approx(0 / 11)
+
+
 class TestPositionAndStreet:
     def test_position_norm_zero_when_only_one_seat(self):
         values = values_by_key(make_situation(num_seats_this_street=1, position=0))
@@ -236,8 +301,14 @@ class TestFlopTexture:
     def test_preflop_defaults_are_all_zero(self):
         values = values_by_key(make_situation(board=[]))
         for key in ["flop_suit_texture_norm", "rainbow_flop", "flush_draw_flop", "monotone_flop",
+                    "rainbow_no_match", "rainbow_one_match", "rainbow_two_match",
+                    "flush_draw_flop_miss", "flush_draw_flop_one_match", "flush_draw_flop_two_match",
+                    "monotone_flop_miss", "monotone_flop_two_hits",
                     "flop_pairing_texture_norm", "unpaired_flop", "paired_flop", "tripled_flop",
-                    "flop_connectivity_norm", "disconnected_flop", "connected_flop", "oesd_possible_flop"]:
+                    "flop_connectivity_norm", "disconnected_flop", "connected_flop",
+                    "connected_no_straight_draw_flop", "connected_straight_draw_flop", "oesd_possible_flop",
+                    "flop_wetness_norm", "dry_flop", "wet_flop",
+                    "flop_dynamism_norm", "static_flop", "dynamic_flop"]:
             assert values[key] == 0.0
 
     def test_rainbow_unpaired_flop(self):
@@ -280,6 +351,157 @@ class TestFlopTexture:
         board = [Card.from_str("5c"), Card.from_str("6d"), Card.from_str("7h")]
         values = values_by_key(make_situation(board=board, street=1))
         assert values["oesd_possible_flop"] == 1.0
+
+    def test_rainbow_hole_card_match_count(self):
+        board = [Card.from_str("2c"), Card.from_str("7d"), Card.from_str("Kh")]
+        no_match = values_by_key(make_situation(hole=[Card.from_str("9s"), Card.from_str("2s")], board=board))
+        one_match = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("2s")], board=board))
+        two_match = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("9d")], board=board))
+        assert no_match["rainbow_no_match"] == 1.0
+        assert one_match["rainbow_one_match"] == 1.0
+        assert two_match["rainbow_two_match"] == 1.0
+        # Family aggregate stays true regardless of hole-card connection.
+        for values in (no_match, one_match, two_match):
+            assert values["rainbow_flop"] == 1.0
+
+    def test_two_tone_hole_card_match_count(self):
+        board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kh")]
+        miss = values_by_key(make_situation(hole=[Card.from_str("9d"), Card.from_str("2s")], board=board))
+        one_match = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("2s")], board=board))
+        two_match = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("4c")], board=board))
+        assert miss["flush_draw_flop_miss"] == 1.0
+        assert one_match["flush_draw_flop_one_match"] == 1.0
+        assert two_match["flush_draw_flop_two_match"] == 1.0
+        assert two_match["flush_draw"] == 1.0  # 2 matches on a two-tone flop is a live flush draw
+
+    def test_monotone_hole_card_hit_count(self):
+        board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kc")]
+        zero = values_by_key(make_situation(hole=[Card.from_str("9d"), Card.from_str("2s")], board=board))
+        one = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("2s")], board=board))
+        two = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("4c")], board=board))
+        # Only 0 and 2 matches get their own bucket -- a single match is still
+        # a "Miss" here, distinguished elsewhere by the general flush_draw feature.
+        assert zero["monotone_flop_miss"] == 1.0
+        assert one["monotone_flop_miss"] == 1.0
+        assert two["monotone_flop_two_hits"] == 1.0
+        assert one["flush_draw"] == 1.0
+        assert two["has_flush"] == 1.0  # both hole cards + all 3 board cards = a made flush
+
+    def test_connected_flop_without_a_straight_draw(self):
+        board = [Card.from_str("5c"), Card.from_str("7d"), Card.from_str("9h")]
+        values = values_by_key(make_situation(hole=[Card.from_str("2s"), Card.from_str("3s")], board=board))
+        assert values["connected_no_straight_draw_flop"] == 1.0
+        assert values["connected_straight_draw_flop"] == 0.0
+        assert values["connected_flop"] == 1.0  # family aggregate still true
+
+    def test_connected_flop_with_a_straight_draw(self):
+        board = [Card.from_str("5c"), Card.from_str("7d"), Card.from_str("9h")]
+        values = values_by_key(make_situation(hole=[Card.from_str("6s"), Card.from_str("2d")], board=board))
+        assert values["connected_straight_draw_flop"] == 1.0
+        assert values["connected_no_straight_draw_flop"] == 0.0
+        assert values["straight_draw"] == 1.0
+
+    def test_disconnected_flop_has_no_straight_draw_bucket_active(self):
+        board = [Card.from_str("2c"), Card.from_str("8d"), Card.from_str("Kh")]
+        values = values_by_key(make_situation(board=board, street=1))
+        assert values["connected_no_straight_draw_flop"] == 0.0
+        assert values["connected_straight_draw_flop"] == 0.0
+
+    def test_only_one_suit_texture_bucket_active(self):
+        board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kh")]
+        values = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("2s")], board=board))
+        bucket_keys = [
+            "rainbow_no_match", "rainbow_one_match", "rainbow_two_match",
+            "flush_draw_flop_miss", "flush_draw_flop_one_match", "flush_draw_flop_two_match",
+            "monotone_flop_miss", "monotone_flop_two_hits",
+        ]
+        active = [k for k in bucket_keys if values[k] == 1.0]
+        assert active == ["flush_draw_flop_one_match"]
+
+    def test_only_one_connectivity_bucket_active(self):
+        board = [Card.from_str("5c"), Card.from_str("7d"), Card.from_str("9h")]
+        values = values_by_key(make_situation(hole=[Card.from_str("6s"), Card.from_str("2d")], board=board))
+        bucket_keys = ["disconnected_flop", "connected_no_straight_draw_flop", "connected_straight_draw_flop"]
+        active = [k for k in bucket_keys if values[k] == 1.0]
+        assert active == ["connected_straight_draw_flop"]
+
+    def test_dry_static_flop(self):
+        board = [Card.from_str("2c"), Card.from_str("7d"), Card.from_str("Kh")]  # rainbow, disconnected
+        values = values_by_key(make_situation(board=board, street=1))
+        assert values["dry_flop"] == 1.0
+        assert values["wet_flop"] == 0.0
+        assert values["static_flop"] == 1.0
+        assert values["dynamic_flop"] == 0.0
+
+    def test_two_tone_connected_flop_is_wet_and_dynamic(self):
+        board = [Card.from_str("9h"), Card.from_str("8h"), Card.from_str("7c")]
+        values = values_by_key(make_situation(board=board, street=1))
+        assert values["wet_flop"] == 1.0
+        assert values["dynamic_flop"] == 1.0
+
+    def test_monotone_flop_is_wet_even_when_disconnected(self):
+        board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kc")]
+        values = values_by_key(make_situation(board=board, street=1))
+        assert values["wet_flop"] == 1.0
+        # King on board (>=Q) pulls a borderline wetness score below the
+        # dynamism threshold -- see test_high_card_pins_borderline_wet_flop_to_static.
+        assert values["dynamic_flop"] == 0.0
+
+    def test_high_card_pins_borderline_wet_flop_to_static(self):
+        # Rainbow, connected, straight-draw-possible -> wetness score 2 (Wet),
+        # but the King on board applies a -1 dynamism adjustment, dropping it
+        # below the >=2 dynamism threshold.
+        board = [Card.from_str("Kc"), Card.from_str("Qd"), Card.from_str("Jh")]
+        values = values_by_key(make_situation(board=board, street=1))
+        assert values["wet_flop"] == 1.0
+        assert values["dynamic_flop"] == 0.0
+        assert values["static_flop"] == 1.0
+
+    def test_strongly_wet_high_board_stays_dynamic(self):
+        # Wetness score 3 is high enough to survive the -1 high-card penalty.
+        board = [Card.from_str("Qc"), Card.from_str("Jc"), Card.from_str("Th")]
+        values = values_by_key(make_situation(board=board, street=1))
+        assert values["dynamic_flop"] == 1.0
+
+    def test_low_card_board_promotes_borderline_dry_flop_to_dynamic(self):
+        # Rainbow, connected (span 4), no OESD -> wetness score 1 (Dry), but
+        # every card is 8 or below, applying a +1 dynamism adjustment that
+        # reaches the >=2 dynamism threshold despite being Dry.
+        board = [Card.from_str("2c"), Card.from_str("4d"), Card.from_str("6h")]
+        values = values_by_key(make_situation(board=board, street=1))
+        assert values["dry_flop"] == 1.0
+        assert values["dynamic_flop"] == 1.0
+
+    def test_low_card_bonus_does_not_rescue_a_fully_dry_flop(self):
+        board = [Card.from_str("2c"), Card.from_str("7d"), Card.from_str("8h")]
+        values = values_by_key(make_situation(board=board, street=1))
+        assert values["dry_flop"] == 1.0
+        assert values["dynamic_flop"] == 0.0
+
+    def test_ace_high_board_gets_the_high_card_penalty_not_the_low_card_bonus(self):
+        board = [Card.from_str("Ac"), Card.from_str("4d"), Card.from_str("6h")]
+        values = values_by_key(make_situation(board=board, street=1))
+        assert values["static_flop"] == 1.0
+
+    def test_paired_flop_is_static_regardless_of_wetness(self):
+        board = [Card.from_str("2c"), Card.from_str("2d"), Card.from_str("Kh")]
+        values = values_by_key(make_situation(board=board, street=1))
+        assert values["static_flop"] == 1.0
+        assert values["dynamic_flop"] == 0.0
+
+    def test_tripled_flop_is_static(self):
+        board = [Card.from_str("Kc"), Card.from_str("Kd"), Card.from_str("Kh")]
+        values = values_by_key(make_situation(board=board, street=1))
+        assert values["static_flop"] == 1.0
+        assert values["dynamic_flop"] == 0.0
+
+    def test_wetness_and_dynamism_frozen_on_turn_and_river(self):
+        board3 = [Card.from_str("9h"), Card.from_str("8h"), Card.from_str("7c")]
+        flop_values = values_by_key(make_situation(board=board3, street=1))
+        board4 = board3 + [Card.from_str("2d")]
+        turn_values = values_by_key(make_situation(board=board4, street=2))
+        assert turn_values["wet_flop"] == flop_values["wet_flop"] == 1.0
+        assert turn_values["dynamic_flop"] == flop_values["dynamic_flop"] == 1.0
 
     def test_flop_texture_frozen_on_turn_and_river(self):
         board3 = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kc")]  # monotone
