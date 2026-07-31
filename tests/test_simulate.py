@@ -8,7 +8,7 @@ from genome import BET_RAISE, CHECK_CALL, Genome
 from player import Player
 from simulate import (
     GenerationStats, SimConfig, combine_generation_stats, run_generation,
-    run_session,
+    run_island_generation, run_session,
 )
 
 
@@ -271,3 +271,98 @@ class TestCombineGenerationStats:
         combined = combine_generation_stats([])
         assert combined.total_hands_survived == 0
         assert combined.mean_hands_survived == 0.0
+
+
+class TestRunIslandGeneration:
+    @staticmethod
+    def _islands(sizes, seed=0):
+        islands = []
+        for i, n in enumerate(sizes):
+            offset = i * 1_000_000  # mirrors ga.py's ISLAND_ID_SPACING, avoids id collisions
+            rng = np.random.default_rng(seed + i)
+            islands.append([Player(player_id=offset + j, genome=Genome.random(rng)) for j in range(n)])
+        return islands
+
+    def test_self_mode_never_produces_cross_island_stats(self):
+        islands = self._islands([6, 6])
+        config = GameConfig(max_hands_per_session=5)
+        sim_config = SimConfig(rounds_per_generation=2, table_size=6)
+        _, gen_stats_by_island, cross_stats = run_island_generation(
+            islands, config, sim_config, np.random.default_rng(0),
+            interaction="self", show_progress=False,
+        )
+        assert cross_stats.total_hands_survived == 0
+        for stats in gen_stats_by_island:
+            assert stats.total_hands_survived > 0
+
+    def test_inter_mode_leaves_per_island_stats_empty(self):
+        islands = self._islands([6, 6])
+        config = GameConfig(max_hands_per_session=5)
+        sim_config = SimConfig(rounds_per_generation=2, table_size=6)
+        _, gen_stats_by_island, cross_stats = run_island_generation(
+            islands, config, sim_config, np.random.default_rng(0),
+            interaction="inter", show_progress=False,
+        )
+        assert cross_stats.total_hands_survived > 0
+        for stats in gen_stats_by_island:
+            assert stats.total_hands_survived == 0
+
+    def test_alternate_splits_rounds_between_both_modes(self):
+        islands = self._islands([6, 6])
+        config = GameConfig(max_hands_per_session=5)
+        sim_config = SimConfig(rounds_per_generation=4, table_size=6)
+        _, gen_stats_by_island, cross_stats = run_island_generation(
+            islands, config, sim_config, np.random.default_rng(0),
+            interaction="alternate", show_progress=False,
+        )
+        assert cross_stats.total_hands_survived > 0
+        for stats in gen_stats_by_island:
+            assert stats.total_hands_survived > 0
+
+    def test_alternate_with_a_single_round_stays_self_play_only(self):
+        # ceil(1 / 2) == 1 self round, 0 inter rounds -- alternate degrades
+        # to self-play rather than silently running an inter round instead.
+        islands = self._islands([6, 6])
+        config = GameConfig(max_hands_per_session=5)
+        sim_config = SimConfig(rounds_per_generation=1, table_size=6)
+        _, gen_stats_by_island, cross_stats = run_island_generation(
+            islands, config, sim_config, np.random.default_rng(0),
+            interaction="alternate", show_progress=False,
+        )
+        assert cross_stats.total_hands_survived == 0
+        for stats in gen_stats_by_island:
+            assert stats.total_hands_survived > 0
+
+    def test_single_island_ignores_interaction_setting(self):
+        islands = self._islands([6])
+        config = GameConfig(max_hands_per_session=5)
+        sim_config = SimConfig(rounds_per_generation=3, table_size=6)
+        _, gen_stats_by_island, cross_stats = run_island_generation(
+            islands, config, sim_config, np.random.default_rng(0),
+            interaction="inter", show_progress=False,
+        )
+        assert cross_stats.total_hands_survived == 0
+        assert gen_stats_by_island[0].total_hands_survived > 0
+
+    def test_fitness_split_by_home_island_and_zero_sum_overall(self):
+        islands = self._islands([6, 6])
+        config = GameConfig(max_hands_per_session=5)
+        sim_config = SimConfig(rounds_per_generation=2, table_size=6)
+        fitness_by_island, _, _ = run_island_generation(
+            islands, config, sim_config, np.random.default_rng(0),
+            interaction="alternate", show_progress=False,
+        )
+        for island_players, fitness in zip(islands, fitness_by_island):
+            assert set(fitness.keys()) == {p.player_id for p in island_players}
+        total = sum(v for fitness in fitness_by_island for v in fitness.values())
+        assert total == pytest.approx(0.0, abs=1e-6)
+
+    def test_unknown_interaction_mode_raises(self):
+        islands = self._islands([6, 6])
+        config = GameConfig(max_hands_per_session=5)
+        sim_config = SimConfig(rounds_per_generation=1, table_size=6)
+        with pytest.raises(ValueError):
+            run_island_generation(
+                islands, config, sim_config, np.random.default_rng(0),
+                interaction="bogus", show_progress=False,
+            )

@@ -274,3 +274,108 @@ def combine_generation_stats(stats_list: list[GenerationStats]) -> GenerationSta
         combined.hand_stats.facing_bet_folds += s.hand_stats.facing_bet_folds
         combined.hand_stats.raises_per_street.extend(s.hand_stats.raises_per_street)
     return combined
+
+
+# How a generation's rounds are split between islands' own tables and tables
+# that mix players from different islands -- see run_island_generation.
+ISLAND_SELF_PLAY = "self"    # every round's tables stay within one island
+ISLAND_INTER_PLAY = "inter"  # every round's tables are drawn from the combined population
+ISLAND_ALTERNATE = "alternate"  # split rounds_per_generation between the two above
+ISLAND_INTERACTION_MODES = (ISLAND_SELF_PLAY, ISLAND_INTER_PLAY, ISLAND_ALTERNATE)
+
+
+def _island_round_split(total_rounds: int, interaction: str) -> tuple[int, int]:
+    """(self_rounds, inter_rounds) for one generation's rounds_per_generation
+    budget. "alternate" gives self-play the extra round when total_rounds is
+    odd, since it's the mode every other setting degrades toward (0 islands
+    to mix with, 0 total rounds, etc.)."""
+    if interaction == ISLAND_SELF_PLAY:
+        return total_rounds, 0
+    if interaction == ISLAND_INTER_PLAY:
+        return 0, total_rounds
+    if interaction == ISLAND_ALTERNATE:
+        self_rounds = math.ceil(total_rounds / 2)
+        return self_rounds, total_rounds - self_rounds
+    raise ValueError(f"Unknown island interaction mode: {interaction!r} (expected one of {ISLAND_INTERACTION_MODES})")
+
+
+def run_island_generation(
+    islands: list[list[Player]],
+    game_config: GameConfig,
+    sim_config: SimConfig,
+    rng: np.random.Generator,
+    interaction: str = ISLAND_ALTERNATE,
+    show_progress: bool = True,
+    progress_desc: str = "generation eval",
+    num_workers: int = 1,
+    executor: Executor | None = None,
+) -> tuple[list[dict[int, float]], list[GenerationStats], GenerationStats]:
+    """Runs one generation's fitness pass across every island, splitting
+    `sim_config.rounds_per_generation` between two table-formation modes
+    instead of always keeping islands fully isolated for evaluation.
+    Breeding is untouched either way -- see ga.py's IslandModel.evolve_all,
+    which only ever selects/breeds within each island's own player list
+    regardless of who its players played against this generation:
+
+      - "self": tables are drawn only from within a single island each
+        round (the original island-isolated behavior -- an island's players
+        only ever face, and backfill from, other members of that island).
+      - "inter": tables are drawn from the full combined population across
+        every island each round, so islands play each other instead of
+        themselves.
+      - "alternate" (default): splits the generation's rounds evenly
+        between the two, rather than literally interleaving them
+        round-by-round -- since rounds are independent random re-seatings,
+        batching same-mode rounds into one run_generation call each nets
+        the same accumulated fitness as interleaving would, for far fewer
+        worker-pool submissions and progress bars.
+
+    Falls back to "self" regardless of `interaction` when there's only one
+    island (nothing else to mix with).
+
+    Returns (fitness_by_island, stats_by_island, cross_island_stats):
+    fitness is split back out to each player_id's home island regardless of
+    which mode produced it. Per-island GenerationStats (mean hands
+    survived, fold rate, etc.) can only be attributed this way for "self"
+    rounds, though -- HandStats and hands-survived aren't tracked
+    per-player, so an "inter" round's table can mix players from several
+    islands and its stats can't be cleanly split back out by island. Those
+    go into the third return value, `cross_island_stats`, instead: fold it
+    into every island's own via combine_generation_stats() for an overall
+    sense-check total, but don't attribute it to any single island's
+    per-island numbers."""
+    if len(islands) <= 1:
+        interaction = ISLAND_SELF_PLAY
+    self_rounds, inter_rounds = _island_round_split(sim_config.rounds_per_generation, interaction)
+
+    fitness_by_island: list[dict[int, float]] = [{p.player_id: 0.0 for p in players} for players in islands]
+    stats_by_island = [GenerationStats() for _ in islands]
+    cross_island_stats = GenerationStats()
+
+    if self_rounds > 0:
+        self_sim_config = SimConfig(rounds_per_generation=self_rounds, table_size=sim_config.table_size)
+        for i, players in enumerate(islands):
+            desc = f"{progress_desc} (island {i + 1}/{len(islands)})" if len(islands) > 1 else progress_desc
+            fitness, stats = run_generation(
+                players, game_config, self_sim_config, rng,
+                show_progress=show_progress, progress_desc=desc,
+                num_workers=num_workers, executor=executor,
+            )
+            for pid, delta in fitness.items():
+                fitness_by_island[i][pid] += delta
+            stats_by_island[i] = combine_generation_stats([stats_by_island[i], stats])
+
+    if inter_rounds > 0:
+        inter_sim_config = SimConfig(rounds_per_generation=inter_rounds, table_size=sim_config.table_size)
+        all_players = [p for players in islands for p in players]
+        island_of_player = {p.player_id: i for i, players in enumerate(islands) for p in players}
+        fitness, stats = run_generation(
+            all_players, game_config, inter_sim_config, rng,
+            show_progress=show_progress, progress_desc=f"{progress_desc} (inter-island)",
+            num_workers=num_workers, executor=executor,
+        )
+        for pid, delta in fitness.items():
+            fitness_by_island[island_of_player[pid]][pid] += delta
+        cross_island_stats = stats
+
+    return fitness_by_island, stats_by_island, cross_island_stats

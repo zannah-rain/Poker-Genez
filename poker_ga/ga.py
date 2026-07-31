@@ -118,6 +118,14 @@ class IslandConfig:
     migration_interval: int = 10
     # How many of an island's best individuals migrate per event.
     migration_size: int = 3
+    # The first `force_gto_islands` islands (by index) always have every
+    # GTO_SPOTS chart active on every genome, every generation -- gto_flags
+    # still exist and still go through crossover/mutation like any other
+    # gene, they're just forced back to all-on afterward (see
+    # IslandModel._force_gto), rather than being excluded from evolution
+    # outright. The remaining islands evolve gto_flags freely, same as
+    # before. 0 disables this (no island is forced, the default).
+    force_gto_islands: int = 0
 
 
 class IslandModel:
@@ -156,7 +164,10 @@ class IslandModel:
             # than slicing it into contiguous chunks) so every island gets
             # an even spread of quality, not "island 0 gets all the best."
             seeds = seed_genomes[i :: island_config.num_islands] if seed_genomes else None
-            self.islands.append(Population(ga_config, rng, seed_genomes=seeds, id_offset=i * ISLAND_ID_SPACING))
+            island = Population(ga_config, rng, seed_genomes=seeds, id_offset=i * ISLAND_ID_SPACING)
+            if i < island_config.force_gto_islands:
+                self._force_gto(island)
+            self.islands.append(island)
 
     @property
     def all_players(self) -> list[Player]:
@@ -189,6 +200,18 @@ class IslandModel:
             for i, island in enumerate(self.islands):
                 incoming = migrants_out[(i - 1) % n]  # island i receives from its ring predecessor
                 self._splice_in_migrants(island, incoming)
+
+        # Re-force after both evolve() (crossover/mutation can flip
+        # gto_flags away from all-on) and migration (a splice can bring in
+        # genomes from a neighboring, non-forced island).
+        for i, island in enumerate(self.islands):
+            if i < self.island_config.force_gto_islands:
+                self._force_gto(island)
+
+    @staticmethod
+    def _force_gto(island: Population) -> None:
+        for p in island.players:
+            p.genome.force_all_gto_active()
 
     def _splice_in_migrants(self, island: Population, migrant_genomes: list[Genome]) -> None:
         elite_count = island.config.elite_count

@@ -18,7 +18,7 @@ from benchmark import run_benchmark_until_resolved
 from ga import GAConfig, IslandConfig, IslandModel
 from game import GameConfig
 from genome import load_population, save_population
-from simulate import SimConfig, combine_generation_stats, run_generation
+from simulate import ISLAND_INTERACTION_MODES, SimConfig, combine_generation_stats, run_island_generation
 from player import Player
 from tournament import export_top_n, rank_players, run_final_tournament
 
@@ -127,12 +127,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--num-islands", type=int, default=3,
         help="Splits --population into this many independent islands, each with its own "
-        "breeding pool AND its own tables (an island's players only ever face other members "
-        "of that island -- see ga.py's IslandModel). Keeps genetic diversity alive: a "
-        "pathological strategy that takes over one island's fitness landscape doesn't "
-        "automatically spread to the others, the way it would in one shared population. Must "
-        "evenly divide --population into groups that are each a multiple of 6. Set to 1 to "
-        "disable (behaves like a single population, as before).",
+        "breeding pool (see ga.py's IslandModel) -- an island's players only ever breed with "
+        "other members of that island, regardless of --island-interaction. Keeps genetic "
+        "diversity alive: a pathological strategy that takes over one island's fitness "
+        "landscape doesn't automatically spread to the others, the way it would in one shared "
+        "population. Must evenly divide --population into groups that are each a multiple of "
+        "6. Set to 1 to disable (behaves like a single population, as before).",
     )
     p.add_argument(
         "--migration-interval", type=int, default=10,
@@ -145,6 +145,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--migration-size", type=int, default=3,
         help="How many of an island's best genomes migrate to the next island per migration event.",
+    )
+    p.add_argument(
+        "--island-interaction", type=str, default="alternate", choices=list(ISLAND_INTERACTION_MODES),
+        help="How islands' fitness-evaluation tables are formed each generation -- breeding is "
+        "always island-isolated regardless of this setting (see ga.py's IslandModel.evolve_all). "
+        "'self': every round's tables are drawn only from within each island, exactly like the "
+        "old fully-isolated behavior. 'inter': every round's tables are drawn from the combined "
+        "population across all islands, so islands only ever play each other, never themselves. "
+        "'alternate' (default): splits each generation's --rounds evenly between the two, so "
+        "islands mostly develop against their own population but periodically face cross-island "
+        "competition without ever interbreeding. Ignored (forced to 'self') when --num-islands is 1.",
+    )
+    p.add_argument(
+        "--force-gto-islands", type=int, default=1,
+        help="Forces the first this-many islands (by index) to always have every GTO_SPOTS chart "
+        "active on every genome -- gto_flags still exist and still go through crossover/mutation "
+        "there like any other gene, they're just reset to all-on after each generation (see "
+        "ga.py's IslandConfig.force_gto_islands). The remaining islands still evolve gto_flags "
+        "freely, same as before. 0 disables this (no island is forced, the default). Must be at "
+        "most --num-islands.",
     )
     p.add_argument(
         "--workers", type=int, default=0,
@@ -168,6 +188,7 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
         num_islands=args.num_islands,
         migration_interval=args.migration_interval,
         migration_size=args.migration_size,
+        force_gto_islands=args.force_gto_islands,
     )
     ga_config = GAConfig(
         population_size=args.population // args.num_islands,  # per-island size
@@ -220,24 +241,22 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
 
     for gen in range(args.generations):
         t0 = time.time()
-        fitness_by_island = []
-        gen_stats_by_island = []
-        for i, island in enumerate(island_model.islands):
-            desc = f"gen {gen} eval (island {i + 1}/{len(island_model.islands)})" if len(island_model.islands) > 1 \
-                else f"gen {gen} eval"
-            raw_fitness, gen_stats = run_generation(
-                island.players, game_config, sim_config, rng, progress_desc=desc,
-                num_workers=num_workers, executor=executor,
-            )
-            fitness_by_island.append(apply_sparsity_penalty(island.players, raw_fitness, args.sparsity_penalty))
-            gen_stats_by_island.append(gen_stats)
+        raw_fitness_by_island, gen_stats_by_island, cross_island_stats = run_island_generation(
+            [island.players for island in island_model.islands], game_config, sim_config, rng,
+            interaction=args.island_interaction, progress_desc=f"gen {gen} eval",
+            num_workers=num_workers, executor=executor,
+        )
+        fitness_by_island = [
+            apply_sparsity_penalty(island.players, raw_fitness, args.sparsity_penalty)
+            for island, raw_fitness in zip(island_model.islands, raw_fitness_by_island)
+        ]
 
         all_players = island_model.all_players
         all_fitness = {pid: v for fitness in fitness_by_island for pid, v in fitness.items()}
         values = np.array(list(all_fitness.values()))
         nonzero_counts = np.array([p.genome.nonzero_weight_count() for p in all_players])
         best_player = max(all_players, key=lambda p: all_fitness[p.player_id])
-        combined_stats = combine_generation_stats(gen_stats_by_island)
+        combined_stats = combine_generation_stats(gen_stats_by_island + [cross_island_stats])
         elapsed = time.time() - t0
 
         print(
@@ -366,6 +385,8 @@ def main() -> None:
             f"--population must be a multiple of --num-islands * 6 "
             f"({args.num_islands * 6}) for clean 6-max seating within each island."
         )
+    if not 0 <= args.force_gto_islands <= args.num_islands:
+        raise SystemExit(f"--force-gto-islands must be between 0 and --num-islands ({args.num_islands}).")
 
     rng = np.random.default_rng(args.seed)
     num_workers = args.workers if args.workers > 0 else (os.cpu_count() or 1)

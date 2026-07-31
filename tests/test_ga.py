@@ -219,3 +219,48 @@ class TestIslandModel:
         for island in model.islands:
             elite_slots = island.players[: ga_cfg.elite_count]
             assert all(p.label != "migrant" for p in elite_slots)
+
+
+class TestForceGtoIslands:
+    def test_disabled_by_default_leaves_gto_flags_free(self):
+        ga_cfg = GAConfig(population_size=6)
+        island_cfg = IslandConfig(num_islands=2, migration_interval=0)
+        model = IslandModel(ga_cfg, island_cfg, np.random.default_rng(0))
+        # With GTO_INIT_PROB well under 1, a freshly random population of 12
+        # genomes practically never lands on "every flag active" by chance.
+        assert not all(np.all(p.genome.gto_flags > 0.5) for p in model.all_players)
+
+    def test_forced_islands_start_with_every_gto_flag_active(self):
+        ga_cfg = GAConfig(population_size=6)
+        island_cfg = IslandConfig(num_islands=3, migration_interval=0, force_gto_islands=2)
+        model = IslandModel(ga_cfg, island_cfg, np.random.default_rng(0))
+        for island in model.islands[:2]:
+            for p in island.players:
+                assert np.all(p.genome.gto_flags > 0.5)
+
+    def test_non_forced_islands_are_unaffected(self):
+        ga_cfg = GAConfig(population_size=6)
+        island_cfg = IslandConfig(num_islands=3, migration_interval=0, force_gto_islands=2)
+        model = IslandModel(ga_cfg, island_cfg, np.random.default_rng(0))
+        assert not all(np.all(p.genome.gto_flags > 0.5) for p in model.islands[2].players)
+
+    def test_forced_flags_survive_evolution(self):
+        ga_cfg = GAConfig(population_size=12, elite_count=2, mutation_rate=1.0)
+        island_cfg = IslandConfig(num_islands=2, migration_interval=0, force_gto_islands=1)
+        model = IslandModel(ga_cfg, island_cfg, np.random.default_rng(0))
+        fitness_by_island = [{p.player_id: float(i) for i, p in enumerate(isl.players)} for isl in model.islands]
+        model.evolve_all(fitness_by_island)
+        for p in model.islands[0].players:
+            assert np.all(p.genome.gto_flags > 0.5)
+
+    def test_forced_flags_survive_migration_into_a_forced_island(self):
+        ga_cfg = GAConfig(population_size=12, elite_count=2)
+        island_cfg = IslandConfig(num_islands=2, migration_interval=1, migration_size=4, force_gto_islands=1)
+        model = IslandModel(ga_cfg, island_cfg, np.random.default_rng(0))
+        # Island 1 (not forced) should breed migrants with a realistic mix
+        # of active/inactive flags; island 0 (forced, ring-receives from
+        # island 1) must still end up all-on despite that.
+        fitness_by_island = [{p.player_id: float(i) for i, p in enumerate(isl.players)} for isl in model.islands]
+        model.evolve_all(fitness_by_island)
+        for p in model.islands[0].players:
+            assert np.all(p.genome.gto_flags > 0.5)

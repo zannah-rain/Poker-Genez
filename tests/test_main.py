@@ -80,6 +80,25 @@ class TestParseArgs:
         args = parse_args()
         assert args.workers == 4
 
+    def test_island_defaults(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["main.py"])
+        args = parse_args()
+        assert args.island_interaction == "alternate"
+        assert args.force_gto_islands == 0
+
+    def test_island_overrides_are_applied(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", [
+            "main.py", "--island-interaction", "inter", "--force-gto-islands", "2",
+        ])
+        args = parse_args()
+        assert args.island_interaction == "inter"
+        assert args.force_gto_islands == 2
+
+    def test_invalid_island_interaction_is_rejected(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["main.py", "--island-interaction", "bogus"])
+        with pytest.raises(SystemExit):
+            parse_args()
+
 
 class TestApplySparsityPenalty:
     def test_zero_coefficient_returns_fitness_unchanged(self):
@@ -155,6 +174,44 @@ class TestMainSmoke:
         assert os.path.exists(checkpoint_path)
         output = capsys.readouterr().out
         assert "benchmark vs checkpoint" in output
+
+    def test_force_gto_islands_exceeding_num_islands_is_rejected(self, tmp_path, monkeypatch):
+        out_dir = str(tmp_path / "runs")
+        monkeypatch.setattr("sys.argv", [
+            "main.py",
+            "--num-islands", "2",
+            "--force-gto-islands", "3",
+            "--out-dir", out_dir,
+        ])
+        with pytest.raises(SystemExit):
+            main()
+
+    def test_main_runs_with_multiple_islands_and_inter_play(self, tmp_path, monkeypatch):
+        # Exercises run_island_generation's "inter" table-formation path (and
+        # force_gto_islands) end-to-end, not just in isolation.
+        out_dir = str(tmp_path / "runs")
+        monkeypatch.setattr("sys.argv", [
+            "main.py",
+            "--generations", "1",
+            "--population", "12",
+            "--rounds", "2",
+            "--max-hands", "3",
+            "--final-rounds", "1",
+            "--final-max-hands", "2",
+            "--num-islands", "2",
+            "--island-interaction", "inter",
+            "--force-gto-islands", "1",
+            "--migration-interval", "0",
+            "--benchmark-interval", "0",
+            "--top-n", "1",
+            "--out-dir", out_dir,
+            "--no-reload-previous",
+            "--seed", "0",
+        ])
+        main()
+        assert os.path.exists(os.path.join(out_dir, "best_genome_latest.json"))
+        final_dir = os.path.join(out_dir, "final")
+        assert os.path.exists(os.path.join(final_dir, "leaderboard.md"))
 
     def test_main_runs_with_multiple_workers(self, tmp_path, monkeypatch):
         # Exercises the real ProcessPoolExecutor path: pool creation in

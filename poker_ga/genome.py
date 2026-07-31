@@ -412,6 +412,13 @@ class Genome:
         on), in catalog order -- the same order decide() checks them in."""
         return [spot for spot, flag in zip(GTO_SPOTS, self.gto_flags) if flag > 0.5]
 
+    def force_all_gto_active(self) -> None:
+        """In-place: sets every gto_flags gene to active, overriding whatever
+        mutation/crossover produced. Used by ga.py's IslandModel to keep
+        --force-gto-islands islands always trusting every GTO_SPOTS chart
+        instead of letting gto_flags evolve freely."""
+        self.gto_flags = np.ones(NUM_GTO_SPOTS, dtype=np.float64)
+
     def compute_v_l(self, features: np.ndarray) -> tuple[float, float]:
         raw_v = float(self.weights_v @ features + self.bias_v)
         raw_l = float(self.weights_l @ features + self.bias_l)
