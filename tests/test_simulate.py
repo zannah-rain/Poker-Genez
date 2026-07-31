@@ -79,6 +79,23 @@ class TestRunSession:
         # The session should have played every hand regardless of busts.
         assert sum(result["hands_survived"].values()) >= 15
 
+    def test_refill_never_duplicates_a_player_already_seated_when_avoidable(self):
+        # Regression test: with no dedicated backfill_pool (pool ==
+        # table_players), a refill used to be able to redraw a player_id
+        # already seated at another live seat, letting that identity occupy
+        # two seats at once -- double-counted every hand in the
+        # hands_survived loop above, so its total could exceed
+        # max_hands_per_session. With only 2 distinct pool members and 2
+        # seats, avoiding a duplicate is always possible, so this should
+        # never happen now.
+        shover = Player(player_id=0, genome=FixedGenome(BET_RAISE, bet_size=100000.0))
+        caller = Player(player_id=1, genome=FixedGenome(CHECK_CALL))
+        config = GameConfig(max_hands_per_session=15, starting_stack=20.0, small_blind=1.0, big_blind=2.0)
+        for seed in range(20):
+            result = run_session([shover, caller], config, np.random.default_rng(seed))
+            for hands in result["hands_survived"].values():
+                assert hands <= 15
+
     def test_backfill_pool_defaults_to_table_players(self):
         players = make_random_players(2)
         config = GameConfig(max_hands_per_session=5)

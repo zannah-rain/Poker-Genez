@@ -87,13 +87,26 @@ def run_session(
         hands_played += 1
         button_idx = (button_idx + 1) % len(seats)
 
+        # Snapshot who's still live *before* any replacement this hand, so a
+        # refill can't pick a player_id already seated elsewhere at this
+        # table -- otherwise the same identity could occupy two seats at
+        # once, double-counting them in the hands_survived loop above on
+        # every subsequent hand. Updated as replacements are assigned below
+        # so two seats busting in the same hand can't refill with each
+        # other's replacement either.
+        occupied_ids = {s.player.player_id for s in seats if s.stack > 1e-9}
         for i, s in enumerate(seats):
             if s.stack <= 1e-9:
                 pid = s.player.player_id
                 net[pid] = net.get(pid, 0.0) - game_config.starting_stack
                 busted[pid] = True
-                replacement = pool[int(rng.integers(0, len(pool)))]
+                # Falls back to the full pool (allowing a duplicate) only if
+                # every pool member is already seated -- unavoidable when
+                # the pool is no bigger than the table itself.
+                candidates = [p for p in pool if p.player_id not in occupied_ids] or pool
+                replacement = candidates[int(rng.integers(0, len(candidates)))]
                 seats[i] = SeatState(player=replacement, stack=game_config.starting_stack)
+                occupied_ids.add(replacement.player_id)
 
     for s in seats:
         pid = s.player.player_id

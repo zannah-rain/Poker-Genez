@@ -196,6 +196,14 @@ _POSITION_VALUES = (
     (1.0, "Acts last this street (in position / on the button)"),
 )
 _ACTIVE_PLAYERS_VALUES = tuple((n / 6.0, f"{n} players still in the hand") for n in range(2, 7))
+_OVERCARDS_VALUES = tuple(
+    (
+        n / 5.0,
+        "No board cards rank higher than my high card" if n == 0
+        else f"{n} board card{'s' if n != 1 else ''} rank{'s' if n == 1 else ''} higher than my high card",
+    )
+    for n in range(6)
+)
 _RAISES_VALUES = (
     (0.0, "No raises yet this street"),
     (0.25, "1 raise so far"),
@@ -370,6 +378,16 @@ _ACTIVE_PLAYERS_CHILDREN = [
         "num_active_norm", n - 2,
     )
     for n in range(2, 7)
+]
+
+_OVERCARDS_CHILDREN = [
+    _linked_bool(
+        f"num_overcards_is_{n}", ("0 overcards" if n == 0 else f"{n} overcard{'s' if n != 1 else ''}"),
+        f"1 if exactly {n} board cards rank higher than the higher of this player's two hole "
+        "cards, else 0.",
+        "num_overcards_norm", n,
+    )
+    for n in range(6)
 ]
 
 _RAISES_CHILDREN = [
@@ -667,6 +685,17 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "folded into that table. 0 before the flop.",
         group="Board / Flop Characteristics",
     ),
+
+    FeatureSpec(
+        "num_overcards_norm", "Board Overcards",
+        "Number of board (community/shared) cards that rank higher than the higher of "
+        "this player's two hole cards, normalized to 0-1 via count / 5 (the maximum "
+        "possible number of shared cards). 0.0 preflop, since there's no board yet. "
+        "Distinct from Shared Cards High Card Rank, which reports the board's single "
+        "highest rank regardless of this player's own hole cards.",
+        kind="categorical", value_table=_OVERCARDS_VALUES, group="Made Hand Features",
+    ),
+    *_OVERCARDS_CHILDREN,
 
     # Hand-vs-board heuristics: not mutually exclusive as a group (e.g. Low
     # Pair is a subset of Underpair), so unlike the categorical features
@@ -1020,6 +1049,7 @@ _CONNECTIVITY_GAP_KEYS = tuple(spec.key for spec in _CONNECTIVITY_CHILDREN[1:-1]
 _CONNECTIVITY_GAP_PLUS_KEY = _CONNECTIVITY_CHILDREN[-1].key
 _ACTIVE_PLAYERS_KEYS = tuple(spec.key for spec in _ACTIVE_PLAYERS_CHILDREN)  # n=2..6
 _RAISES_KEYS = tuple(spec.key for spec in _RAISES_CHILDREN[:4])  # r=0..3 ("raises_is_4plus" is already a literal)
+_OVERCARDS_KEYS = tuple(spec.key for spec in _OVERCARDS_CHILDREN)  # n=0..5
 
 _BUCKET_KEY_FAMILIES = {
     "call_amount_norm": _CALL_SIZE_CHILDREN,
@@ -1058,6 +1088,7 @@ def extract_features(sit: Situation) -> np.ndarray:
     stack_depth_norm = _clip01(sit.my_stack / max(sit.starting_stack, 1.0) / 2.0)
     hole_high_card_rank = max(sit.hole[0].rank, sit.hole[1].rank)
     shared_high_card_rank = max((c.rank for c in sit.board), default=None)
+    num_overcards = sum(1 for c in sit.board if c.rank > hole_high_card_rank)
     role = seat_role(sit.seat_index, sit.button_idx, sit.num_seats_total)
     role_index = SEAT_ROLES.index(role)
 
@@ -1065,6 +1096,7 @@ def extract_features(sit: Situation) -> np.ndarray:
         "hand_category_norm": cat / 8.0,
         "hole_high_card_norm": (hole_high_card_rank - 2) / 12.0,
         "shared_high_card_norm": ((shared_high_card_rank - 2) / 12.0) if shared_high_card_rank else 0.0,
+        "num_overcards_norm": num_overcards / 5.0,
         "flush_draw": float(hand["flush_draw"]),
         "straight_draw": float(hand["straight_draw"]),
         "hole_suited": hole_suited,
@@ -1112,6 +1144,9 @@ def extract_features(sit: Situation) -> np.ndarray:
 
     for i, n in enumerate(range(2, 7)):
         values[_ACTIVE_PLAYERS_KEYS[i]] = float(sit.num_active == n)
+
+    for i, n in enumerate(range(6)):
+        values[_OVERCARDS_KEYS[i]] = float(num_overcards == n)
 
     for i, r in enumerate(range(0, 4)):
         values[_RAISES_KEYS[i]] = float(sit.num_raises_this_street == r)

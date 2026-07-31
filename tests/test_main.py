@@ -35,9 +35,9 @@ class TestParseArgs:
     def test_benchmark_defaults(self, monkeypatch):
         monkeypatch.setattr("sys.argv", ["main.py"])
         args = parse_args()
-        assert args.benchmark_min_tables == 100
-        assert args.benchmark_max_tables == 1000
-        assert args.benchmark_table_batch == 100
+        assert args.benchmark_min_tables == 500
+        assert args.benchmark_max_tables == 2000
+        assert args.benchmark_table_batch == 200
         assert args.benchmark_p_value == 0.1
 
     def test_overrides_are_applied(self, monkeypatch):
@@ -84,7 +84,7 @@ class TestParseArgs:
         monkeypatch.setattr("sys.argv", ["main.py"])
         args = parse_args()
         assert args.island_interaction == "alternate"
-        assert args.force_gto_islands == 0
+        assert args.force_gto_islands == 1
 
     def test_island_overrides_are_applied(self, monkeypatch):
         monkeypatch.setattr("sys.argv", [

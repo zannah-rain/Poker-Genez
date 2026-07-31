@@ -401,6 +401,65 @@ class TestHandVsBoardHeuristics:
         assert values["backdoor_flush_draw_1"] == 0.0
 
 
+class TestOvercardsFeature:
+    def test_zero_overcards_preflop(self):
+        # No board yet, so nothing can rank higher than the hole cards.
+        values = values_by_key(make_situation(
+            hole=[Card.from_str("Kh"), Card.from_str("2d")], board=[],
+        ))
+        assert values["num_overcards_norm"] == 0.0
+        assert values["num_overcards_is_0"] == 1.0
+
+    def test_counts_board_cards_ranked_above_the_hole_high_card(self):
+        # Hole high card is 9; board has two cards above it (K, T) and one below (4).
+        hole = [Card.from_str("9h"), Card.from_str("2d")]
+        board = [Card.from_str("Kc"), Card.from_str("Ts"), Card.from_str("4h")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=1))
+        assert values["num_overcards_norm"] == pytest.approx(2 / 5.0)
+        assert values["num_overcards_is_2"] == 1.0
+        assert values["num_overcards_is_0"] == 0.0
+
+    def test_pocket_pair_counts_overcards_above_the_pair(self):
+        # An underpair's overcard count should match the board cards above it.
+        hole = [Card.from_str("6h"), Card.from_str("6d")]
+        board = [Card.from_str("Kc"), Card.from_str("5d"), Card.from_str("3h")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=1))
+        assert values["num_overcards_norm"] == pytest.approx(1 / 5.0)
+        assert values["num_overcards_is_1"] == 1.0
+
+    def test_no_overcards_when_hole_high_card_beats_the_whole_board(self):
+        hole = [Card.from_str("Ah"), Card.from_str("2d")]
+        board = [Card.from_str("Kc"), Card.from_str("Qd"), Card.from_str("3h")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=1))
+        assert values["num_overcards_norm"] == 0.0
+        assert values["num_overcards_is_0"] == 1.0
+
+    def test_river_can_reach_max_of_five_overcards(self):
+        hole = [Card.from_str("2h"), Card.from_str("3d")]
+        board = [
+            Card.from_str("Kc"), Card.from_str("Qd"), Card.from_str("Jh"),
+            Card.from_str("Ts"), Card.from_str("9c"),
+        ]
+        values = values_by_key(make_situation(hole=hole, board=board, street=3))
+        assert values["num_overcards_norm"] == 1.0
+        assert values["num_overcards_is_5"] == 1.0
+
+    def test_equal_rank_board_card_does_not_count_as_an_overcard(self):
+        # Board card matching the hole high card exactly is a pair, not an overcard.
+        hole = [Card.from_str("Kh"), Card.from_str("2d")]
+        board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("3h")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=1))
+        assert values["num_overcards_norm"] == 0.0
+
+    def test_only_one_overcard_indicator_is_active(self):
+        hole = [Card.from_str("9h"), Card.from_str("2d")]
+        board = [Card.from_str("Kc"), Card.from_str("Ts"), Card.from_str("4h")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=1))
+        indicator_keys = [f"num_overcards_is_{n}" for n in range(6)]
+        active = [key for key in indicator_keys if values[key] == 1.0]
+        assert active == ["num_overcards_is_2"]
+
+
 class TestOpponentTendencyFeatures:
     def test_defaults_are_neutral(self):
         values = values_by_key(make_situation())
