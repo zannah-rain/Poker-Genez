@@ -220,16 +220,15 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
     lines.append("")
 
     total_conditions = strategy.NUM_RULES * strategy.CONDITIONS_PER_RULE
-    raise_pct = strategy.RAISE_SIZE_ALPHABET[g.raise_size_idx] * 100
     lines.append("## How this genome decides")
     lines.append(
         "Every decision buckets a small set of features into 2-3 groups (see Feature Buckets "
         "below for this genome's own cutoffs), then checks a fixed list of rules -- first full "
-        "match wins -- and plays that rule's action. No match at all defaults to Fold, the "
-        "same way a real range chart's blank squares are a fold."
+        "match wins -- and plays that rule's action (Fold, Call, one of 6 fixed-size Raises, "
+        "or All-In -- each rule picks its own raise size, see Strategy Rules below). No match "
+        "at all defaults to Fold, the same way a real range chart's blank squares are a fold."
     )
     lines.append("")
-    lines.append(f"- **Raise size:** always raises to {raise_pct:.0f}% of pot (one shared size for every Raise rule).")
     lines.append(
         f"- **Decision noise:** {g.bucket_noise_std:.3f} -- small randomness applied to a feature's "
         "reading before it's bucketed, so a hand right at a threshold occasionally falls on "

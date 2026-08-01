@@ -30,7 +30,7 @@ def make_genome(condition_features=None, condition_buckets=None, rule_actions=No
         num_buckets=np.full(strategy.NUM_BUCKETABLE, 2),
         thresholds=np.full((strategy.NUM_BUCKETABLE, strategy.MAX_BUCKETS - 1), 0.5),
         condition_features=condition_features, condition_buckets=condition_buckets,
-        rule_actions=rule_actions, raise_size_idx=0, bucket_noise_std=1.0, gto_flags=gto_flags,
+        rule_actions=rule_actions, bucket_noise_std=1.0, gto_flags=gto_flags,
     )
 
 
@@ -220,13 +220,13 @@ class TestDescribeGenome:
         actions = np.full(strategy.NUM_RULES, strategy.ACTION_FOLD)
         cf[0, 0] = strategy.feature_index("hand_category_norm")
         cb[0, 0] = 1
-        actions[0] = strategy.ACTION_RAISE
+        actions[0] = strategy.ACTION_RAISE_75
         player = Player(player_id=1, genome=make_genome(condition_features=cf, condition_buckets=cb, rule_actions=actions))
         stats = PlayerStats(player_id=1)
         report = describe_genome(player, stats, GameConfig(), rank=1)
         assert "Hand Strength Tier" in report
         assert "[rule 0]" in report
-        assert "**Raise**" in report
+        assert "**Raise 75% Pot**" in report
 
 
 class TestExportTopN:

@@ -19,8 +19,8 @@ delegates to):
      conjunction of up to CONDITIONS_PER_RULE (feature, required bucket)
      checks (or a wildcard "don't care"). First full match wins -- the same
      idiom gto.py's GTOSpot.action_ranges/SpotMatcher already use.
-  3. That rule's action category -- Fold / Call / Raise (to one shared,
-     evolved pot-fraction size) / All-In -- is what gets played. No match at
+  3. That rule's action category -- Fold / Call / one of 6 fixed-size Raises
+     (25/50/75/100/125/150% pot) / All-In -- is what gets played. No match at
      all defaults to Fold (mirrors GTOSpot.default_action's "everything not
      colored in is a fold").
 
@@ -101,9 +101,9 @@ class Genome:
     bucket) conditions; condition_features entries are strategy.WILDCARD for
     an inactive ("don't care") slot.
     rule_actions: (strategy.NUM_RULES,) -- each rule's action category
-    (index into strategy.ACTION_CATEGORIES).
-    raise_size_idx: index into strategy.RAISE_SIZE_ALPHABET -- the one
-    shared pot-fraction size every Raise-category rule plays.
+    (index into strategy.ACTION_CATEGORIES -- Fold, Call, one of 6 fixed-size
+    Raises, or All-In; each rule picks its own raise size independently, so
+    there's no separate genome-wide raise-size gene).
     bucket_noise_std: small Gaussian jitter applied to a feature's
     normalized value before bucketing it, giving cheap, natural mixed-
     strategy behavior right at a threshold boundary.
@@ -113,7 +113,7 @@ class Genome:
     __slots__ = (
         "num_buckets", "thresholds",
         "condition_features", "condition_buckets", "rule_actions",
-        "raise_size_idx", "bucket_noise_std",
+        "bucket_noise_std",
         "gto_flags",
     )
 
@@ -121,7 +121,7 @@ class Genome:
         self,
         num_buckets: np.ndarray, thresholds: np.ndarray,
         condition_features: np.ndarray, condition_buckets: np.ndarray, rule_actions: np.ndarray,
-        raise_size_idx: int, bucket_noise_std: float,
+        bucket_noise_std: float,
         gto_flags: np.ndarray,
     ):
         self.num_buckets = num_buckets
@@ -129,7 +129,6 @@ class Genome:
         self.condition_features = condition_features
         self.condition_buckets = condition_buckets
         self.rule_actions = rule_actions
-        self.raise_size_idx = raise_size_idx
         self.bucket_noise_std = bucket_noise_std
         self.gto_flags = gto_flags
 
@@ -151,7 +150,6 @@ class Genome:
         condition_buckets = rng.integers(0, strategy.MAX_BUCKETS, size=condition_shape)
         rule_actions = rng.integers(0, strategy.NUM_ACTION_CATEGORIES, size=strategy.NUM_RULES)
 
-        raise_size_idx = int(rng.integers(0, len(strategy.RAISE_SIZE_ALPHABET)))
         center, spread = BUCKET_NOISE_STD_INIT
         bucket_noise_std = abs(float(rng.normal(center, spread)))
 
@@ -159,7 +157,7 @@ class Genome:
             num_buckets=num_buckets, thresholds=thresholds,
             condition_features=condition_features, condition_buckets=condition_buckets,
             rule_actions=rule_actions,
-            raise_size_idx=raise_size_idx, bucket_noise_std=bucket_noise_std,
+            bucket_noise_std=bucket_noise_std,
             gto_flags=(rng.random(NUM_GTO_SPOTS) < GTO_INIT_PROB).astype(np.float64),
         )
 
@@ -193,7 +191,6 @@ class Genome:
         return {
             "feature_buckets": feature_buckets,
             "rules": rules,
-            "raise_size_pct": float(strategy.RAISE_SIZE_ALPHABET[self.raise_size_idx]),
             "bucket_noise_std": float(self.bucket_noise_std),
             "gto_flags": {spot.key: float(flag) for spot, flag in zip(GTO_SPOTS, self.gto_flags)},
         }
@@ -275,13 +272,6 @@ class Genome:
                 f"genome's rules (no longer in the feature catalog): {', '.join(sorted(unknown_rule_features))}"
             )
 
-        if "raise_size_pct" in data:
-            saved_pct = float(data["raise_size_pct"])
-            raise_size_idx = int(np.argmin(np.abs(strategy.RAISE_SIZE_ALPHABET - saved_pct)))
-        else:
-            print("Warning: 'raise_size_pct' missing from saved genome -- initializing randomly.")
-            raise_size_idx = int(rng.integers(0, len(strategy.RAISE_SIZE_ALPHABET)))
-
         if "bucket_noise_std" in data:
             bucket_noise_std = float(data["bucket_noise_std"])
         else:
@@ -313,7 +303,7 @@ class Genome:
 
         return cls(
             num_buckets, thresholds, condition_features, condition_buckets, rule_actions,
-            raise_size_idx, bucket_noise_std, gto_flags,
+            bucket_noise_std, gto_flags,
         )
 
     def save(self, path: str) -> None:
@@ -330,7 +320,7 @@ class Genome:
         return Genome(
             self.num_buckets.copy(), self.thresholds.copy(),
             self.condition_features.copy(), self.condition_buckets.copy(), self.rule_actions.copy(),
-            self.raise_size_idx, self.bucket_noise_std,
+            self.bucket_noise_std,
             self.gto_flags.copy(),
         )
 
@@ -341,11 +331,13 @@ class Genome:
         bucket_noise_std get additive-gaussian noise rescaled for their 0-1
         domain (see strategy.THRESHOLD_MUTATION_SCALE_FACTOR); condition
         features get a full random reassignment (no meaningful "nudge" for
-        feature identity); condition buckets, rule actions, and
-        raise_size_idx get the nudge-mostly/jump-sometimes blend, since
-        those integers *are* meaningfully ordered; gto_flags bit-flip.
-        Each gene is independently selected for mutation with probability
-        `rate`, whichever kind it is."""
+        feature identity); condition buckets and rule actions get the
+        nudge-mostly/jump-sometimes blend, since those integers *are*
+        meaningfully ordered (rule actions run Fold < Call < Raise 25% < ...
+        < Raise 150% < All-In, so a nudge means "slightly more/less
+        aggressive, or a slightly bigger/smaller raise"); gto_flags
+        bit-flip. Each gene is independently selected for mutation with
+        probability `rate`, whichever kind it is."""
         threshold_scale = continuous_scale * strategy.THRESHOLD_MUTATION_SCALE_FACTOR
 
         def mutate_noise_std(value: float) -> float:
@@ -359,7 +351,6 @@ class Genome:
             strategy.mutate_condition_features(self.condition_features, rate, rng),
             strategy.mutate_condition_buckets(self.condition_buckets, rate, rng),
             strategy.mutate_rule_actions(self.rule_actions, rate, rng),
-            strategy.mutate_alphabet_index(self.raise_size_idx, len(strategy.RAISE_SIZE_ALPHABET), rate, rng),
             mutate_noise_std(self.bucket_noise_std),
             mutate_bool_flags(self.gto_flags, rate, rng),
         )
@@ -372,10 +363,9 @@ class Genome:
         count from one parent paired with cut points sized for a different
         count), and a rule's conditions always travel with its own action
         (never a feature index from one parent matched against an unrelated
-        bucket index from the other). raise_size_idx and gto_flags are
-        independent single/per-gene choices, so they use plain uniform
-        crossover; bucket_noise_std is a genuinely continuous scalar, so it
-        keeps blend crossover."""
+        bucket index from the other). gto_flags are independent per-gene
+        choices, so they use plain uniform crossover; bucket_noise_std is a
+        genuinely continuous scalar, so it keeps blend crossover."""
         feature_mask = strategy.row_crossover_mask(strategy.NUM_BUCKETABLE, rng)
         num_buckets = strategy.apply_row_mask(self.num_buckets, other.num_buckets, feature_mask)
         thresholds = strategy.apply_row_mask(self.thresholds, other.thresholds, feature_mask)
@@ -385,14 +375,12 @@ class Genome:
         condition_buckets = strategy.apply_row_mask(self.condition_buckets, other.condition_buckets, rule_mask)
         rule_actions = strategy.apply_row_mask(self.rule_actions, other.rule_actions, rule_mask)
 
-        raise_size_idx = self.raise_size_idx if rng.random() < 0.5 else other.raise_size_idx
-
         alpha = rng.uniform(0.0, 1.0)
         bucket_noise_std = abs(alpha * self.bucket_noise_std + (1 - alpha) * other.bucket_noise_std)
 
         return Genome(
             num_buckets, thresholds, condition_features, condition_buckets, rule_actions,
-            raise_size_idx, bucket_noise_std,
+            bucket_noise_std,
             uniform_crossover(self.gto_flags, other.gto_flags, rng),
         )
 
@@ -448,13 +436,13 @@ class Genome:
         if action_idx == strategy.ACTION_CALL:
             return CHECK_CALL, 0.0
 
-        # ACTION_RAISE or ACTION_ALLIN
+        # One of the 6 Raise categories, or ACTION_ALLIN
         if BET_RAISE not in legal_actions:
             return CHECK_CALL, 0.0
         if action_idx == strategy.ACTION_ALLIN:
             bet_size = situation.my_stack
         else:
-            bet_size = float(strategy.RAISE_SIZE_ALPHABET[self.raise_size_idx]) * max(situation.pot, 1.0)
+            bet_size = strategy.RAISE_POT_FRACTION[action_idx] * max(situation.pot, 1.0)
         return BET_RAISE, bet_size
 
     def _decide_from_gto_charts(

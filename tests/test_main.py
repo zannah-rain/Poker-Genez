@@ -21,7 +21,7 @@ def make_genome_with_nonzero_count(count):
         condition_features=condition_features,
         condition_buckets=np.zeros((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), dtype=np.int64),
         rule_actions=np.full(strategy.NUM_RULES, strategy.ACTION_FOLD),
-        raise_size_idx=0, bucket_noise_std=1.0, gto_flags=np.zeros(NUM_GTO_SPOTS),
+        bucket_noise_std=1.0, gto_flags=np.zeros(NUM_GTO_SPOTS),
     )
 
 

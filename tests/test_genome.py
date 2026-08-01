@@ -41,7 +41,7 @@ def make_situation(**overrides) -> Situation:
 def make_genome(
     num_buckets=None, thresholds=None,
     condition_features=None, condition_buckets=None, rule_actions=None,
-    raise_size_idx=0, bucket_noise_std=0.0, gto_flags=None,
+    bucket_noise_std=0.0, gto_flags=None,
 ) -> Genome:
     """Defaults to an "empty" genome: every rule wildcard-conditioned to
     Fold, 2 buckets (cut at 0.5) for every bucketable feature, no GTO charts
@@ -61,19 +61,19 @@ def make_genome(
     return Genome(
         num_buckets=num_buckets, thresholds=thresholds,
         condition_features=condition_features, condition_buckets=condition_buckets,
-        rule_actions=rule_actions, raise_size_idx=raise_size_idx, bucket_noise_std=bucket_noise_std,
+        rule_actions=rule_actions, bucket_noise_std=bucket_noise_std,
         gto_flags=gto_flags,
     )
 
 
-def genome_with_default_action(action: int, raise_size_idx: int = 0, **kwargs) -> Genome:
+def genome_with_default_action(action: int, **kwargs) -> Genome:
     """A genome whose rule 0 matches every situation (all-wildcard
     conditions) and always plays `action` -- isolates decide()'s
     action-category -> (game action, bet size) mapping from the bucketing/
     matching machinery, which is tested separately in test_strategy.py."""
     actions = np.full(strategy.NUM_RULES, strategy.ACTION_FOLD)
     actions[0] = action
-    return make_genome(rule_actions=actions, raise_size_idx=raise_size_idx, **kwargs)
+    return make_genome(rule_actions=actions, **kwargs)
 
 
 def genome_with_condition(feature_key: str, bucket: int, action: int, **kwargs) -> Genome:
@@ -148,10 +148,11 @@ class TestGenomeRandom:
         assert np.all(g.condition_features >= strategy.WILDCARD)
         assert np.all(g.condition_features < strategy.NUM_TOP_LEVEL_FEATURES)
 
-    def test_raise_size_idx_valid(self):
+    def test_rule_actions_in_valid_range(self):
         rng = np.random.default_rng(0)
         g = Genome.random(rng)
-        assert 0 <= g.raise_size_idx < len(strategy.RAISE_SIZE_ALPHABET)
+        assert np.all(g.rule_actions >= 0)
+        assert np.all(g.rule_actions < strategy.NUM_ACTION_CATEGORIES)
 
     def test_gto_flags_start_mostly_off(self):
         rng = np.random.default_rng(0)
@@ -177,9 +178,8 @@ class TestGenomeCopy:
         assert g.gto_flags[0] == original_first_flag
 
     def test_copy_preserves_scalars(self):
-        g = make_genome(raise_size_idx=2, bucket_noise_std=0.07)
+        g = make_genome(bucket_noise_std=0.07)
         g2 = g.copy()
-        assert g2.raise_size_idx == 2
         assert g2.bucket_noise_std == pytest.approx(0.07)
 
 
@@ -232,16 +232,16 @@ class TestDecideActionCategories:
         assert action == CHECK_CALL
         assert bet_size == 0.0
 
-    def test_raise_action_sizes_at_the_genomes_raise_pct_of_pot(self):
-        raise_size_idx = 2
-        g = genome_with_default_action(strategy.ACTION_RAISE, raise_size_idx=raise_size_idx)
-        situation = make_situation(pot=80.0)
-        action, bet_size = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
-        assert action == BET_RAISE
-        assert bet_size == pytest.approx(strategy.RAISE_SIZE_ALPHABET[raise_size_idx] * 80.0)
+    def test_each_raise_category_sizes_at_its_own_fixed_pot_fraction(self):
+        for raise_action, fraction in strategy.RAISE_POT_FRACTION.items():
+            g = genome_with_default_action(raise_action)
+            situation = make_situation(pot=80.0)
+            action, bet_size = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
+            assert action == BET_RAISE
+            assert bet_size == pytest.approx(fraction * 80.0)
 
     def test_raise_action_falls_back_to_check_call_if_illegal(self):
-        g = genome_with_default_action(strategy.ACTION_RAISE)
+        g = genome_with_default_action(strategy.ACTION_RAISE_75)
         situation = make_situation()
         action, bet_size = g.decide(situation, legal_actions=[FOLD, CHECK_CALL])
         assert action == CHECK_CALL
@@ -264,13 +264,13 @@ class TestDecideActionCategories:
 
 class TestDecideRuleMatching:
     def test_no_matching_rule_defaults_to_fold(self):
-        g = genome_with_condition("facing_bet", bucket=1, action=strategy.ACTION_RAISE)
+        g = genome_with_condition("facing_bet", bucket=1, action=strategy.ACTION_RAISE_75)
         situation = make_situation(call_amount=0.0)  # facing_bet bucket 0, condition needs bucket 1
         action, _ = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
         assert action == FOLD
 
     def test_matching_condition_fires_its_rule(self):
-        g = genome_with_condition("facing_bet", bucket=1, action=strategy.ACTION_RAISE)
+        g = genome_with_condition("facing_bet", bucket=1, action=strategy.ACTION_RAISE_75)
         situation = make_situation(call_amount=5.0, pot=20.0)  # facing_bet bucket 1
         action, _ = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
         assert action == BET_RAISE
@@ -294,7 +294,7 @@ class TestDecideRuleMatching:
         cb[0, 0] = 1
         cf[0, 1] = strategy.feature_index("is_aggressor")
         cb[0, 1] = 1
-        actions[0] = strategy.ACTION_RAISE
+        actions[0] = strategy.ACTION_RAISE_75
         g = make_genome(condition_features=cf, condition_buckets=cb, rule_actions=actions)
 
         both_true = make_situation(call_amount=5.0, is_aggressor=True)
@@ -307,7 +307,7 @@ class TestDecideRuleMatching:
 
 class TestDecideBucketNoise:
     def test_zero_noise_is_deterministic(self):
-        g = genome_with_default_action(strategy.ACTION_RAISE, bucket_noise_std=0.0)
+        g = genome_with_default_action(strategy.ACTION_RAISE_75, bucket_noise_std=0.0)
         situation = make_situation()
         rng = np.random.default_rng(0)
         a1 = g.decide(situation, [FOLD, CHECK_CALL, BET_RAISE], rng=rng)
@@ -315,7 +315,7 @@ class TestDecideBucketNoise:
         assert a1 == a2
 
     def test_deterministic_without_rng_even_with_nonzero_noise(self):
-        g = genome_with_default_action(strategy.ACTION_RAISE, bucket_noise_std=0.5)
+        g = genome_with_default_action(strategy.ACTION_RAISE_75, bucket_noise_std=0.5)
         situation = make_situation()
         results = {g.decide(situation, [FOLD, CHECK_CALL, BET_RAISE]) for _ in range(5)}
         assert len(results) == 1
@@ -469,7 +469,6 @@ class TestGenomeMutate:
         assert np.array_equal(mutated.condition_features, g.condition_features)
         assert np.array_equal(mutated.condition_buckets, g.condition_buckets)
         assert np.array_equal(mutated.rule_actions, g.rule_actions)
-        assert mutated.raise_size_idx == g.raise_size_idx
         assert mutated.bucket_noise_std == g.bucket_noise_std
 
     def test_original_genome_is_unmodified(self):
@@ -551,7 +550,6 @@ class TestSerialization:
         assert np.array_equal(g.condition_buckets, restored.condition_buckets)
         assert np.array_equal(g.rule_actions, restored.rule_actions)
         assert np.array_equal(g.gto_flags, restored.gto_flags)
-        assert g.raise_size_idx == restored.raise_size_idx
         assert g.bucket_noise_std == pytest.approx(restored.bucket_noise_std)
 
     def test_from_dict_drops_unknown_feature_and_fills_missing(self, capsys):
@@ -586,17 +584,14 @@ class TestSerialization:
         captured = capsys.readouterr()
         assert "rule" in captured.out.lower()
 
-    def test_from_dict_handles_missing_raise_size_and_bucket_noise(self, capsys):
+    def test_from_dict_handles_missing_bucket_noise(self, capsys):
         rng = np.random.default_rng(5)
         g = Genome.random(rng)
         data = g.to_dict()
-        del data["raise_size_pct"]
         del data["bucket_noise_std"]
         restored = Genome.from_dict(data, rng)
-        assert 0 <= restored.raise_size_idx < len(strategy.RAISE_SIZE_ALPHABET)
         assert restored.bucket_noise_std >= 0
         captured = capsys.readouterr()
-        assert "raise_size_pct" in captured.out
         assert "bucket_noise_std" in captured.out
 
     def test_from_dict_handles_missing_and_unknown_gto_flags(self, capsys):
@@ -616,7 +611,7 @@ class TestSerialization:
         g.save(str(path))
         loaded = Genome.load(str(path), rng)
         assert np.array_equal(g.condition_features, loaded.condition_features)
-        assert g.raise_size_idx == loaded.raise_size_idx
+        assert np.array_equal(g.rule_actions, loaded.rule_actions)
 
     def test_save_population_and_load_population_round_trip(self, tmp_path):
         rng = np.random.default_rng(8)

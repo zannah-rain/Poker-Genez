@@ -54,7 +54,12 @@ class TestRunSession:
             assert 0 <= hands <= 8
 
     def test_no_one_busts_when_stacks_are_deep_and_short_session(self):
-        players = make_random_players(2)
+        # Deep stacks alone don't guarantee no one busts -- an all-in
+        # confrontation risks a full stack regardless of its size -- so this
+        # uses deterministic check/call players (see FixedGenome) rather
+        # than random genomes, which can (correctly) shove and bust even
+        # with a huge starting stack.
+        players = [Player(player_id=i, genome=FixedGenome(CHECK_CALL)) for i in range(2)]
         config = GameConfig(max_hands_per_session=1, starting_stack=10000.0)
         result = run_session(players, config, np.random.default_rng(3))
         assert all(not busted for busted in result["busted"].values())

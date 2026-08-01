@@ -98,15 +98,41 @@ THRESHOLD_MUTATION_SCALE_FACTOR = 0.1
 # genome.py's own FOLD/CHECK_CALL/BET_RAISE game-action constants -- these
 # index ACTION_CATEGORIES (a rule's chosen strategy category), those index
 # legal_actions (what the game engine will actually accept).
-ACTION_FOLD, ACTION_CALL, ACTION_RAISE, ACTION_ALLIN = range(4)
-ACTION_CATEGORIES = ["Fold", "Call", "Raise", "All-In"]
+#
+# Raise is 6 separate fixed-size categories rather than one "Raise" category
+# plus a shared genome-wide size gene: a rule now picks its size directly
+# (e.g. "Raise 75% Pot"), so different rules -- a value raise on the river vs
+# a preflop 3-bet -- can each evolve their own size independently, still off
+# a small, human-memorizable menu (the same pot-fraction sizing convention
+# gto.py's "raise_NN" action tokens already use). Ordered from least to most
+# aggressive alongside Fold/Call/All-In so the whole list is one continuum --
+# mutation's nudge-mostly/jump-sometimes move (see _mutate_ordinal) then
+# means "shift to a slightly bigger/smaller size" most of the time.
+(
+    ACTION_FOLD, ACTION_CALL,
+    ACTION_RAISE_25, ACTION_RAISE_50, ACTION_RAISE_75,
+    ACTION_RAISE_100, ACTION_RAISE_125, ACTION_RAISE_150,
+    ACTION_ALLIN,
+) = range(9)
+ACTION_CATEGORIES = [
+    "Fold", "Call",
+    "Raise 25% Pot", "Raise 50% Pot", "Raise 75% Pot",
+    "Raise 100% Pot", "Raise 125% Pot", "Raise 150% Pot",
+    "All-In",
+]
 NUM_ACTION_CATEGORIES = len(ACTION_CATEGORIES)
 
-# One shared, evolvable raise size (as a fraction of pot, added on top of
-# whatever's already bet) -- the same small human-memorizable alphabet
-# convention WEIGHT_ALPHABET used, and the same pot-fraction sizing
-# convention gto.py's "raise_NN" action tokens already use.
-RAISE_SIZE_ALPHABET = np.array([0.33, 0.5, 0.75, 1.0, 1.5])
+# action index -> pot-fraction raise size, for every Raise category (added
+# on top of whatever's already bet -- the same convention gto.py's pot-
+# fraction "raise_NN" tokens use).
+RAISE_ACTIONS = (
+    ACTION_RAISE_25, ACTION_RAISE_50, ACTION_RAISE_75,
+    ACTION_RAISE_100, ACTION_RAISE_125, ACTION_RAISE_150,
+)
+RAISE_POT_FRACTION = {
+    ACTION_RAISE_25: 0.25, ACTION_RAISE_50: 0.5, ACTION_RAISE_75: 0.75,
+    ACTION_RAISE_100: 1.0, ACTION_RAISE_125: 1.25, ACTION_RAISE_150: 1.5,
+}
 
 
 def feature_index(key: str) -> int:
@@ -287,17 +313,6 @@ def mutate_condition_buckets(condition_buckets: np.ndarray, rate: float, rng: np
 
 def mutate_rule_actions(rule_actions: np.ndarray, rate: float, rng: np.random.Generator) -> np.ndarray:
     return _mutate_ordinal(rule_actions, NUM_ACTION_CATEGORIES, rate, rng)
-
-
-def mutate_alphabet_index(index: int, alphabet_size: int, rate: float, rng: np.random.Generator) -> int:
-    """Scalar version of the nudge/jump blend above, for single-gene
-    categorical choices like raise_size_idx."""
-    if rng.random() >= rate:
-        return index
-    if rng.random() < 0.8:
-        step = 1 if rng.random() < 0.5 else -1
-        return int(np.clip(index + step, 0, alphabet_size - 1))
-    return int(rng.integers(0, alphabet_size))
 
 
 # ---------------------------------------------------------------------------

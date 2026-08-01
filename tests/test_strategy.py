@@ -158,10 +158,10 @@ class TestFirstMatchingRule:
         cf = np.full((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
         cb = np.zeros((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), dtype=np.int64)
         actions = np.zeros(strategy.NUM_RULES, dtype=np.int64)
-        actions[0] = strategy.ACTION_RAISE
+        actions[0] = strategy.ACTION_RAISE_75
         actions[1] = strategy.ACTION_ALLIN
         result = strategy.first_matching_rule(buckets, cf, cb, actions)
-        assert result == strategy.ACTION_RAISE
+        assert result == strategy.ACTION_RAISE_75
 
     def test_none_when_nothing_matches(self):
         buckets = np.zeros(strategy.NUM_TOP_LEVEL_FEATURES, dtype=np.int64)
@@ -236,18 +236,6 @@ class TestMutateConditionBucketsAndRuleActions:
         assert np.array_equal(result, actions)
 
 
-class TestMutateAlphabetIndex:
-    def test_zero_rate_never_mutates(self):
-        rng = np.random.default_rng(0)
-        assert strategy.mutate_alphabet_index(2, 5, 0.0, rng) == 2
-
-    def test_stays_within_alphabet_bounds(self):
-        rng = np.random.default_rng(0)
-        for _ in range(200):
-            result = strategy.mutate_alphabet_index(2, 5, 1.0, rng)
-            assert 0 <= result < 5
-
-
 class TestRowCrossover:
     def test_each_row_comes_from_one_parent_only(self):
         rng = np.random.default_rng(0)
@@ -274,3 +262,22 @@ class TestRowCrossover:
         mask = strategy.row_crossover_mask(20, rng)
         child = strategy.apply_row_mask(a, b, mask)
         assert all(v in (1.0, 2.0) for v in child)
+
+
+class TestRaiseActionCategories:
+    def test_every_raise_action_has_a_pot_fraction(self):
+        for action in strategy.RAISE_ACTIONS:
+            assert action in strategy.RAISE_POT_FRACTION
+
+    def test_fold_call_allin_are_not_raise_actions(self):
+        for action in (strategy.ACTION_FOLD, strategy.ACTION_CALL, strategy.ACTION_ALLIN):
+            assert action not in strategy.RAISE_ACTIONS
+            assert action not in strategy.RAISE_POT_FRACTION
+
+    def test_pot_fractions_ascend_with_action_index(self):
+        fractions = [strategy.RAISE_POT_FRACTION[a] for a in strategy.RAISE_ACTIONS]
+        assert fractions == sorted(fractions)
+
+    def test_action_categories_length_matches_num_action_categories(self):
+        assert len(strategy.ACTION_CATEGORIES) == strategy.NUM_ACTION_CATEGORIES
+        assert strategy.NUM_ACTION_CATEGORIES == 2 + len(strategy.RAISE_ACTIONS) + 1
