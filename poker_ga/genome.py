@@ -1,81 +1,49 @@
-"""The evolvable unit: two near-orthogonal axes per feature instead of one.
+"""The evolvable unit: a small, ordered list of "if this situation, then
+this action" rules -- the kind of simplified strategy a human could actually
+memorize and execute at a table, rather than doing live arithmetic.
 
-Every feature gets two weights, one feeding V and one feeding L:
+This replaces an earlier linear "V/L/theta" system (two 0-100 scores per
+decision, combined through evolvable thresholds) that was accurate but not
+executable by a human: reading it required tracking which of ~200 weighted
+features were active and summing them live, every decision, every hand.
 
-    V -- showdown value. Roughly "my equity against the range that
-         continues." A linear combination of the features, offset by a
-         bias and clamped (plain min/max, not a sigmoid) to land on 0-100
-         -- read it as a percentile ("V=90" ~ a top-10% hand).
-    L -- leverage. Roughly "how much of villain's range folds to me" --
-         fold equity shaped by blockers, initiative, board texture,
-         position, and SPR. Also a linear, clamped 0-100 combination.
+The new decision rule, in full (see strategy.py for the machinery this
+delegates to):
 
-These two are close to independent (a nut flush blocker is almost pure L
-with near-zero V; a set on a dry board is almost pure V with low L), which
-is what lets 2 numbers per feature carry more than 1 did.
+  1. Bucket every "top-level" feature (the ~50 generalized concepts in
+     features.py, not its ~150 one-hot indicator children) into 2-3 groups
+     via this genome's own evolved thresholds -- shared across every rule,
+     so e.g. "Hand Strength: weak/medium/strong" has one definition the
+     whole strategy reads from, the way a real chart would.
+  2. Check this genome's NUM_RULES rules in fixed order; each is a small
+     conjunction of up to CONDITIONS_PER_RULE (feature, required bucket)
+     checks (or a wildcard "don't care"). First full match wins -- the same
+     idiom gto.py's GTOSpot.action_ranges/SpotMatcher already use.
+  3. That rule's action category -- Fold / Call / Raise (to one shared,
+     evolved pot-fraction size) / All-In -- is what gets played. No match at
+     all defaults to Fold (mirrors GTOSpot.default_action's "everything not
+     colored in is a fold").
 
-The decision rule is deliberately non-convex -- a plain aV + bL would just
-be a 1D score again -- so it's a max of two linear terms:
+Every decision re-evaluates this list fresh from the current Situation --
+there's no memory of "I'm currently bluffing" carried between streets.
+"Raise now, fold if raised back" isn't a thing this system represents
+explicitly: it just falls out of a *later* decision's bigger call_amount/
+facing_bet naturally routing to a different (likely Fold) rule. Likewise
+"call up to X, else fold" is just an ordinary rule condition on the existing
+call_amount_norm feature's bucket, not a special parameter -- once the bet
+gets too big for that condition to match, control falls through to whatever
+rule the genome evolved as its fallback (typically Fold).
 
-    A = max( V - theta_value,  L - theta_bluff - kappa * V )
-    A > 0              -> bet/raise, sized off A as a fraction of pot
-    elif V > theta_call -> call/check
-    else               -> fold/check
-
-theta_value/theta_bluff/theta_call/bias_v/bias_l/kappa are evolvable
-per-genome genes. They were fixed as constants for a while, because letting
-them free-drift under selection turned out to be exploitable: bet/raise
-fires on *either* axis clearing its bar (an OR) while folding needs *both*
-to fail (an AND), so selection could cheapen folding to near-zero just by
-drifting any of these numbers toward the "makes it easier to clear a bar"
-side of either inequality -- measured directly as a fold-rate collapse
-(~34% to ~7%) and average hands survived per session collapsing to ~1
-within a handful of generations, tracked all the way down to specific genes
-walking in that direction (bias_l drifting up, kappa drifting toward 0).
-What actually turned out to be driving that collapse, though, was a game
-mechanic: sessions used to end outright once a couple of players busted,
-letting a lucky win get "locked in" before it could be punished -- fixed by
-refilling busted seats with fresh players instead of ending the session
-(see simulate.py). With that root cause fixed, and with several other
-safeguards added since (a pot-scaled minimum raise floor, a sparsity
-penalty, island-isolated sub-populations, and benchmark-checkpoint
-reverting/early-stopping that catches and undoes a population that's
-measurably gotten worse -- see main.py), these six scalars are safe to let
-evolve again: the mechanism that made an unbounded drift pay off is gone,
-and there's now a safety net that reverts training if a similar drift ever
-did start paying off. `random()` still initializes them centered on the
-same reasonable values previously used as fixed constants (theta_value=70,
-theta_bluff=70, theta_call=40, bias_v=bias_l=50, kappa=0.5), so evolution
-starts from a sane baseline and has to earn any drift away from it.
-
-Weights are scaled to live on the same 0-100 range as V/L (big enough that
-a handful of active features move V/L meaningfully), and biases are
-centered at 50 -- the "no information" percentile -- so every number in a
-genome reads the same way a human would think about it: no separate unit
-conversion needed at the table. The only nonlinear-looking step anywhere is
-the min/max clamp on V/L, which is just "cap it at 0 or 100," not a curve.
-
-Feature weights (weights_v/weights_l) are quantized to WEIGHT_ALPHABET
-rather than being continuous -- so a genome reduces to "which of ~130
-features matter, how much, in which direction," a table small enough a
-human could plausibly memorize and apply at the table. The GA's fitness
-function separately penalizes nonzero weights (see main.py's
---sparsity-penalty), pushing evolution toward genomes where most weights
-land on exactly 0.
-
-On top of the linear V/L system, a genome can also memorize exact charts
-for specific, well-defined spots (see gto.py) -- e.g. "UTG open, 100BB":
+On top of this general strategy, a genome can also memorize exact charts for
+specific, well-defined spots (see gto.py) -- e.g. "UTG open, 100BB":
 situations narrow enough that a human plays them from a memorized range
-chart rather than by feel. `gto_flags` is one evolvable boolean gene per
-catalog entry in gto.py's GTO_SPOTS ("does this genome trust this spot's
-chart or not"); when a situation matches an active spot, `decide()` looks
-the hand up in that spot's chart and plays exactly what it says, bypassing
-V/L entirely for that decision. This is a structurally different kind of
-gene from everything else here -- a hard override, not another linear
-term -- because a chart lookup is exactly as memorizable for a human as the
-chart itself, whereas trying to fold "always raise AA in this one exact
-spot" into the linear weights would require it to also make sense as a
-general trend across every other spot, which it doesn't.
+chart rather than by feel. This piece is unchanged from before: `gto_flags`
+is one evolvable boolean gene per catalog entry in gto.py's GTO_SPOTS ("does
+this genome trust this spot's chart or not"); when a situation matches an
+active spot, `decide()` looks the hand up in that spot's chart and plays
+exactly what it says, bypassing the rule list entirely for that decision --
+a hard override, not another rule, because a chart lookup is exactly as
+memorizable for a human as the chart itself.
 """
 
 from __future__ import annotations
@@ -84,7 +52,8 @@ import json
 
 import numpy as np
 
-from features import FEATURE_NAMES, NUM_FEATURES, Situation, extract_features
+import strategy
+from features import Situation, extract_features
 from gto import GTO_SPOTS, NUM_GTO_SPOTS, resolve_spot_action
 
 FOLD, CHECK_CALL, BET_RAISE = 0, 1, 2
@@ -92,223 +61,233 @@ ACTION_NAMES = ["fold", "check/call", "bet/raise"]
 
 # Fraction of GTO_SPOTS a freshly random genome starts out trusting -- low,
 # so the GA has to actively select for a spot's chart being useful (mirrors
-# the sparsity-penalty philosophy for weights: earn complexity, don't start
-# with it) while still giving mutation/crossover some initial material.
+# the "earn complexity, don't start with it" philosophy behind
+# CONDITION_ACTIVE_INIT_PROB in strategy.py) while still giving mutation/
+# crossover some initial material.
 GTO_INIT_PROB = 0.1
 
-V_SCALE = 100.0  # V and L both live on this range, clamped -- read them as percentiles.
-
-# Init centers for the evolvable scalars below, on the same 0-100 scale as
-# V/L -- these are where `random()` centers its initial spread, not fixed
-# values (see module docstring for why they're evolvable, and why these
-# particular numbers are still a sane starting point).
-THETA_VALUE_INIT = 70.0  # V needed to raise for value: roughly "top 30%" showdown equity
-THETA_BLUFF_INIT = 70.0  # L needed to raise as a bluff: roughly "top 30%" leverage
-THETA_CALL_INIT = 40.0  # V needed to continue at all rather than fold: better than roughly average
-BIAS_INIT = 50.0  # the "no information" percentile: a featureless hand reads as average
-KAPPA_INIT = 0.5  # how much having a strong hand (V) suppresses the bluff term
-
-# name -> (init_center, init_spread, take_abs) for each continuous scalar gene,
-# used both by Genome.random() and by from_dict() to freshly initialize a
-# scalar gene that's missing from a saved genome (see from_dict).
-_SCALAR_INIT: dict[str, tuple[float, float, bool]] = {
-    "bias_v": (BIAS_INIT, 20.0, False),
-    "bias_l": (BIAS_INIT, 20.0, False),
-    "theta_value": (THETA_VALUE_INIT, 15.0, False),
-    "theta_bluff": (THETA_BLUFF_INIT, 15.0, False),
-    "theta_call": (THETA_CALL_INIT, 15.0, False),
-    "kappa": (KAPPA_INIT, 0.3, True),
-    "noise_std": (5.0, 3.0, True),
-}
-
-
-def _random_scalar(name: str, rng: np.random.Generator) -> float:
-    center, spread, take_abs = _SCALAR_INIT[name]
-    value = float(rng.normal(center, spread))
-    return abs(value) if take_abs else value
-
-
-# Feature weights (weights_v/weights_l) are constrained to this small alphabet
-# rather than being continuous -- a genome is then just a lookup table of
-# "which features matter, how much, in which direction" that a human could
-# plausibly memorize, instead of an arbitrary-precision float vector. Values
-# are sized so that a handful of active features can meaningfully move a
-# 0-100 score (see V_SCALE) -- e.g. 3 active weight-20 features already
-# swings the score by more than half its range.
-WEIGHT_ALPHABET_SCALE = 10.0
-WEIGHT_ALPHABET = np.array([-3.0, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 3.0]) * WEIGHT_ALPHABET_SCALE
-
-
-def quantize(values: np.ndarray) -> np.ndarray:
-    """Snaps each value to its nearest member of WEIGHT_ALPHABET."""
-    distances = np.abs(values[..., None] - WEIGHT_ALPHABET)
-    return WEIGHT_ALPHABET[np.argmin(distances, axis=-1)]
-
-
-def mutate_weights(weights: np.ndarray, rate: float, rng: np.random.Generator) -> np.ndarray:
-    """Mutates a quantized weight vector by jumping between WEIGHT_ALPHABET
-    entries directly, instead of adding continuous noise and re-quantizing.
-    A perturbation small enough to be sane for a continuous gene (e.g.
-    GAConfig.mutation_scale ~ a few units) is almost always *far* smaller
-    than the ~5-10 unit gap between adjacent alphabet values, so
-    continuous-style mutation silently does nothing to a quantized gene on
-    nearly every mutation event -- weights would never actually change.
-
-    Each selected gene gets one of two moves, picked at random:
-      - nudge one step up/down the (ordered) alphabet -- local search
-      - jump to a uniformly random alphabet value -- occasional big jumps
-        so search isn't limited to exploring one neighbor at a time
-    """
-    mask = rng.random(weights.shape) < rate
-    if not mask.any():
-        return weights
-
-    n = len(WEIGHT_ALPHABET)
-    current_index = np.argmin(np.abs(weights[..., None] - WEIGHT_ALPHABET), axis=-1)
-
-    step = np.where(rng.random(weights.shape) < 0.5, 1, -1)
-    nudged_index = np.clip(current_index + step, 0, n - 1)
-    random_index = rng.integers(0, n, size=weights.shape)
-
-    move = rng.random(weights.shape)
-    new_index = np.where(move < 0.8, nudged_index, random_index)
-
-    return np.where(mask, WEIGHT_ALPHABET[new_index], weights)
-
-
-def crossover_weights(a_weights: np.ndarray, b_weights: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """Uniform (discrete) crossover for quantized weights: each gene is
-    inherited whole from one parent or the other (50/50, independently per
-    gene), instead of blended like a continuous gene. Blending two exact
-    alphabet values and re-quantizing invents intermediate values neither
-    parent had, and systematically dilutes sparsity whenever a sparse
-    parent (weight=0) meets a dense one -- only the narrow slice of the
-    blend range nearest 0 rounds back to 0, so a 0 gene mated with a large
-    nonzero gene mostly produces a nonzero child. Picking a value each
-    parent actually had preserves whatever already survived selection --
-    including zeros -- the way discrete/categorical genes should cross."""
-    from_a = rng.random(a_weights.shape) < 0.5
-    return np.where(from_a, a_weights, b_weights)
+# Init center/spread for bucket_noise_std -- small, since it lives on
+# features.py's native 0-1 scale (jittering a normalized feature value, not
+# a V/L-style percentile) and is meant to only nudge borderline calls near a
+# threshold, not meaningfully blur the strategy.
+BUCKET_NOISE_STD_INIT = (0.03, 0.03)  # (center, spread), then abs()
 
 
 def mutate_bool_flags(flags: np.ndarray, rate: float, rng: np.random.Generator) -> np.ndarray:
     """Bit-flip mutation for boolean genes (0.0/1.0 floats): each selected
     gene flips to its opposite, rather than being nudged like a continuous
-    value or alphabet-jumped like a quantized weight -- there's nothing
-    "in between" on or off."""
+    value or alphabet-jumped like a categorical one -- there's nothing "in
+    between" on or off. Used for gto_flags."""
     mask = rng.random(flags.shape) < rate
     return np.where(mask, 1.0 - flags, flags)
 
 
+def uniform_crossover(a: np.ndarray, b: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Each gene independently inherited from one parent or the other
+    (50/50) -- unlike strategy.py's row-coupled crossover, gto_flags genes
+    don't need to stay coherent with each other (each spot's flag is an
+    independent on/off choice), so plain per-gene uniform crossover is the
+    right (and simplest) operator here."""
+    from_a = rng.random(a.shape) < 0.5
+    return np.where(from_a, a, b)
+
+
 class Genome:
-    """weights_v/weights_l: (NUM_FEATURES,) each.
-    bias_v/bias_l: baseline V/L before any feature is considered.
-    theta_value/theta_bluff/theta_call: decision thresholds (see module
-    docstring for the decision rule).
-    kappa: non-negative damping of the bluff term as V rises.
-    noise_std: exploration noise added to V and L (independently) before
-    thresholding.
+    """num_buckets/thresholds: (strategy.NUM_BUCKETABLE,) / (..., MAX_BUCKETS-1)
+    -- this genome's shared bucketing scheme for every non-boolean top-level
+    feature (see strategy.py).
+    condition_features/condition_buckets: (strategy.NUM_RULES,
+    strategy.CONDITIONS_PER_RULE) -- each rule's up-to-3 (feature, required
+    bucket) conditions; condition_features entries are strategy.WILDCARD for
+    an inactive ("don't care") slot.
+    rule_actions: (strategy.NUM_RULES,) -- each rule's action category
+    (index into strategy.ACTION_CATEGORIES).
+    raise_size_idx: index into strategy.RAISE_SIZE_ALPHABET -- the one
+    shared pot-fraction size every Raise-category rule plays.
+    bucket_noise_std: small Gaussian jitter applied to a feature's
+    normalized value before bucketing it, giving cheap, natural mixed-
+    strategy behavior right at a threshold boundary.
+    gto_flags: unchanged from before -- see module docstring.
     """
 
     __slots__ = (
-        "weights_v", "weights_l", "bias_v", "bias_l",
-        "theta_value", "theta_bluff", "theta_call", "kappa", "noise_std",
+        "num_buckets", "thresholds",
+        "condition_features", "condition_buckets", "rule_actions",
+        "raise_size_idx", "bucket_noise_std",
         "gto_flags",
     )
 
     def __init__(
         self,
-        weights_v: np.ndarray, weights_l: np.ndarray,
-        bias_v: float, bias_l: float,
-        theta_value: float, theta_bluff: float, theta_call: float,
-        kappa: float, noise_std: float,
+        num_buckets: np.ndarray, thresholds: np.ndarray,
+        condition_features: np.ndarray, condition_buckets: np.ndarray, rule_actions: np.ndarray,
+        raise_size_idx: int, bucket_noise_std: float,
         gto_flags: np.ndarray,
     ):
-        self.weights_v = weights_v
-        self.weights_l = weights_l
-        self.bias_v = bias_v
-        self.bias_l = bias_l
-        self.theta_value = theta_value
-        self.theta_bluff = theta_bluff
-        self.theta_call = theta_call
-        self.kappa = kappa
-        self.noise_std = noise_std
+        self.num_buckets = num_buckets
+        self.thresholds = thresholds
+        self.condition_features = condition_features
+        self.condition_buckets = condition_buckets
+        self.rule_actions = rule_actions
+        self.raise_size_idx = raise_size_idx
+        self.bucket_noise_std = bucket_noise_std
         self.gto_flags = gto_flags
 
     @classmethod
     def random(cls, rng: np.random.Generator, scale: float = 0.5) -> "Genome":
-        # `scale` is on the same relative footing as before quantization was
-        # introduced (WEIGHT_ALPHABET is just the old {-3..3} pattern scaled
-        # up), so the fraction of weights that land on each alphabet value
-        # is unchanged by that rescaling -- only what each value *means* is
-        # bigger now.
-        weights_v = quantize(rng.normal(0, scale * WEIGHT_ALPHABET_SCALE, size=NUM_FEATURES))
-        weights_l = quantize(rng.normal(0, scale * WEIGHT_ALPHABET_SCALE, size=NUM_FEATURES))
+        """`scale` (relative to its old default of 0.5) scales how many of a
+        freshly random genome's rule conditions start active rather than
+        wildcard -- there's no "weight magnitude" analog to scale in this
+        representation, but this preserves scale's role as an initial-
+        complexity knob."""
+        num_buckets = rng.integers(strategy.MIN_BUCKETS, strategy.MAX_BUCKETS + 1, size=strategy.NUM_BUCKETABLE)
+        thresholds = np.sort(rng.random((strategy.NUM_BUCKETABLE, strategy.MAX_BUCKETS - 1)), axis=-1)
+
+        active_prob = float(np.clip(strategy.CONDITION_ACTIVE_INIT_PROB * (scale / 0.5), 0.0, 1.0))
+        condition_shape = (strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE)
+        random_features = rng.integers(0, strategy.NUM_TOP_LEVEL_FEATURES, size=condition_shape)
+        is_active = rng.random(condition_shape) < active_prob
+        condition_features = np.where(is_active, random_features, strategy.WILDCARD)
+        condition_buckets = rng.integers(0, strategy.MAX_BUCKETS, size=condition_shape)
+        rule_actions = rng.integers(0, strategy.NUM_ACTION_CATEGORIES, size=strategy.NUM_RULES)
+
+        raise_size_idx = int(rng.integers(0, len(strategy.RAISE_SIZE_ALPHABET)))
+        center, spread = BUCKET_NOISE_STD_INIT
+        bucket_noise_std = abs(float(rng.normal(center, spread)))
 
         return cls(
-            weights_v=weights_v,
-            weights_l=weights_l,
-            **{name: _random_scalar(name, rng) for name in _SCALAR_INIT},
+            num_buckets=num_buckets, thresholds=thresholds,
+            condition_features=condition_features, condition_buckets=condition_buckets,
+            rule_actions=rule_actions,
+            raise_size_idx=raise_size_idx, bucket_noise_std=bucket_noise_std,
             gto_flags=(rng.random(NUM_GTO_SPOTS) < GTO_INIT_PROB).astype(np.float64),
         )
 
     def to_dict(self) -> dict:
         """Named-dictionary save form -- keyed by feature/GTO-spot name
-        rather than array position, so a saved genome survives
-        features.py/gto.py entries being added, removed, or reordered (see
-        from_dict, the corresponding loader)."""
+        rather than array position, so a saved genome survives features.py/
+        gto.py entries being added, removed, or reordered (see from_dict,
+        the corresponding loader)."""
+        feature_buckets = {}
+        for row, idx in enumerate(strategy.BUCKETABLE_INDICES):
+            spec = strategy.TOP_LEVEL_FEATURES[idx]
+            feature_buckets[spec.key] = {
+                "num_buckets": int(self.num_buckets[row]),
+                "thresholds": [float(x) for x in self.thresholds[row]],
+            }
+
+        rules = []
+        for r in range(strategy.NUM_RULES):
+            conditions = []
+            for c in range(strategy.CONDITIONS_PER_RULE):
+                fi = int(self.condition_features[r, c])
+                conditions.append({
+                    "feature": strategy.TOP_LEVEL_FEATURES[fi].key if fi != strategy.WILDCARD else None,
+                    "bucket": int(self.condition_buckets[r, c]),
+                })
+            rules.append({
+                "conditions": conditions,
+                "action": strategy.ACTION_CATEGORIES[int(self.rule_actions[r])],
+            })
+
         return {
-            "weights_v": dict(zip(FEATURE_NAMES, (float(x) for x in self.weights_v))),
-            "weights_l": dict(zip(FEATURE_NAMES, (float(x) for x in self.weights_l))),
-            "scalars": {name: getattr(self, name) for name in _SCALAR_INIT},
+            "feature_buckets": feature_buckets,
+            "rules": rules,
+            "raise_size_pct": float(strategy.RAISE_SIZE_ALPHABET[self.raise_size_idx]),
+            "bucket_noise_std": float(self.bucket_noise_std),
             "gto_flags": {spot.key: float(flag) for spot, flag in zip(GTO_SPOTS, self.gto_flags)},
         }
 
     @classmethod
     def from_dict(cls, data: dict, rng: np.random.Generator) -> "Genome":
         """Reconstructs a Genome from its named-dictionary save form (see
-        to_dict). Robust to the feature/GTO-spot catalog having changed
-        since this genome was saved: entries whose name no longer exists are
-        dropped (with a warning); entries the current catalog expects but
-        the save doesn't have are freshly initialized exactly as a brand-new
-        random genome would be (with a warning), rather than defaulted to
-        some placeholder value the GA never actually selected for."""
+        to_dict). Robust to the feature/GTO-spot catalog (or NUM_RULES/
+        CONDITIONS_PER_RULE) having changed since this genome was saved:
+        entries whose name/shape no longer exists are dropped or truncated
+        (with a warning); entries the current catalog expects but the save
+        doesn't have are freshly initialized exactly as a brand-new random
+        genome would be (with a warning), rather than defaulted to some
+        placeholder value the GA never actually selected for."""
+        saved_buckets = data.get("feature_buckets", {})
+        known_keys = {spec.key for spec in strategy.TOP_LEVEL_FEATURES if spec.kind != "boolean"}
+        unknown_features = sorted(set(saved_buckets) - known_keys)
+        if unknown_features:
+            print(
+                f"Warning: ignoring {len(unknown_features)} unknown feature(s) in saved genome's "
+                f"'feature_buckets' (no longer in the feature catalog): {', '.join(unknown_features)}"
+            )
+        missing_features = sorted(known_keys - set(saved_buckets))
+        if missing_features:
+            print(
+                f"Warning: {len(missing_features)} feature(s) missing from saved genome's "
+                f"'feature_buckets' (new since this genome was saved) -- initializing randomly: "
+                f"{', '.join(missing_features)}"
+            )
+        num_buckets = np.empty(strategy.NUM_BUCKETABLE, dtype=np.int64)
+        thresholds = np.empty((strategy.NUM_BUCKETABLE, strategy.MAX_BUCKETS - 1), dtype=np.float64)
+        for row, idx in enumerate(strategy.BUCKETABLE_INDICES):
+            key = strategy.TOP_LEVEL_FEATURES[idx].key
+            if key in saved_buckets:
+                entry = saved_buckets[key]
+                num_buckets[row] = int(entry["num_buckets"])
+                vals = [float(x) for x in entry["thresholds"]]
+                thresholds[row] = (vals + [0.0] * strategy.MAX_BUCKETS)[: strategy.MAX_BUCKETS - 1]
+            else:
+                num_buckets[row] = rng.integers(strategy.MIN_BUCKETS, strategy.MAX_BUCKETS + 1)
+                thresholds[row] = np.sort(rng.random(strategy.MAX_BUCKETS - 1))
 
-        def load_weight_vector(field_name: str) -> np.ndarray:
-            saved = data.get(field_name, {})
-            unknown = sorted(set(saved) - set(FEATURE_NAMES))
-            if unknown:
-                print(
-                    f"Warning: ignoring {len(unknown)} unknown feature(s) in saved genome's "
-                    f"'{field_name}' (no longer in the feature catalog): {', '.join(unknown)}"
-                )
-            missing = [key for key in FEATURE_NAMES if key not in saved]
-            if missing:
-                print(
-                    f"Warning: {len(missing)} feature(s) missing from saved genome's "
-                    f"'{field_name}' (new since this genome was saved) -- initializing "
-                    f"randomly: {', '.join(missing)}"
-                )
-            random_values = iter(quantize(rng.normal(0, 0.5 * WEIGHT_ALPHABET_SCALE, size=len(missing))))
-            return np.array(
-                [float(saved[key]) if key in saved else next(random_values) for key in FEATURE_NAMES],
-                dtype=np.float64,
+        saved_rules = data.get("rules", [])
+        if len(saved_rules) != strategy.NUM_RULES:
+            print(
+                f"Warning: saved genome has {len(saved_rules)} rule(s), current NUM_RULES is "
+                f"{strategy.NUM_RULES} -- truncating or padding with fresh random rules."
+            )
+        condition_shape = (strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE)
+        condition_features = np.full(condition_shape, strategy.WILDCARD, dtype=np.int64)
+        condition_buckets = np.zeros(condition_shape, dtype=np.int64)
+        rule_actions = np.zeros(strategy.NUM_RULES, dtype=np.int64)
+        action_index_by_name = {name: i for i, name in enumerate(strategy.ACTION_CATEGORIES)}
+        unknown_rule_features = set()
+        for r in range(strategy.NUM_RULES):
+            if r < len(saved_rules):
+                rule = saved_rules[r]
+                for c, cond in enumerate(rule.get("conditions", [])[: strategy.CONDITIONS_PER_RULE]):
+                    feature_key = cond.get("feature")
+                    condition_buckets[r, c] = int(cond.get("bucket", 0))
+                    if feature_key is None:
+                        condition_features[r, c] = strategy.WILDCARD
+                        continue
+                    try:
+                        condition_features[r, c] = strategy.feature_index(feature_key)
+                    except KeyError:
+                        unknown_rule_features.add(feature_key)
+                        condition_features[r, c] = strategy.WILDCARD
+                rule_actions[r] = action_index_by_name.get(rule.get("action"), strategy.ACTION_FOLD)
+            else:
+                random_features = rng.integers(0, strategy.NUM_TOP_LEVEL_FEATURES, size=strategy.CONDITIONS_PER_RULE)
+                is_active = rng.random(strategy.CONDITIONS_PER_RULE) < strategy.CONDITION_ACTIVE_INIT_PROB
+                condition_features[r] = np.where(is_active, random_features, strategy.WILDCARD)
+                condition_buckets[r] = rng.integers(0, strategy.MAX_BUCKETS, size=strategy.CONDITIONS_PER_RULE)
+                rule_actions[r] = rng.integers(0, strategy.NUM_ACTION_CATEGORIES)
+        if unknown_rule_features:
+            print(
+                f"Warning: ignoring {len(unknown_rule_features)} unknown feature(s) referenced by saved "
+                f"genome's rules (no longer in the feature catalog): {', '.join(sorted(unknown_rule_features))}"
             )
 
-        weights_v = load_weight_vector("weights_v")
-        weights_l = load_weight_vector("weights_l")
+        if "raise_size_pct" in data:
+            saved_pct = float(data["raise_size_pct"])
+            raise_size_idx = int(np.argmin(np.abs(strategy.RAISE_SIZE_ALPHABET - saved_pct)))
+        else:
+            print("Warning: 'raise_size_pct' missing from saved genome -- initializing randomly.")
+            raise_size_idx = int(rng.integers(0, len(strategy.RAISE_SIZE_ALPHABET)))
 
-        saved_scalars = data.get("scalars", {})
-        unknown_scalars = sorted(set(saved_scalars) - set(_SCALAR_INIT))
-        if unknown_scalars:
-            print(f"Warning: ignoring unknown scalar gene(s) in saved genome: {', '.join(unknown_scalars)}")
-        scalar_values = {}
-        for name in _SCALAR_INIT:
-            if name in saved_scalars:
-                scalar_values[name] = float(saved_scalars[name])
-            else:
-                print(f"Warning: scalar gene '{name}' missing from saved genome -- initializing randomly.")
-                scalar_values[name] = _random_scalar(name, rng)
+        if "bucket_noise_std" in data:
+            bucket_noise_std = float(data["bucket_noise_std"])
+        else:
+            print("Warning: 'bucket_noise_std' missing from saved genome -- initializing randomly.")
+            center, spread = BUCKET_NOISE_STD_INIT
+            bucket_noise_std = abs(float(rng.normal(center, spread)))
 
         saved_gto = data.get("gto_flags", {})
         gto_keys = [spot.key for spot in GTO_SPOTS]
@@ -332,7 +311,10 @@ class Genome:
             dtype=np.float64,
         )
 
-        return cls(weights_v, weights_l, gto_flags=gto_flags, **scalar_values)
+        return cls(
+            num_buckets, thresholds, condition_features, condition_buckets, rule_actions,
+            raise_size_idx, bucket_noise_std, gto_flags,
+        )
 
     def save(self, path: str) -> None:
         with open(path, "w", encoding="utf-8") as f:
@@ -346,66 +328,85 @@ class Genome:
 
     def copy(self) -> "Genome":
         return Genome(
-            self.weights_v.copy(), self.weights_l.copy(),
-            self.bias_v, self.bias_l,
-            self.theta_value, self.theta_bluff, self.theta_call,
-            self.kappa, self.noise_std,
+            self.num_buckets.copy(), self.thresholds.copy(),
+            self.condition_features.copy(), self.condition_buckets.copy(), self.rule_actions.copy(),
+            self.raise_size_idx, self.bucket_noise_std,
             self.gto_flags.copy(),
         )
 
     def mutate(self, rng: np.random.Generator, rate: float, continuous_scale: float) -> "Genome":
-        """Returns a mutated copy. Feature weights get alphabet-jump
-        mutation (see mutate_weights) since additive noise re-quantized
-        almost never actually moves them; gto_flags get bit-flip mutation
-        (see mutate_bool_flags); the continuous scalars (biases, thresholds,
-        kappa, noise) keep simple additive-gaussian mutation. Each gene is
-        independently selected for mutation with probability `rate`,
-        whichever kind it is."""
-        def mutate_scalar(value: float) -> float:
+        """Returns a mutated copy. Each gene kind gets the operator that
+        matches its structure (see strategy.py for the reasoning behind
+        each): num_buckets bit-flips between 2/3; thresholds and
+        bucket_noise_std get additive-gaussian noise rescaled for their 0-1
+        domain (see strategy.THRESHOLD_MUTATION_SCALE_FACTOR); condition
+        features get a full random reassignment (no meaningful "nudge" for
+        feature identity); condition buckets, rule actions, and
+        raise_size_idx get the nudge-mostly/jump-sometimes blend, since
+        those integers *are* meaningfully ordered; gto_flags bit-flip.
+        Each gene is independently selected for mutation with probability
+        `rate`, whichever kind it is."""
+        threshold_scale = continuous_scale * strategy.THRESHOLD_MUTATION_SCALE_FACTOR
+
+        def mutate_noise_std(value: float) -> float:
             if rng.random() < rate:
-                return value + float(rng.normal(0, continuous_scale))
-            return value
+                value = value + float(rng.normal(0, threshold_scale))
+            return abs(value)
 
         return Genome(
-            mutate_weights(self.weights_v, rate, rng),
-            mutate_weights(self.weights_l, rate, rng),
-            mutate_scalar(self.bias_v), mutate_scalar(self.bias_l),
-            mutate_scalar(self.theta_value), mutate_scalar(self.theta_bluff), mutate_scalar(self.theta_call),
-            abs(mutate_scalar(self.kappa)), abs(mutate_scalar(self.noise_std)),
+            strategy.mutate_num_buckets(self.num_buckets, rate, rng),
+            strategy.mutate_thresholds(self.thresholds, rate, threshold_scale, rng),
+            strategy.mutate_condition_features(self.condition_features, rate, rng),
+            strategy.mutate_condition_buckets(self.condition_buckets, rate, rng),
+            strategy.mutate_rule_actions(self.rule_actions, rate, rng),
+            strategy.mutate_alphabet_index(self.raise_size_idx, len(strategy.RAISE_SIZE_ALPHABET), rate, rng),
+            mutate_noise_std(self.bucket_noise_std),
             mutate_bool_flags(self.gto_flags, rate, rng),
         )
 
     def crossover(self, other: "Genome", rng: np.random.Generator) -> "Genome":
-        """Returns a child combining self and other. Feature weights and
-        gto_flags use uniform (discrete) crossover (see crossover_weights)
-        since they're both categorical/boolean genes, not continuous --
-        blending two alphabet values (or two booleans) and re-quantizing
-        invents values neither parent had and dilutes sparsity. The
-        continuous scalars (biases, thresholds, kappa, noise) keep blend
-        crossover (a random weighted average per gene), the right operator
-        for genuinely real-valued genes."""
-        def blend_scalar(x: float, y: float) -> float:
-            alpha = rng.uniform(0.0, 1.0)
-            return alpha * x + (1 - alpha) * y
+        """Returns a child combining self and other. Two coupled row-crossovers
+        (see strategy.apply_row_mask) keep gene groups that must stay
+        internally coherent inherited from the *same* parent: a feature's
+        num_buckets always travels with its own thresholds (never a bucket
+        count from one parent paired with cut points sized for a different
+        count), and a rule's conditions always travel with its own action
+        (never a feature index from one parent matched against an unrelated
+        bucket index from the other). raise_size_idx and gto_flags are
+        independent single/per-gene choices, so they use plain uniform
+        crossover; bucket_noise_std is a genuinely continuous scalar, so it
+        keeps blend crossover."""
+        feature_mask = strategy.row_crossover_mask(strategy.NUM_BUCKETABLE, rng)
+        num_buckets = strategy.apply_row_mask(self.num_buckets, other.num_buckets, feature_mask)
+        thresholds = strategy.apply_row_mask(self.thresholds, other.thresholds, feature_mask)
+
+        rule_mask = strategy.row_crossover_mask(strategy.NUM_RULES, rng)
+        condition_features = strategy.apply_row_mask(self.condition_features, other.condition_features, rule_mask)
+        condition_buckets = strategy.apply_row_mask(self.condition_buckets, other.condition_buckets, rule_mask)
+        rule_actions = strategy.apply_row_mask(self.rule_actions, other.rule_actions, rule_mask)
+
+        raise_size_idx = self.raise_size_idx if rng.random() < 0.5 else other.raise_size_idx
+
+        alpha = rng.uniform(0.0, 1.0)
+        bucket_noise_std = abs(alpha * self.bucket_noise_std + (1 - alpha) * other.bucket_noise_std)
 
         return Genome(
-            crossover_weights(self.weights_v, other.weights_v, rng),
-            crossover_weights(self.weights_l, other.weights_l, rng),
-            blend_scalar(self.bias_v, other.bias_v), blend_scalar(self.bias_l, other.bias_l),
-            blend_scalar(self.theta_value, other.theta_value),
-            blend_scalar(self.theta_bluff, other.theta_bluff),
-            blend_scalar(self.theta_call, other.theta_call),
-            abs(blend_scalar(self.kappa, other.kappa)),
-            abs(blend_scalar(self.noise_std, other.noise_std)),
-            crossover_weights(self.gto_flags, other.gto_flags, rng),
+            num_buckets, thresholds, condition_features, condition_buckets, rule_actions,
+            raise_size_idx, bucket_noise_std,
+            uniform_crossover(self.gto_flags, other.gto_flags, rng),
         )
 
     def nonzero_weight_count(self) -> int:
-        """Number of nonzero feature weights across both axes -- a proxy for
-        how complex/hard-to-memorize this genome's strategy is. Doesn't
-        include gto_flags -- a different kind of complexity (how many
-        memorized charts, not how many linear weights)."""
-        return int(np.count_nonzero(self.weights_v)) + int(np.count_nonzero(self.weights_l))
+        """Number of active (non-wildcard) rule conditions across the whole
+        strategy -- how many (feature, threshold) facts a human needs to
+        memorize to execute this genome's strategy. The rule-based successor
+        to the old linear system's "how many nonzero weights" proxy; kept
+        under the same method name since main.py's sparsity penalty and
+        tournament.py's leaderboard call it by name without caring about the
+        representation. Doesn't include gto_flags -- a different kind of
+        complexity (how many memorized charts, not how many rule
+        conditions)."""
+        return int(np.count_nonzero(self.condition_features != strategy.WILDCARD))
 
     def active_gto_spots(self) -> list:
         """The GTO_SPOTS entries this genome currently trusts (gto_flags is
@@ -419,16 +420,6 @@ class Genome:
         instead of letting gto_flags evolve freely."""
         self.gto_flags = np.ones(NUM_GTO_SPOTS, dtype=np.float64)
 
-    def compute_v_l(self, features: np.ndarray) -> tuple[float, float]:
-        raw_v = float(self.weights_v @ features + self.bias_v)
-        raw_l = float(self.weights_l @ features + self.bias_l)
-        # Clamp (plain min/max, not a curve) rather than let a linear sum
-        # wander arbitrarily -- V/L are meant to read as percentiles, which
-        # can't go below 0 or above 100.
-        v = min(max(raw_v, 0.0), V_SCALE)
-        l = min(max(raw_l, 0.0), V_SCALE)
-        return v, l
-
     def decide(
         self,
         situation: Situation,
@@ -441,24 +432,30 @@ class Genome:
             return gto_result
 
         features = extract_features(situation)
-        v, l = self.compute_v_l(features)
-        if rng is not None and self.noise_std > 0:
-            v += float(rng.normal(0, self.noise_std))
-            l += float(rng.normal(0, self.noise_std))
+        top_level_values = features[strategy.TOP_LEVEL_FULL_INDEX]
+        buckets = strategy.compute_all_buckets(
+            top_level_values, self.num_buckets, self.thresholds, self.bucket_noise_std, rng,
+        )
+        action_idx = strategy.first_matching_rule(
+            buckets, self.condition_features, self.condition_buckets, self.rule_actions,
+        )
+        if action_idx is None:
+            action_idx = strategy.ACTION_FOLD  # no rule matched: default to Fold, like a real chart's blank squares
 
-        a = max(v - self.theta_value, l - self.theta_bluff - self.kappa * v)
-
-        if a > 0:
-            action = BET_RAISE if BET_RAISE in legal_actions else CHECK_CALL
-        elif v > self.theta_call:
-            action = CHECK_CALL
-        else:
+        if action_idx == strategy.ACTION_FOLD:
             action = FOLD if FOLD in legal_actions else CHECK_CALL
+            return action, 0.0
+        if action_idx == strategy.ACTION_CALL:
+            return CHECK_CALL, 0.0
 
-        bet_size = 0.0
-        if action == BET_RAISE:
-            bet_size = (a / V_SCALE) * max(situation.pot, 1.0)
-        return action, bet_size
+        # ACTION_RAISE or ACTION_ALLIN
+        if BET_RAISE not in legal_actions:
+            return CHECK_CALL, 0.0
+        if action_idx == strategy.ACTION_ALLIN:
+            bet_size = situation.my_stack
+        else:
+            bet_size = float(strategy.RAISE_SIZE_ALPHABET[self.raise_size_idx]) * max(situation.pot, 1.0)
+        return BET_RAISE, bet_size
 
     def _decide_from_gto_charts(
         self, situation: Situation, legal_actions: list[int],
@@ -466,8 +463,8 @@ class Genome:
         """Checks this genome's active GTO_SPOTS (gto_flags on), in catalog
         order, for the first one whose spot matches `situation` -- if found,
         plays exactly what that spot's chart says for this hand, bypassing
-        V/L entirely. Returns None if no active spot applies, so decide()
-        falls through to the normal linear decision."""
+        the rule list entirely. Returns None if no active spot applies, so
+        decide() falls through to the normal rule-based decision."""
         for i, spot in enumerate(GTO_SPOTS):
             if self.gto_flags[i] <= 0.5:
                 continue

@@ -14,9 +14,9 @@ from dataclasses import dataclass, field
 import numpy as np
 from tqdm import tqdm
 
-from features import FEATURE_GROUPS, FEATURE_SPECS, group_of
+import strategy
+from features import group_of
 from game import GameConfig
-from genome import WEIGHT_ALPHABET
 from player import Player
 from simulate import SimConfig, _executor_scope, run_session
 
@@ -162,30 +162,47 @@ def rank_players(
     return sorted(players, key=score, reverse=True)
 
 
-def _children_by_parent() -> dict[str, dict[int, "FeatureSpec"]]:
-    """Maps parent feature key -> {value_table index -> its linked indicator spec}."""
-    out: dict = {}
-    for spec in FEATURE_SPECS:
-        if spec.linked_to is not None:
-            out.setdefault(spec.linked_to, {})[spec.linked_value_index] = spec
-    return out
+# Sort priority for the Strategy Rules section: broad "what spot am I in"
+# context features print first, "what just happened this street" trigger
+# features print last, so rules sharing the same context but differing only
+# on a trigger (e.g. facing a bet or not) end up as adjacent lines --
+# readable as "in this spot: checked to -> raise; raised to -> fold."
+# Anything not listed falls in the middle. This governs *report order*
+# only, not evaluation order -- see the note printed above the section.
+_REPORT_GROUP_PRIORITY = {
+    "Table & Game State Features": 0,
+    "Hole Card Characteristics": 1,
+    "Board / Flop Characteristics": 2,
+    "Made Hand Features": 3,
+    "Draw Features": 4,
+    "Stack & Pot Features": 5,
+    "Opponent Tendency Features": 6,
+    "Betting Behaviour Features": 7,
+}
+_UNGROUPED_CONDITION_PRIORITY = 50
+_WILDCARD_CONDITION_KEY = (99, "", 99)
 
 
-def _axis_combined(weight_by_key: dict, spec, children: dict, index: int, point: float) -> float:
-    """Combined (general + specific) raw (pre-clip) contribution for one
-    value-table row, on one axis (V or L)."""
-    general = weight_by_key[spec.key] * point
-    child = children.get(index)
-    specific = weight_by_key[child.key] if child is not None else 0.0
-    return general + specific
+def _condition_phrase(spec, bucket_index: int, num_buckets: int, thresholds) -> str:
+    label = strategy.describe_bucket(spec, bucket_index, num_buckets, thresholds)
+    return label if spec.kind == "boolean" else f"{spec.label} = {label}"
+
+
+def _rule_sort_key(condition_features, condition_buckets) -> tuple:
+    keyed = []
+    for fi, bucket in zip(condition_features, condition_buckets):
+        if fi == strategy.WILDCARD:
+            keyed.append(_WILDCARD_CONDITION_KEY)
+            continue
+        spec = strategy.TOP_LEVEL_FEATURES[int(fi)]
+        priority = _REPORT_GROUP_PRIORITY.get(group_of(spec), _UNGROUPED_CONDITION_PRIORITY)
+        keyed.append((priority, spec.key, int(bucket)))
+    return tuple(sorted(keyed))
 
 
 def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig, rank: int) -> str:
-    """Renders a genome's weights as a human-readable strategy report."""
+    """Renders a genome's rule-based strategy as a human-readable report."""
     g = player.genome
-    v_weight_by_key = {spec.key: float(w) for spec, w in zip(FEATURE_SPECS, g.weights_v)}
-    l_weight_by_key = {spec.key: float(w) for spec, w in zip(FEATURE_SPECS, g.weights_l)}
-    children_by_parent = _children_by_parent()
 
     lines = []
     name = player.label or f"Player {player.player_id}"
@@ -202,64 +219,28 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
     lines.append(f"- Worst single session: {min(stats.session_results, default=0.0):+.1f}")
     lines.append("")
 
+    total_conditions = strategy.NUM_RULES * strategy.CONDITIONS_PER_RULE
+    raise_pct = strategy.RAISE_SIZE_ALPHABET[g.raise_size_idx] * 100
     lines.append("## How this genome decides")
     lines.append(
-        "Every decision computes two numbers from the features below "
-        f"({len(FEATURE_SPECS)} total, organized by theme -- see the group breakdowns for "
-        "how the count gets that high while staying readable):"
+        "Every decision buckets a small set of features into 2-3 groups (see Feature Buckets "
+        "below for this genome's own cutoffs), then checks a fixed list of rules -- first full "
+        "match wins -- and plays that rule's action. No match at all defaults to Fold, the "
+        "same way a real range chart's blank squares are a fold."
     )
     lines.append("")
+    lines.append(f"- **Raise size:** always raises to {raise_pct:.0f}% of pot (one shared size for every Raise rule).")
     lines.append(
-        "- **V (showdown value)** ~ roughly this player's equity against the range that "
-        "continues, calibrated to read as a 0-100 percentage."
+        f"- **Decision noise:** {g.bucket_noise_std:.3f} -- small randomness applied to a feature's "
+        "reading before it's bucketed, so a hand right at a threshold occasionally falls on "
+        "either side (a cheap, natural mixed strategy at the margins). Near zero means fully "
+        "deterministic."
     )
     lines.append(
-        "- **L (leverage)** ~ roughly how much of villain's range folds to a bet here (fold "
-        "equity, shaped by blockers, initiative, board texture, position, SPR), also "
-        "calibrated to 0-100."
-    )
-    lines.append("")
-    lines.append(
-        "Each is a linear, clipped sum of `weight x feature value` across all features "
-        "below -- one weight per feature feeds V, a separate weight feeds L, so the two axes "
-        "can capture near-independent signals (e.g. a nut flush blocker is almost pure L "
-        "with ~0 V; a set on a dry board is almost pure V with low L). They combine "
-        "non-convexly into one action score:"
-    )
-    lines.append("")
-    lines.append("`A = max(V - theta_value,  L - theta_bluff - kappa x V)`")
-    lines.append("")
-    lines.append("- `A > 0` -> bet/raise, sized at `(A / 100) x pot` (e.g. A=50 -> half-pot, A=100 -> pot-sized)")
-    lines.append("- `elif V > theta_call` -> call/check")
-    lines.append("- `else` -> fold/check")
-    lines.append("")
-    lines.append(f"- theta_value (value needed to raise for value): {g.theta_value:.1f}")
-    lines.append(f"- theta_bluff (leverage needed to raise as a bluff): {g.theta_bluff:.1f}")
-    lines.append(f"- theta_call (value needed to call rather than fold): {g.theta_call:.1f}")
-    lines.append(
-        f"- bias_v / bias_l (baseline V/L before any feature is considered): "
-        f"{g.bias_v:.1f} / {g.bias_l:.1f}"
-    )
-    lines.append(f"- kappa (how much V suppresses the bluff term): {g.kappa:.3f}")
-    lines.append(
-        f"- Decision noise (random amount added to V and L independently each decision): "
-        f"{g.noise_std:.2f} points. Higher values mean more unpredictable/bluffy play; near "
-        "zero means fully deterministic."
-    )
-    alphabet_str = ", ".join(str(float(x)) for x in WEIGHT_ALPHABET)
-    lines.append(
-        f"- Nonzero feature weights: {g.nonzero_weight_count()} of "
-        f"{len(FEATURE_SPECS) * 2} possible (weights are quantized to [{alphabet_str}], "
-        "and fitness penalizes nonzero ones, so most should land on exactly 0 -- the tables "
-        "below are the actual cheat sheet, not an approximation of one)."
-    )
-    lines.append("")
-    lines.append(
-        "The per-feature weights below are on the pre-clip (raw) scale, not directly in "
-        "V/L percentage points -- they combine additively with every other active feature's "
-        "weight before the final linear 0-100 calibration (offset by 50, then clipped) is "
-        "applied, so sign and relative magnitude are meaningful, but a single weight doesn't "
-        "translate to \"N points of V\" on its own."
+        f"- **Active rule conditions:** {g.nonzero_weight_count()} of {total_conditions} possible -- "
+        "how many (feature, threshold) facts this genome's strategy actually depends on; "
+        "fitness penalizes nonzero ones, so the tables below are the actual cheat sheet, not "
+        "an approximation of one."
     )
     lines.append("")
 
@@ -268,7 +249,7 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
     if active_spots:
         lines.append(
             "This genome memorizes an exact chart for the spot(s) below -- whenever the "
-            "situation matches, it plays straight off the chart instead of the V/L rule above "
+            "situation matches, it plays straight off the chart instead of the rule list below "
             "(checked in the order listed; the first matching spot wins). Anything not listed "
             "in a spot's ranges is a fold."
         )
@@ -284,106 +265,72 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
             lines.append(f"| *(anything else)* | {spot.default_action} |")
             lines.append("")
     else:
-        lines.append("This genome doesn't trust any memorized chart -- every decision goes through the V/L rule above.")
-        lines.append("")
-
-    parents = [s for s in FEATURE_SPECS if s.kind != "boolean"]
-    standalone_booleans = [s for s in FEATURE_SPECS if s.kind == "boolean" and s.linked_to is None]
-
-    def parent_influence(spec) -> float:
-        children = children_by_parent.get(spec.key, {})
-        return max(
-            max(
-                abs(_axis_combined(v_weight_by_key, spec, children, i, point)),
-                abs(_axis_combined(l_weight_by_key, spec, children, i, point)),
-            )
-            for i, (point, _label) in enumerate(spec.value_table)
+        lines.append(
+            "This genome doesn't trust any memorized chart -- every decision goes through the "
+            "rule list below."
         )
+        lines.append("")
 
-    parents_sorted = sorted(parents, key=parent_influence, reverse=True)
-    standalone_sorted = sorted(
-        standalone_booleans,
-        key=lambda s: -max(abs(v_weight_by_key[s.key]), abs(l_weight_by_key[s.key])),
+    referenced = sorted(
+        {int(fi) for fi in g.condition_features.flat if fi != strategy.WILDCARD},
+        key=lambda fi: (
+            _REPORT_GROUP_PRIORITY.get(group_of(strategy.TOP_LEVEL_FEATURES[fi]), _UNGROUPED_CONDITION_PRIORITY),
+            strategy.TOP_LEVEL_FEATURES[fi].key,
+        ),
     )
-
-    lines.append("## Feature Groups")
+    lines.append("## Feature Buckets")
     lines.append(
-        "Features are grouped by theme so related ones sit together. Within each group: "
-        "boolean (yes/no) features first as a compact table (V weight, L weight), most "
-        "influential first; then one breakdown table per multi-value feature, combining each "
-        "value's general (linear) weight and its own exact indicator feature's weight into "
-        "one raw (pre-clip) number per axis."
+        "This genome's own cutoffs for every feature its rules actually reference below -- "
+        "shared by every rule, the way a real chart's category boundaries are defined once "
+        "and reused."
     )
     lines.append("")
-
-    for group in FEATURE_GROUPS:
-        group_booleans = [s for s in standalone_sorted if group_of(s) == group]
-        group_parents = [s for s in parents_sorted if group_of(s) == group]
-        if not group_booleans and not group_parents:
-            continue
-
-        lines.append(f"### {group}")
+    if not referenced:
+        lines.append("*(No rule references a feature -- this genome always plays its Strategy Rules' default.)*")
         lines.append("")
+    for fi in referenced:
+        spec = strategy.TOP_LEVEL_FEATURES[fi]
+        lines.append(f"- **{spec.label}** — {spec.description}")
+        if spec.kind == "boolean":
+            continue
+        row = strategy.bucket_gene_row(fi)
+        num_buckets = int(g.num_buckets[row])
+        thresholds = g.thresholds[row]
+        for b in range(num_buckets):
+            lines.append(f"  - Bucket {b}: {strategy.describe_bucket(spec, b, num_buckets, thresholds)}")
+    lines.append("")
 
-        if group_booleans:
-            lines.append("| feature | V weight | L weight |")
-            lines.append("|---|---|---|")
-            for spec in group_booleans:
-                vw = v_weight_by_key[spec.key]
-                lw = l_weight_by_key[spec.key]
-                lines.append(f"| {spec.label} | {vw:+.3f} | {lw:+.3f} |")
-            lines.append("")
-
-        for spec in group_parents:
-            vw = v_weight_by_key[spec.key]
-            lw = l_weight_by_key[spec.key]
-            children = children_by_parent.get(spec.key, {})
-            note = (
-                " (continuous -- bucketed to the nearest of 5 representative points)"
-                if spec.kind == "continuous" else ""
-            )
-            lines.append(f"#### {spec.label} — general weights V {vw:+.3f} / L {lw:+.3f}{note}")
-            lines.append("")
-            lines.append("| value | normalized value | V weight | L weight |")
-            lines.append("|---|---|---|---|")
-            for i, (point, label) in enumerate(spec.value_table):
-                v_combined = _axis_combined(v_weight_by_key, spec, children, i, point)
-                l_combined = _axis_combined(l_weight_by_key, spec, children, i, point)
-                lines.append(f"| {label} | {point:.3f} | {v_combined:+.3f} | {l_combined:+.3f} |")
-            lines.append("")
-
-    lines.append("## Feature Reference")
+    lines.append("## Strategy Rules")
     lines.append(
-        "Precise definition of every generalized/standalone feature above, grouped the same "
-        "way. Exact per-value indicator features aren't re-listed individually here -- their "
-        "meaning is exactly the table row they're folded into above (the \"specific "
-        "adjustment\" column)."
+        "Grouped here by shared situation for readability (context features like position/"
+        "street first, situational triggers like facing a bet or call size last), **not** in "
+        "true evaluation order -- each line is tagged with its actual rule number in brackets. "
+        "When two rules could both match the same hand, the lower-numbered one wins; this only "
+        "matters when rules' conditions actually overlap, which is uncommon since most rules "
+        "in the same spot differ on a trigger condition (facing a bet or not, etc.) that makes "
+        "them mutually exclusive in practice."
     )
     lines.append("")
-    for group in FEATURE_GROUPS:
-        group_booleans = [s for s in standalone_sorted if group_of(s) == group]
-        group_parents = [s for s in parents_sorted if group_of(s) == group]
-        if not group_booleans and not group_parents:
-            continue
-        lines.append(f"### {group}")
-        lines.append("")
-        for spec in group_booleans:
-            lines.append(f"- **{spec.label}** — {spec.description}")
-        for spec in group_parents:
-            if spec.kind == "categorical":
-                note = (
-                    " Each value above also has its own exact indicator feature for a "
-                    "non-linear, value-specific adjustment (the \"specific adjustment\" "
-                    "column above)."
-                )
-            else:
-                note = (
-                    " Each representative value above also has an approximate \"nearest "
-                    "value\" indicator feature for a non-linear adjustment (the \"specific "
-                    "adjustment\" column above)."
-                )
-            lines.append(f"- **{spec.label}** — {spec.description}{note}")
-        lines.append("")
+    rule_order = sorted(
+        range(strategy.NUM_RULES),
+        key=lambda r: _rule_sort_key(g.condition_features[r], g.condition_buckets[r]),
+    )
+    for r in rule_order:
+        phrases = []
+        for c in range(strategy.CONDITIONS_PER_RULE):
+            fi = int(g.condition_features[r, c])
+            if fi == strategy.WILDCARD:
+                continue
+            spec = strategy.TOP_LEVEL_FEATURES[fi]
+            row = strategy.bucket_gene_row(fi)
+            num_buckets = int(g.num_buckets[row]) if row >= 0 else 2
+            thresholds = g.thresholds[row] if row >= 0 else None
+            phrases.append(_condition_phrase(spec, int(g.condition_buckets[r, c]), num_buckets, thresholds))
+        condition_text = " AND ".join(phrases) if phrases else "*(any situation)*"
+        action = strategy.ACTION_CATEGORIES[int(g.rule_actions[r])]
+        lines.append(f"- `[rule {r}]` IF {condition_text} THEN **{action}**")
+    lines.append("- `[default]` IF nothing above matched THEN **Fold**")
+    lines.append("")
 
     return "\n".join(lines)
 
@@ -399,7 +346,7 @@ def export_top_n(
 
     summary_lines = ["# Final Tournament Leaderboard", ""]
     summary_lines.append(
-        "| rank | player | mean net chips/session | win rate | bust rate | bb/100 | nonzero wts |"
+        "| rank | player | mean net chips/session | win rate | bust rate | bb/100 | active conditions |"
     )
     summary_lines.append("|---|---|---|---|---|---|---|")
     for rank, p in enumerate(ranked_players[:n], start=1):

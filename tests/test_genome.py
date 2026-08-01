@@ -3,12 +3,12 @@ import pytest
 
 import genome as genome_module
 import gto as gto_module
+import strategy
 from cards import Card
-from features import NUM_FEATURES, Situation
+from features import Situation
 from genome import (
-    BET_RAISE, CHECK_CALL, FOLD, WEIGHT_ALPHABET,
-    Genome, crossover_weights, load_population, mutate_bool_flags,
-    mutate_weights, quantize, save_population,
+    BET_RAISE, CHECK_CALL, FOLD,
+    Genome, load_population, mutate_bool_flags, save_population, uniform_crossover,
 )
 from gto import GTOSpot, NUM_GTO_SPOTS, SpotMatcher
 
@@ -39,78 +39,54 @@ def make_situation(**overrides) -> Situation:
 
 
 def make_genome(
-    weights_v=None, weights_l=None, bias_v=50.0, bias_l=50.0,
-    theta_value=70.0, theta_bluff=70.0, theta_call=40.0,
-    kappa=0.5, noise_std=0.0, gto_flags=None,
+    num_buckets=None, thresholds=None,
+    condition_features=None, condition_buckets=None, rule_actions=None,
+    raise_size_idx=0, bucket_noise_std=0.0, gto_flags=None,
 ) -> Genome:
-    if weights_v is None:
-        weights_v = np.zeros(NUM_FEATURES)
-    if weights_l is None:
-        weights_l = np.zeros(NUM_FEATURES)
+    """Defaults to an "empty" genome: every rule wildcard-conditioned to
+    Fold, 2 buckets (cut at 0.5) for every bucketable feature, no GTO charts
+    trusted -- individual tests override just the piece they're exercising."""
+    if num_buckets is None:
+        num_buckets = np.full(strategy.NUM_BUCKETABLE, 2)
+    if thresholds is None:
+        thresholds = np.full((strategy.NUM_BUCKETABLE, strategy.MAX_BUCKETS - 1), 0.5)
+    if condition_features is None:
+        condition_features = np.full((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
+    if condition_buckets is None:
+        condition_buckets = np.zeros((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), dtype=np.int64)
+    if rule_actions is None:
+        rule_actions = np.full(strategy.NUM_RULES, strategy.ACTION_FOLD)
     if gto_flags is None:
         gto_flags = np.zeros(NUM_GTO_SPOTS)
     return Genome(
-        weights_v=weights_v, weights_l=weights_l, bias_v=bias_v, bias_l=bias_l,
-        theta_value=theta_value, theta_bluff=theta_bluff, theta_call=theta_call,
-        kappa=kappa, noise_std=noise_std, gto_flags=gto_flags,
+        num_buckets=num_buckets, thresholds=thresholds,
+        condition_features=condition_features, condition_buckets=condition_buckets,
+        rule_actions=rule_actions, raise_size_idx=raise_size_idx, bucket_noise_std=bucket_noise_std,
+        gto_flags=gto_flags,
     )
 
 
-class TestQuantize:
-    def test_snaps_to_nearest_alphabet_value(self):
-        result = quantize(np.array([0.1, -0.1, 24.0, -24.0]))
-        assert result[0] == 0.0
-        assert result[1] == 0.0
-        assert result[2] == 20.0
-        assert result[3] == -20.0
-
-    def test_extreme_values_clamp_to_alphabet_bounds(self):
-        result = quantize(np.array([1000.0, -1000.0]))
-        assert result[0] == WEIGHT_ALPHABET.max()
-        assert result[1] == WEIGHT_ALPHABET.min()
-
-    def test_result_values_always_in_alphabet(self):
-        rng = np.random.default_rng(0)
-        values = rng.normal(0, 50, size=200)
-        result = quantize(values)
-        assert all(v in WEIGHT_ALPHABET for v in result)
+def genome_with_default_action(action: int, raise_size_idx: int = 0, **kwargs) -> Genome:
+    """A genome whose rule 0 matches every situation (all-wildcard
+    conditions) and always plays `action` -- isolates decide()'s
+    action-category -> (game action, bet size) mapping from the bucketing/
+    matching machinery, which is tested separately in test_strategy.py."""
+    actions = np.full(strategy.NUM_RULES, strategy.ACTION_FOLD)
+    actions[0] = action
+    return make_genome(rule_actions=actions, raise_size_idx=raise_size_idx, **kwargs)
 
 
-class TestMutateWeights:
-    def test_zero_rate_never_mutates(self):
-        rng = np.random.default_rng(0)
-        weights = quantize(np.array([0.0, 10.0, -20.0, 30.0]))
-        result = mutate_weights(weights, rate=0.0, rng=rng)
-        assert np.array_equal(result, weights)
-
-    def test_full_rate_keeps_values_in_alphabet(self):
-        rng = np.random.default_rng(0)
-        weights = quantize(np.zeros(50))
-        result = mutate_weights(weights, rate=1.0, rng=rng)
-        assert all(v in WEIGHT_ALPHABET for v in result)
-
-    def test_full_rate_changes_most_values_over_a_large_sample(self):
-        rng = np.random.default_rng(0)
-        weights = quantize(np.zeros(500))
-        result = mutate_weights(weights, rate=1.0, rng=rng)
-        assert np.mean(result != weights) > 0.5
-
-
-class TestCrossoverWeights:
-    def test_each_gene_comes_from_one_parent(self):
-        rng = np.random.default_rng(0)
-        a = np.full(100, -10.0)
-        b = np.full(100, 20.0)
-        child = crossover_weights(a, b, rng)
-        assert all(v in (-10.0, 20.0) for v in child)
-
-    def test_both_parents_contribute_over_a_large_sample(self):
-        rng = np.random.default_rng(0)
-        a = np.full(200, -10.0)
-        b = np.full(200, 20.0)
-        child = crossover_weights(a, b, rng)
-        assert np.any(child == -10.0)
-        assert np.any(child == 20.0)
+def genome_with_condition(feature_key: str, bucket: int, action: int, **kwargs) -> Genome:
+    """A genome whose rule 0 requires exactly one (feature, bucket) match to
+    play `action`; every other rule is wildcard-Fold, so a non-matching
+    situation falls through to the default Fold."""
+    cf = np.full((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
+    cb = np.zeros((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), dtype=np.int64)
+    actions = np.full(strategy.NUM_RULES, strategy.ACTION_FOLD)
+    cf[0, 0] = strategy.feature_index(feature_key)
+    cb[0, 0] = bucket
+    actions[0] = action
+    return make_genome(condition_features=cf, condition_buckets=cb, rule_actions=actions, **kwargs)
 
 
 class TestMutateBoolFlags:
@@ -127,55 +103,96 @@ class TestMutateBoolFlags:
         assert np.array_equal(result, 1.0 - flags)
 
 
-class TestGenomeRandom:
-    def test_weight_shapes_and_alphabet_membership(self):
+class TestUniformCrossover:
+    def test_each_gene_comes_from_one_parent(self):
         rng = np.random.default_rng(0)
-        g = Genome.random(rng)
-        assert g.weights_v.shape == (NUM_FEATURES,)
-        assert g.weights_l.shape == (NUM_FEATURES,)
-        assert all(v in WEIGHT_ALPHABET for v in g.weights_v)
-        assert all(v in WEIGHT_ALPHABET for v in g.weights_l)
+        a = np.full(100, 0.0)
+        b = np.full(100, 1.0)
+        child = uniform_crossover(a, b, rng)
+        assert all(v in (0.0, 1.0) for v in child)
 
-    def test_gto_flags_shape_and_values(self):
+    def test_both_parents_contribute_over_a_large_sample(self):
+        rng = np.random.default_rng(0)
+        a = np.full(200, 0.0)
+        b = np.full(200, 1.0)
+        child = uniform_crossover(a, b, rng)
+        assert np.any(child == 0.0)
+        assert np.any(child == 1.0)
+
+
+class TestGenomeRandom:
+    def test_gene_shapes(self):
         rng = np.random.default_rng(0)
         g = Genome.random(rng)
+        assert g.num_buckets.shape == (strategy.NUM_BUCKETABLE,)
+        assert g.thresholds.shape == (strategy.NUM_BUCKETABLE, strategy.MAX_BUCKETS - 1)
+        assert g.condition_features.shape == (strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE)
+        assert g.condition_buckets.shape == (strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE)
+        assert g.rule_actions.shape == (strategy.NUM_RULES,)
         assert g.gto_flags.shape == (NUM_GTO_SPOTS,)
-        assert set(np.unique(g.gto_flags)) <= {0.0, 1.0}
+
+    def test_num_buckets_only_takes_min_or_max(self):
+        rng = np.random.default_rng(0)
+        g = Genome.random(rng)
+        assert set(np.unique(g.num_buckets)) <= {strategy.MIN_BUCKETS, strategy.MAX_BUCKETS}
+
+    def test_thresholds_sorted_and_in_range(self):
+        rng = np.random.default_rng(0)
+        g = Genome.random(rng)
+        assert np.all(g.thresholds >= 0.0) and np.all(g.thresholds <= 1.0)
+        assert np.all(g.thresholds[:, 0] <= g.thresholds[:, 1])
+
+    def test_condition_features_in_valid_range(self):
+        rng = np.random.default_rng(0)
+        g = Genome.random(rng)
+        assert np.all(g.condition_features >= strategy.WILDCARD)
+        assert np.all(g.condition_features < strategy.NUM_TOP_LEVEL_FEATURES)
+
+    def test_raise_size_idx_valid(self):
+        rng = np.random.default_rng(0)
+        g = Genome.random(rng)
+        assert 0 <= g.raise_size_idx < len(strategy.RAISE_SIZE_ALPHABET)
 
     def test_gto_flags_start_mostly_off(self):
         rng = np.random.default_rng(0)
-        # Aggregate over several genomes for a stable average.
         flags = np.concatenate([Genome.random(rng).gto_flags for _ in range(20)])
         assert flags.mean() < 0.3
+
+    def test_lower_scale_means_fewer_active_conditions_on_average(self):
+        rng = np.random.default_rng(0)
+        sparse = np.mean([Genome.random(rng, scale=0.05).nonzero_weight_count() for _ in range(30)])
+        dense = np.mean([Genome.random(rng, scale=0.5).nonzero_weight_count() for _ in range(30)])
+        assert sparse < dense
 
 
 class TestGenomeCopy:
     def test_copy_is_independent(self):
-        g = make_genome(weights_v=quantize(np.zeros(NUM_FEATURES)))
+        g = make_genome()
+        original_first_condition = int(g.condition_features[0, 0])
+        original_first_flag = float(g.gto_flags[0])
         g2 = g.copy()
-        g2.weights_v[0] = 30.0
-        g2.gto_flags[0] = 1.0
-        assert g.weights_v[0] != 30.0
-        assert g.gto_flags[0] != 1.0
+        g2.condition_features[0, 0] = original_first_condition + 1
+        g2.gto_flags[0] = 1.0 - original_first_flag
+        assert g.condition_features[0, 0] == original_first_condition
+        assert g.gto_flags[0] == original_first_flag
 
     def test_copy_preserves_scalars(self):
-        g = make_genome(bias_v=12.0, theta_value=33.0)
+        g = make_genome(raise_size_idx=2, bucket_noise_std=0.07)
         g2 = g.copy()
-        assert g2.bias_v == 12.0
-        assert g2.theta_value == 33.0
+        assert g2.raise_size_idx == 2
+        assert g2.bucket_noise_std == pytest.approx(0.07)
 
 
 class TestNonzeroWeightCount:
-    def test_counts_across_both_axes(self):
-        wv = quantize(np.zeros(NUM_FEATURES))
-        wl = quantize(np.zeros(NUM_FEATURES))
-        wv[0] = 10.0
-        wv[1] = -10.0
-        wl[2] = 20.0
-        g = make_genome(weights_v=wv, weights_l=wl)
+    def test_counts_non_wildcard_conditions(self):
+        cf = np.full((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
+        cf[0, 0] = 3
+        cf[0, 1] = 5
+        cf[2, 0] = 1
+        g = make_genome(condition_features=cf)
         assert g.nonzero_weight_count() == 3
 
-    def test_all_zero_counts_zero(self):
+    def test_all_wildcard_counts_zero(self):
         g = make_genome()
         assert g.nonzero_weight_count() == 0
 
@@ -194,91 +211,125 @@ class TestActiveGtoSpots:
         assert g.active_gto_spots() == []
 
 
-class TestComputeVL:
-    def test_linear_combination_before_clamp(self):
-        weights_v = np.zeros(NUM_FEATURES)
-        weights_v[0] = 2.0
-        g = make_genome(weights_v=weights_v, bias_v=10.0, bias_l=0.0)
-        features = np.zeros(NUM_FEATURES)
-        features[0] = 5.0
-        v, l = g.compute_v_l(features)
-        assert v == pytest.approx(20.0)  # 2.0*5 + 10
-        assert l == pytest.approx(0.0)
-
-    def test_clamped_to_zero_and_hundred(self):
-        g = make_genome(bias_v=-500.0, bias_l=500.0)
-        v, l = g.compute_v_l(np.zeros(NUM_FEATURES))
-        assert v == 0.0
-        assert l == 100.0
-
-
-class TestDecideLinearRule:
-    def test_bets_when_value_term_clears_theta_value(self):
-        g = make_genome(bias_v=80.0, bias_l=0.0, theta_value=70.0, theta_bluff=70.0, kappa=0.5)
-        situation = make_situation(pot=100.0)
-        action, bet_size = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
-        assert action == BET_RAISE
-        assert bet_size == pytest.approx((80.0 - 70.0) / 100.0 * 100.0)
-
-    def test_falls_back_to_check_call_if_bet_raise_illegal(self):
-        g = make_genome(bias_v=80.0, bias_l=0.0, theta_value=70.0)
-        situation = make_situation()
-        action, _ = g.decide(situation, legal_actions=[CHECK_CALL])
-        assert action == CHECK_CALL
-
-    def test_calls_when_action_score_negative_but_value_above_theta_call(self):
-        g = make_genome(bias_v=50.0, bias_l=0.0, theta_value=70.0, theta_bluff=70.0, theta_call=40.0, kappa=0.5)
-        situation = make_situation()
-        action, bet_size = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
-        assert action == CHECK_CALL
-        assert bet_size == 0.0
-
-    def test_folds_when_value_below_theta_call(self):
-        g = make_genome(bias_v=10.0, bias_l=0.0, theta_value=70.0, theta_bluff=70.0, theta_call=40.0, kappa=0.5)
+class TestDecideActionCategories:
+    def test_fold_action_folds_when_legal(self):
+        g = genome_with_default_action(strategy.ACTION_FOLD)
         situation = make_situation()
         action, bet_size = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
         assert action == FOLD
         assert bet_size == 0.0
 
-    def test_checks_instead_of_folding_when_fold_illegal(self):
-        g = make_genome(bias_v=10.0, bias_l=0.0, theta_call=40.0)
+    def test_fold_action_checks_when_fold_illegal(self):
+        g = genome_with_default_action(strategy.ACTION_FOLD)
         situation = make_situation()
         action, _ = g.decide(situation, legal_actions=[CHECK_CALL, BET_RAISE])
         assert action == CHECK_CALL
 
-    def test_bluff_term_can_trigger_bet_raise_with_low_value(self):
-        g = make_genome(bias_v=0.0, bias_l=90.0, theta_value=70.0, theta_bluff=70.0, kappa=0.0)
-        situation = make_situation(pot=100.0)
+    def test_call_action_checks_or_calls(self):
+        g = genome_with_default_action(strategy.ACTION_CALL)
+        situation = make_situation()
+        action, bet_size = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
+        assert action == CHECK_CALL
+        assert bet_size == 0.0
+
+    def test_raise_action_sizes_at_the_genomes_raise_pct_of_pot(self):
+        raise_size_idx = 2
+        g = genome_with_default_action(strategy.ACTION_RAISE, raise_size_idx=raise_size_idx)
+        situation = make_situation(pot=80.0)
         action, bet_size = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
         assert action == BET_RAISE
-        assert bet_size == pytest.approx((90.0 - 70.0) / 100.0 * 100.0)
+        assert bet_size == pytest.approx(strategy.RAISE_SIZE_ALPHABET[raise_size_idx] * 80.0)
 
-    def test_kappa_suppresses_bluff_term_as_value_rises(self):
-        # Same L, but a higher V should suppress the bluff term via kappa,
-        # potentially preventing a bet that would otherwise fire.
-        low_v = make_genome(bias_v=0.0, bias_l=90.0, theta_value=99.0, theta_bluff=70.0, kappa=2.0)
-        high_v = make_genome(bias_v=50.0, bias_l=90.0, theta_value=99.0, theta_bluff=70.0, kappa=2.0)
+    def test_raise_action_falls_back_to_check_call_if_illegal(self):
+        g = genome_with_default_action(strategy.ACTION_RAISE)
         situation = make_situation()
-        low_action, _ = low_v.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
-        high_action, _ = high_v.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
-        # low_v: A = max(0-99, 90-70-2*0) = 20 > 0 -> bet
-        assert low_action == BET_RAISE
-        # high_v: A = max(50-99, 90-70-2*50) = max(-49,-80) = -49 -> not bet; V=50>theta_call(40) -> call
-        assert high_action == CHECK_CALL
+        action, bet_size = g.decide(situation, legal_actions=[FOLD, CHECK_CALL])
+        assert action == CHECK_CALL
+        assert bet_size == 0.0
 
-    def test_deterministic_without_rng(self):
-        g = make_genome(bias_v=80.0, theta_value=70.0)
+    def test_allin_action_shoves_full_stack(self):
+        g = genome_with_default_action(strategy.ACTION_ALLIN)
+        situation = make_situation(my_stack=157.0)
+        action, bet_size = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
+        assert action == BET_RAISE
+        assert bet_size == pytest.approx(157.0)
+
+    def test_allin_action_falls_back_to_check_call_if_illegal(self):
+        g = genome_with_default_action(strategy.ACTION_ALLIN)
         situation = make_situation()
-        results = {g.decide(situation, [FOLD, CHECK_CALL, BET_RAISE]) for _ in range(5)}
-        assert len(results) == 1
+        action, bet_size = g.decide(situation, legal_actions=[FOLD, CHECK_CALL])
+        assert action == CHECK_CALL
+        assert bet_size == 0.0
 
-    def test_zero_noise_std_deterministic_even_with_rng(self):
-        g = make_genome(bias_v=80.0, theta_value=70.0, noise_std=0.0)
+
+class TestDecideRuleMatching:
+    def test_no_matching_rule_defaults_to_fold(self):
+        g = genome_with_condition("facing_bet", bucket=1, action=strategy.ACTION_RAISE)
+        situation = make_situation(call_amount=0.0)  # facing_bet bucket 0, condition needs bucket 1
+        action, _ = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
+        assert action == FOLD
+
+    def test_matching_condition_fires_its_rule(self):
+        g = genome_with_condition("facing_bet", bucket=1, action=strategy.ACTION_RAISE)
+        situation = make_situation(call_amount=5.0, pot=20.0)  # facing_bet bucket 1
+        action, _ = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
+        assert action == BET_RAISE
+
+    def test_first_matching_rule_in_array_order_wins(self):
+        cf = np.full((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
+        cb = np.zeros((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), dtype=np.int64)
+        actions = np.full(strategy.NUM_RULES, strategy.ACTION_FOLD)
+        actions[0] = strategy.ACTION_ALLIN
+        actions[1] = strategy.ACTION_CALL
+        g = make_genome(condition_features=cf, condition_buckets=cb, rule_actions=actions)
+        situation = make_situation()
+        action, _ = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
+        assert action == BET_RAISE  # rule 0 (All-In), not rule 1 (Call)
+
+    def test_multiple_conditions_are_a_conjunction(self):
+        cf = np.full((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
+        cb = np.zeros((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), dtype=np.int64)
+        actions = np.full(strategy.NUM_RULES, strategy.ACTION_FOLD)
+        cf[0, 0] = strategy.feature_index("facing_bet")
+        cb[0, 0] = 1
+        cf[0, 1] = strategy.feature_index("is_aggressor")
+        cb[0, 1] = 1
+        actions[0] = strategy.ACTION_RAISE
+        g = make_genome(condition_features=cf, condition_buckets=cb, rule_actions=actions)
+
+        both_true = make_situation(call_amount=5.0, is_aggressor=True)
+        only_one_true = make_situation(call_amount=5.0, is_aggressor=False)
+        action_both, _ = g.decide(both_true, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
+        action_one, _ = g.decide(only_one_true, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
+        assert action_both == BET_RAISE
+        assert action_one == FOLD
+
+
+class TestDecideBucketNoise:
+    def test_zero_noise_is_deterministic(self):
+        g = genome_with_default_action(strategy.ACTION_RAISE, bucket_noise_std=0.0)
         situation = make_situation()
         rng = np.random.default_rng(0)
         a1 = g.decide(situation, [FOLD, CHECK_CALL, BET_RAISE], rng=rng)
         a2 = g.decide(situation, [FOLD, CHECK_CALL, BET_RAISE], rng=rng)
         assert a1 == a2
+
+    def test_deterministic_without_rng_even_with_nonzero_noise(self):
+        g = genome_with_default_action(strategy.ACTION_RAISE, bucket_noise_std=0.5)
+        situation = make_situation()
+        results = {g.decide(situation, [FOLD, CHECK_CALL, BET_RAISE]) for _ in range(5)}
+        assert len(results) == 1
+
+    def test_large_noise_can_flip_a_borderline_bucket(self):
+        # A condition requiring hole_high_card_norm's bucket 1 (threshold at
+        # 0.5) with a hand landing (Ace-King -> 1.0, comfortably bucket 1
+        # without noise) should sometimes flip to bucket 0 under large jitter.
+        g = genome_with_condition("hole_high_card_norm", bucket=1, action=strategy.ACTION_ALLIN, bucket_noise_std=0.8)
+        situation = make_situation(hole=[Card.from_str("Ah"), Card.from_str("Kd")])
+        rng = np.random.default_rng(0)
+        outcomes = {g.decide(situation, [FOLD, CHECK_CALL, BET_RAISE], rng=rng)[0] for _ in range(200)}
+        assert BET_RAISE in outcomes
+        assert FOLD in outcomes
 
 
 class TestDecideGtoOverride:
@@ -300,12 +351,12 @@ class TestDecideGtoOverride:
             raised_positions=frozenset({"UTG"}),
         )
 
-    def test_chart_raise_bypasses_linear_weights(self):
+    def test_chart_raise_bypasses_rule_list(self):
         idx = self._bb_vs_utg_index()
         flags = np.zeros(NUM_GTO_SPOTS)
         flags[idx] = 1.0
-        # weights would otherwise fold everything (very negative bias)
-        g = make_genome(bias_v=-1000.0, bias_l=-1000.0, gto_flags=flags)
+        # Rule list would otherwise always fold everything.
+        g = genome_with_default_action(strategy.ACTION_FOLD, gto_flags=flags)
         situation = self._matching_situation([Card.from_str("Kc"), Card.from_str("Kd")])
         action, bet_size = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
         assert action == BET_RAISE
@@ -315,7 +366,7 @@ class TestDecideGtoOverride:
         idx = self._bb_vs_utg_index()
         flags = np.zeros(NUM_GTO_SPOTS)
         flags[idx] = 1.0
-        g = make_genome(bias_v=-1000.0, bias_l=-1000.0, gto_flags=flags)
+        g = genome_with_default_action(strategy.ACTION_FOLD, gto_flags=flags)
         situation = self._matching_situation([Card.from_str("8c"), Card.from_str("8d")])
         action, bet_size = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
         assert action == CHECK_CALL
@@ -325,17 +376,17 @@ class TestDecideGtoOverride:
         idx = self._bb_vs_utg_index()
         flags = np.zeros(NUM_GTO_SPOTS)
         flags[idx] = 1.0
-        g = make_genome(bias_v=1000.0, bias_l=1000.0, gto_flags=flags)  # would bet if not for chart
+        # Rule list would otherwise always raise -- chart's default should still win.
+        g = genome_with_default_action(strategy.ACTION_ALLIN, gto_flags=flags)
         situation = self._matching_situation([Card.from_str("7c"), Card.from_str("2d")])
         action, bet_size = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
         assert action == FOLD
         assert bet_size == 0.0
 
-    def test_inactive_flag_falls_through_to_linear_rule(self):
-        g = make_genome(bias_v=80.0, theta_value=70.0)  # all gto_flags off
+    def test_inactive_flag_falls_through_to_rule_list(self):
+        g = genome_with_default_action(strategy.ACTION_ALLIN)  # all gto_flags off
         situation = self._matching_situation([Card.from_str("Kc"), Card.from_str("Kd")])
         action, _ = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
-        # Should use the linear rule (bets for value), not the (unused) chart.
         assert action == BET_RAISE
 
     def test_chart_raise_falls_back_to_check_call_if_bet_raise_illegal(self):
@@ -352,13 +403,13 @@ class TestDecideGtoOverride:
         idx = self._bb_vs_utg_index()
         flags = np.zeros(NUM_GTO_SPOTS)
         flags[idx] = 1.0
-        g = make_genome(bias_v=80.0, theta_value=70.0, gto_flags=flags)
+        g = genome_with_default_action(strategy.ACTION_ALLIN, gto_flags=flags)
         # street=1 (flop) doesn't match this spot's street=0 requirement.
         situation = self._matching_situation([Card.from_str("Kc"), Card.from_str("Kd")])
         situation.street = 1
         situation.board = [Card.from_str("2c"), Card.from_str("5d"), Card.from_str("9h")]
         action, _ = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
-        assert action == BET_RAISE  # falls through to the linear rule, which also bets here
+        assert action == BET_RAISE  # falls through to the rule list, which also raises here
 
 
 class TestDecideGtoSizeSpecs(object):
@@ -402,52 +453,90 @@ class TestDecideGtoSizeSpecs(object):
 
 
 class TestGenomeMutate:
-    def test_mutate_returns_new_object_and_keeps_kappa_noise_nonnegative(self):
+    def test_mutate_returns_new_object_and_keeps_noise_nonnegative(self):
         rng = np.random.default_rng(1)
-        g = make_genome(kappa=0.01, noise_std=0.01)
-        mutated = g.mutate(rng, rate=1.0, continuous_scale=50.0)
+        g = make_genome(bucket_noise_std=0.01)
+        mutated = g.mutate(rng, rate=1.0, continuous_scale=0.3)
         assert mutated is not g
-        assert mutated.kappa >= 0
-        assert mutated.noise_std >= 0
+        assert mutated.bucket_noise_std >= 0
 
-    def test_zero_rate_leaves_scalars_unchanged(self):
+    def test_zero_rate_leaves_genes_unchanged(self):
         rng = np.random.default_rng(1)
-        g = make_genome(bias_v=11.0, theta_value=22.0)
-        mutated = g.mutate(rng, rate=0.0, continuous_scale=10.0)
-        assert mutated.bias_v == 11.0
-        assert mutated.theta_value == 22.0
+        g = Genome.random(np.random.default_rng(2))
+        mutated = g.mutate(rng, rate=0.0, continuous_scale=0.3)
+        assert np.array_equal(mutated.num_buckets, g.num_buckets)
+        assert np.array_equal(mutated.thresholds, g.thresholds)
+        assert np.array_equal(mutated.condition_features, g.condition_features)
+        assert np.array_equal(mutated.condition_buckets, g.condition_buckets)
+        assert np.array_equal(mutated.rule_actions, g.rule_actions)
+        assert mutated.raise_size_idx == g.raise_size_idx
+        assert mutated.bucket_noise_std == g.bucket_noise_std
 
     def test_original_genome_is_unmodified(self):
         rng = np.random.default_rng(1)
-        weights_v = quantize(np.zeros(NUM_FEATURES))
-        g = make_genome(weights_v=weights_v.copy())
-        g.mutate(rng, rate=1.0, continuous_scale=10.0)
-        assert np.array_equal(g.weights_v, weights_v)
+        g = Genome.random(np.random.default_rng(3))
+        before = g.condition_features.copy()
+        g.mutate(rng, rate=1.0, continuous_scale=0.3)
+        assert np.array_equal(g.condition_features, before)
+
+    def test_thresholds_stay_sorted_and_in_range_after_mutation(self):
+        rng = np.random.default_rng(1)
+        g = Genome.random(np.random.default_rng(4))
+        mutated = g.mutate(rng, rate=1.0, continuous_scale=0.3)
+        assert np.all(mutated.thresholds >= 0.0) and np.all(mutated.thresholds <= 1.0)
+        assert np.all(mutated.thresholds[:, 0] <= mutated.thresholds[:, 1])
 
 
 class TestGenomeCrossover:
     def test_crossover_returns_new_object(self):
         rng = np.random.default_rng(2)
-        a = make_genome(bias_v=10.0)
-        b = make_genome(bias_v=90.0)
+        a = Genome.random(np.random.default_rng(5))
+        b = Genome.random(np.random.default_rng(6))
         child = a.crossover(b, rng)
         assert child is not a and child is not b
 
-    def test_blended_scalar_is_between_parents(self):
+    def test_num_buckets_and_thresholds_stay_coupled_per_feature(self):
+        # Every feature's num_buckets and thresholds must come from the same
+        # parent -- otherwise a bucket count could pair with cut points
+        # sized for a different count.
         rng = np.random.default_rng(2)
-        a = make_genome(bias_v=10.0)
-        b = make_genome(bias_v=90.0)
+        a = make_genome(
+            num_buckets=np.full(strategy.NUM_BUCKETABLE, 2),
+            thresholds=np.full((strategy.NUM_BUCKETABLE, strategy.MAX_BUCKETS - 1), 0.1),
+        )
+        b = make_genome(
+            num_buckets=np.full(strategy.NUM_BUCKETABLE, 3),
+            thresholds=np.full((strategy.NUM_BUCKETABLE, strategy.MAX_BUCKETS - 1), 0.9),
+        )
         for _ in range(20):
             child = a.crossover(b, rng)
-            assert 10.0 <= child.bias_v <= 90.0
+            from_a = child.num_buckets == 2
+            from_b = child.num_buckets == 3
+            assert np.all(child.thresholds[from_a] == 0.1)
+            assert np.all(child.thresholds[from_b] == 0.9)
 
-    def test_kappa_and_noise_stay_nonnegative(self):
+    def test_rule_conditions_and_action_stay_coupled_per_rule(self):
         rng = np.random.default_rng(2)
-        a = make_genome(kappa=-0.0001, noise_std=0.0001)
-        b = make_genome(kappa=0.0001, noise_std=-0.0001)
-        child = a.crossover(b, rng)
-        assert child.kappa >= 0
-        assert child.noise_std >= 0
+        cf_a = np.full((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), 1)
+        cf_b = np.full((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), 2)
+        actions_a = np.full(strategy.NUM_RULES, strategy.ACTION_FOLD)
+        actions_b = np.full(strategy.NUM_RULES, strategy.ACTION_ALLIN)
+        a = make_genome(condition_features=cf_a, rule_actions=actions_a)
+        b = make_genome(condition_features=cf_b, rule_actions=actions_b)
+        for _ in range(20):
+            child = a.crossover(b, rng)
+            from_a_rows = np.all(child.condition_features == 1, axis=1)
+            from_b_rows = np.all(child.condition_features == 2, axis=1)
+            assert np.all(child.rule_actions[from_a_rows] == strategy.ACTION_FOLD)
+            assert np.all(child.rule_actions[from_b_rows] == strategy.ACTION_ALLIN)
+
+    def test_blended_bucket_noise_is_between_parents(self):
+        rng = np.random.default_rng(2)
+        a = make_genome(bucket_noise_std=0.1)
+        b = make_genome(bucket_noise_std=0.5)
+        for _ in range(20):
+            child = a.crossover(b, rng)
+            assert 0.1 <= child.bucket_noise_std <= 0.5
 
 
 class TestSerialization:
@@ -456,33 +545,59 @@ class TestSerialization:
         g = Genome.random(rng)
         data = g.to_dict()
         restored = Genome.from_dict(data, rng)
-        assert np.array_equal(g.weights_v, restored.weights_v)
-        assert np.array_equal(g.weights_l, restored.weights_l)
+        assert np.array_equal(g.num_buckets, restored.num_buckets)
+        assert np.array_equal(g.thresholds, restored.thresholds)
+        assert np.array_equal(g.condition_features, restored.condition_features)
+        assert np.array_equal(g.condition_buckets, restored.condition_buckets)
+        assert np.array_equal(g.rule_actions, restored.rule_actions)
         assert np.array_equal(g.gto_flags, restored.gto_flags)
-        assert g.bias_v == restored.bias_v
-        assert g.theta_value == restored.theta_value
+        assert g.raise_size_idx == restored.raise_size_idx
+        assert g.bucket_noise_std == pytest.approx(restored.bucket_noise_std)
 
     def test_from_dict_drops_unknown_feature_and_fills_missing(self, capsys):
         rng = np.random.default_rng(4)
         g = Genome.random(rng)
         data = g.to_dict()
-        first_feature = next(iter(data["weights_v"]))
-        del data["weights_v"][first_feature]
-        data["weights_v"]["not_a_real_feature"] = 5.0
+        first_feature = next(iter(data["feature_buckets"]))
+        del data["feature_buckets"][first_feature]
+        data["feature_buckets"]["not_a_real_feature"] = {"num_buckets": 2, "thresholds": [0.5, 0.5]}
         restored = Genome.from_dict(data, rng)
-        assert restored.weights_v.shape == (NUM_FEATURES,)
+        assert restored.num_buckets.shape == (strategy.NUM_BUCKETABLE,)
         captured = capsys.readouterr()
-        assert "unknown feature" in captured.out.lower() or "unknown" in captured.out.lower()
+        assert "unknown" in captured.out.lower()
 
-    def test_from_dict_handles_missing_scalar(self, capsys):
+    def test_from_dict_drops_unknown_rule_feature(self, capsys):
+        rng = np.random.default_rng(4)
+        g = Genome.random(rng)
+        data = g.to_dict()
+        data["rules"][0]["conditions"][0]["feature"] = "not_a_real_feature"
+        restored = Genome.from_dict(data, rng)
+        assert restored.condition_features[0, 0] == strategy.WILDCARD
+        captured = capsys.readouterr()
+        assert "unknown" in captured.out.lower()
+
+    def test_from_dict_handles_missing_rules(self, capsys):
+        rng = np.random.default_rng(4)
+        g = Genome.random(rng)
+        data = g.to_dict()
+        data["rules"] = data["rules"][:-1]
+        restored = Genome.from_dict(data, rng)
+        assert restored.rule_actions.shape == (strategy.NUM_RULES,)
+        captured = capsys.readouterr()
+        assert "rule" in captured.out.lower()
+
+    def test_from_dict_handles_missing_raise_size_and_bucket_noise(self, capsys):
         rng = np.random.default_rng(5)
         g = Genome.random(rng)
         data = g.to_dict()
-        del data["scalars"]["kappa"]
+        del data["raise_size_pct"]
+        del data["bucket_noise_std"]
         restored = Genome.from_dict(data, rng)
-        assert restored.kappa >= 0
+        assert 0 <= restored.raise_size_idx < len(strategy.RAISE_SIZE_ALPHABET)
+        assert restored.bucket_noise_std >= 0
         captured = capsys.readouterr()
-        assert "kappa" in captured.out
+        assert "raise_size_pct" in captured.out
+        assert "bucket_noise_std" in captured.out
 
     def test_from_dict_handles_missing_and_unknown_gto_flags(self, capsys):
         rng = np.random.default_rng(6)
@@ -500,8 +615,8 @@ class TestSerialization:
         path = tmp_path / "genome.json"
         g.save(str(path))
         loaded = Genome.load(str(path), rng)
-        assert np.array_equal(g.weights_v, loaded.weights_v)
-        assert g.theta_call == loaded.theta_call
+        assert np.array_equal(g.condition_features, loaded.condition_features)
+        assert g.raise_size_idx == loaded.raise_size_idx
 
     def test_save_population_and_load_population_round_trip(self, tmp_path):
         rng = np.random.default_rng(8)
@@ -511,4 +626,4 @@ class TestSerialization:
         loaded = load_population(str(path), rng)
         assert len(loaded) == 3
         for original, restored in zip(genomes, loaded):
-            assert np.array_equal(original.weights_v, restored.weights_v)
+            assert np.array_equal(original.condition_features, restored.condition_features)

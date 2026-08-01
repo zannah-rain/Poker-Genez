@@ -64,8 +64,8 @@ class TestPopulationInit:
         seeds = [Genome.random(np.random.default_rng(0)) for _ in range(2)]
         pop = Population(cfg, np.random.default_rng(1), seed_genomes=seeds)
         assert len(pop.players) == 6
-        assert np.array_equal(pop.players[0].genome.weights_v, seeds[0].weights_v)
-        assert np.array_equal(pop.players[1].genome.weights_v, seeds[1].weights_v)
+        assert np.array_equal(pop.players[0].genome.condition_features, seeds[0].condition_features)
+        assert np.array_equal(pop.players[1].genome.condition_features, seeds[1].condition_features)
 
     def test_seed_genomes_longer_than_population_are_truncated(self):
         cfg = GAConfig(population_size=3)
@@ -77,8 +77,8 @@ class TestPopulationInit:
         cfg = GAConfig(population_size=2)
         seeds = [Genome.random(np.random.default_rng(0)) for _ in range(2)]
         pop = Population(cfg, np.random.default_rng(1), seed_genomes=seeds)
-        pop.players[0].genome.weights_v[0] = 999.0
-        assert seeds[0].weights_v[0] != 999.0
+        pop.players[0].genome.condition_features[0, 0] = 999
+        assert seeds[0].condition_features[0, 0] != 999
 
 
 class TestPopulationEvolve:
@@ -104,7 +104,7 @@ class TestPopulationEvolve:
         next_gen = pop.evolve(fitness)
         elites_in_next_gen = next_gen[:2]
         for elite, original in zip(elites_in_next_gen, best_two):
-            assert np.array_equal(elite.genome.weights_v, original.genome.weights_v)
+            assert np.array_equal(elite.genome.condition_features, original.genome.condition_features)
             assert elite.genome is not original.genome  # copied, not shared
 
     def test_new_player_ids_are_unique_and_continue_counting(self):
@@ -168,10 +168,10 @@ class TestIslandModel:
         island_cfg = IslandConfig(num_islands=2, migration_interval=0)
         seeds = [Genome.random(np.random.default_rng(i)) for i in range(12)]
         model = IslandModel(ga_cfg, island_cfg, np.random.default_rng(0), seed_genomes=seeds)
-        island0_weights = {tuple(p.genome.weights_v) for p in model.islands[0].players}
-        island1_weights = {tuple(p.genome.weights_v) for p in model.islands[1].players}
-        expected0 = {tuple(seeds[i].weights_v) for i in range(0, 12, 2)}
-        expected1 = {tuple(seeds[i].weights_v) for i in range(1, 12, 2)}
+        island0_weights = {p.genome.condition_features.tobytes() for p in model.islands[0].players}
+        island1_weights = {p.genome.condition_features.tobytes() for p in model.islands[1].players}
+        expected0 = {seeds[i].condition_features.tobytes() for i in range(0, 12, 2)}
+        expected1 = {seeds[i].condition_features.tobytes() for i in range(1, 12, 2)}
         assert island0_weights == expected0
         assert island1_weights == expected1
 

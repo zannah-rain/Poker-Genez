@@ -4,21 +4,24 @@ import numpy as np
 import pytest
 
 import main as main_module
-from features import NUM_FEATURES
-from genome import Genome, quantize
+import strategy
+from genome import Genome
+from gto import NUM_GTO_SPOTS
 from main import apply_sparsity_penalty, main, parse_args
 from player import Player
 
 
 def make_genome_with_nonzero_count(count):
-    weights_v = quantize(np.zeros(NUM_FEATURES))
-    for i in range(count):
-        weights_v[i] = 10.0
-    from gto import NUM_GTO_SPOTS
+    """count must be <= strategy.NUM_RULES * strategy.CONDITIONS_PER_RULE."""
+    condition_features = np.full((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
+    condition_features.flat[:count] = 0  # feature index 0, arbitrary -- only its wildcard-ness matters here
     return Genome(
-        weights_v=weights_v, weights_l=quantize(np.zeros(NUM_FEATURES)),
-        bias_v=50.0, bias_l=50.0, theta_value=70.0, theta_bluff=70.0, theta_call=40.0,
-        kappa=0.5, noise_std=1.0, gto_flags=np.zeros(NUM_GTO_SPOTS),
+        num_buckets=np.full(strategy.NUM_BUCKETABLE, 2),
+        thresholds=np.full((strategy.NUM_BUCKETABLE, strategy.MAX_BUCKETS - 1), 0.5),
+        condition_features=condition_features,
+        condition_buckets=np.zeros((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), dtype=np.int64),
+        rule_actions=np.full(strategy.NUM_RULES, strategy.ACTION_FOLD),
+        raise_size_idx=0, bucket_noise_std=1.0, gto_flags=np.zeros(NUM_GTO_SPOTS),
     )
 
 

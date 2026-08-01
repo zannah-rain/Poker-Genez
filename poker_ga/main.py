@@ -24,9 +24,9 @@ from tournament import export_top_n, rank_players, run_final_tournament
 
 
 def apply_sparsity_penalty(players: list[Player], fitness: dict, coefficient: float) -> dict:
-    """Subtracts `coefficient` chips per nonzero feature weight from each
-    player's fitness, so selection favors sparser (more memorizable)
-    genomes alongside raw poker performance."""
+    """Subtracts `coefficient` chips per active (non-wildcard) rule
+    condition from each player's fitness, so selection favors sparser (more
+    memorizable) genomes alongside raw poker performance."""
     if coefficient <= 0:
         return fitness
     return {
@@ -49,10 +49,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mutation-scale", type=float, default=0.3)
     p.add_argument(
         "--sparsity-penalty", type=float, default=2.0,
-        help="Chips subtracted from fitness per nonzero feature weight (weights_v + "
-        "weights_l combined), pushing evolution toward sparser, more memorizable "
-        "genomes. Applied both during evolution and to the final tournament ranking. "
-        "0 disables it.",
+        help="Chips subtracted from fitness per active (non-wildcard) rule condition, "
+        "pushing evolution toward sparser, more memorizable genomes. Applied both "
+        "during evolution and to the final tournament ranking. 0 disables it.",
     )
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--out-dir", type=str, default="runs", help="Where to save the best genome each generation.")
@@ -79,7 +78,7 @@ def parse_args() -> argparse.Namespace:
         help="Population file to reload. Defaults to <final-out-dir>/population.json.",
     )
     p.add_argument(
-        "--benchmark-interval", type=int, default=10,
+        "--benchmark-interval", type=int, default=1,
         help="Every this many generations, play the current population head-to-head against "
         "a saved checkpoint from --benchmark-interval generations ago, in 3-vs-3 tables, until "
         "the result is statistically resolved (see --benchmark-min/max-tables, "
@@ -262,7 +261,7 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
         print(
             f"gen {gen:4d} | best {values.max() / sim_config.rounds_per_generation:9.1f} | mean {values.mean() / sim_config.rounds_per_generation:8.1f} "
             f"| worst {values.min() / sim_config.rounds_per_generation:9.1f} | std {values.std() / sim_config.rounds_per_generation:7.1f} "
-            f"| nonzero wts avg {nonzero_counts.mean():5.1f} min {nonzero_counts.min():3d} "
+            f"| active cond avg {nonzero_counts.mean():5.1f} min {nonzero_counts.min():3d} "
             f"| {elapsed:5.1f}s"
         )
         print(
@@ -370,7 +369,7 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
         print(
             f"  #{rank} {name:12s} | mean {s.mean_net_chips:+8.1f}/session | "
             f"win {s.win_rate:6.1%} | bust {s.bust_rate:6.1%} | {s.bb_per_100(args.big_blind):+7.2f} bb/100 "
-            f"| {p.genome.nonzero_weight_count():3d} nonzero wts"
+            f"| {p.genome.nonzero_weight_count():3d} active cond"
         )
     print(f"Strategy reports written to {final_out_dir}/")
     print(f"Full ranked population ({len(ranked)} genomes) saved to {population_path} for --reload-previous.")

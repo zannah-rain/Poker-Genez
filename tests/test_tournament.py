@@ -3,9 +3,9 @@ import os
 import numpy as np
 import pytest
 
-from features import NUM_FEATURES
+import strategy
 from game import GameConfig
-from genome import Genome, quantize
+from genome import Genome
 from gto import NUM_GTO_SPOTS
 from player import Player
 from simulate import SimConfig
@@ -15,17 +15,22 @@ from tournament import (
 )
 
 
-def make_genome(weights_v=None, weights_l=None, gto_flags=None):
-    if weights_v is None:
-        weights_v = np.zeros(NUM_FEATURES)
-    if weights_l is None:
-        weights_l = np.zeros(NUM_FEATURES)
+def make_genome(condition_features=None, condition_buckets=None, rule_actions=None, gto_flags=None):
+    """Defaults to an "empty" genome: every rule wildcard-conditioned to
+    Fold, 2 buckets (cut at 0.5) for every bucketable feature."""
+    if condition_features is None:
+        condition_features = np.full((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
+    if condition_buckets is None:
+        condition_buckets = np.zeros((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), dtype=np.int64)
+    if rule_actions is None:
+        rule_actions = np.full(strategy.NUM_RULES, strategy.ACTION_FOLD)
     if gto_flags is None:
         gto_flags = np.zeros(NUM_GTO_SPOTS)
     return Genome(
-        weights_v=weights_v, weights_l=weights_l, bias_v=50.0, bias_l=50.0,
-        theta_value=70.0, theta_bluff=70.0, theta_call=40.0, kappa=0.5,
-        noise_std=1.0, gto_flags=gto_flags,
+        num_buckets=np.full(strategy.NUM_BUCKETABLE, 2),
+        thresholds=np.full((strategy.NUM_BUCKETABLE, strategy.MAX_BUCKETS - 1), 0.5),
+        condition_features=condition_features, condition_buckets=condition_buckets,
+        rule_actions=rule_actions, raise_size_idx=0, bucket_noise_std=1.0, gto_flags=gto_flags,
     )
 
 
@@ -162,11 +167,12 @@ class TestRankPlayers:
         assert [p.player_id for p in ranked] == [players[1].player_id, players[0].player_id, players[2].player_id]
 
     def test_sparsity_penalty_can_change_the_ranking(self):
-        wv_sparse = quantize(np.zeros(NUM_FEATURES))
-        wv_dense = quantize(np.zeros(NUM_FEATURES))
-        wv_dense[:20] = 10.0  # 20 nonzero weights
-        sparse_player = Player(player_id=0, genome=make_genome(weights_v=wv_sparse))
-        dense_player = Player(player_id=1, genome=make_genome(weights_v=wv_dense))
+        cf_sparse = np.full((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
+        cf_dense = np.full((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
+        cf_dense[:7, :] = 0  # 20 (of 24*3=72) active conditions -- 7 full rules minus one wildcard slot
+        cf_dense[6, 2] = strategy.WILDCARD
+        sparse_player = Player(player_id=0, genome=make_genome(condition_features=cf_sparse))
+        dense_player = Player(player_id=1, genome=make_genome(condition_features=cf_dense))
         stats = {
             0: PlayerStats(player_id=0, sessions_played=1, total_net_chips=90.0),
             1: PlayerStats(player_id=1, sessions_played=1, total_net_chips=100.0),
@@ -202,13 +208,25 @@ class TestDescribeGenome:
         assert "GTO Chart Overrides" in report
         assert "When this applies" in report
 
-    def test_report_mentions_every_feature_group(self):
+    def test_empty_genome_reports_no_referenced_features(self):
         player = Player(player_id=1, genome=make_genome())
         stats = PlayerStats(player_id=1)
         report = describe_genome(player, stats, GameConfig(), rank=1)
-        from features import FEATURE_GROUPS
-        for group in FEATURE_GROUPS:
-            assert group in report
+        assert "No rule references a feature" in report
+
+    def test_report_lists_referenced_features_and_rule(self):
+        cf = np.full((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
+        cb = np.zeros((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), dtype=np.int64)
+        actions = np.full(strategy.NUM_RULES, strategy.ACTION_FOLD)
+        cf[0, 0] = strategy.feature_index("hand_category_norm")
+        cb[0, 0] = 1
+        actions[0] = strategy.ACTION_RAISE
+        player = Player(player_id=1, genome=make_genome(condition_features=cf, condition_buckets=cb, rule_actions=actions))
+        stats = PlayerStats(player_id=1)
+        report = describe_genome(player, stats, GameConfig(), rank=1)
+        assert "Hand Strength Tier" in report
+        assert "[rule 0]" in report
+        assert "**Raise**" in report
 
 
 class TestExportTopN:
