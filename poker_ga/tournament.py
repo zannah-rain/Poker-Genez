@@ -194,7 +194,7 @@ def _rule_sort_key(condition_features, condition_buckets) -> tuple:
         if fi == strategy.WILDCARD:
             keyed.append(_WILDCARD_CONDITION_KEY)
             continue
-        spec = strategy.TOP_LEVEL_FEATURES[int(fi)]
+        spec = strategy.CONDITION_FEATURES[int(fi)]
         priority = _REPORT_GROUP_PRIORITY.get(group_of(spec), _UNGROUPED_CONDITION_PRIORITY)
         keyed.append((priority, spec.key, int(bucket)))
     return tuple(sorted(keyed))
@@ -273,22 +273,24 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
     referenced = sorted(
         {int(fi) for fi in g.condition_features.flat if fi != strategy.WILDCARD},
         key=lambda fi: (
-            _REPORT_GROUP_PRIORITY.get(group_of(strategy.TOP_LEVEL_FEATURES[fi]), _UNGROUPED_CONDITION_PRIORITY),
-            strategy.TOP_LEVEL_FEATURES[fi].key,
+            _REPORT_GROUP_PRIORITY.get(group_of(strategy.CONDITION_FEATURES[fi]), _UNGROUPED_CONDITION_PRIORITY),
+            strategy.CONDITION_FEATURES[fi].key,
         ),
     )
     lines.append("## Feature Buckets")
     lines.append(
         "This genome's own cutoffs for every feature its rules actually reference below -- "
-        "shared by every rule, the way a real chart's category boundaries are defined once "
-        "and reused."
+        "shared across every street's rules, the way a real chart's category boundaries are "
+        "defined once and reused. (Street isn't a feature here -- it's which of the 4 "
+        "per-street rulesets below a rule lives in. Hole hand category isn't bucketed either "
+        "-- every preflop rule specifies its exact category set directly, see Strategy Rules.)"
     )
     lines.append("")
     if not referenced:
         lines.append("*(No rule references a feature -- this genome always plays its Strategy Rules' default.)*")
         lines.append("")
     for fi in referenced:
-        spec = strategy.TOP_LEVEL_FEATURES[fi]
+        spec = strategy.CONDITION_FEATURES[fi]
         lines.append(f"- **{spec.label}** — {spec.description}")
         if spec.kind == "boolean":
             continue
@@ -301,35 +303,52 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
 
     lines.append("## Strategy Rules")
     lines.append(
-        "Grouped here by shared situation for readability (context features like position/"
-        "street first, situational triggers like facing a bet or call size last), **not** in "
-        "true evaluation order -- each line is tagged with its actual rule number in brackets. "
-        "When two rules could both match the same hand, the lower-numbered one wins; this only "
-        "matters when rules' conditions actually overlap, which is uncommon since most rules "
-        "in the same spot differ on a trigger condition (facing a bet or not, etc.) that makes "
-        "them mutually exclusive in practice."
+        "Split into 4 independent rulesets, one per street -- each street has its own fixed "
+        f"budget of {strategy.RULES_PER_STREET} rule slots, so a genome can't spend its whole "
+        "rule budget on one street and leave another bare. Within each street, rules are "
+        "grouped here by shared situation for readability (context features first, "
+        "situational triggers like facing a bet or call size last), **not** in true evaluation "
+        "order -- each line is tagged with its actual rule number in brackets. When two rules "
+        "*in the same street* could both match the same hand, the lower-numbered one wins; "
+        "this only matters when rules' conditions actually overlap, which is uncommon since "
+        "most rules in the same spot differ on a trigger condition (facing a bet or not, etc.) "
+        "that makes them mutually exclusive in practice. Every Preflop rule also always names "
+        "the exact hole hand categories it applies to (Premium Pairs, Axs, Suited Connectors, "
+        "Junk, etc.) -- the one axis a real preflop range chart is built around, checked "
+        "exactly rather than through the usual bucket-threshold mechanism."
     )
     lines.append("")
-    rule_order = sorted(
-        range(strategy.NUM_RULES),
-        key=lambda r: _rule_sort_key(g.condition_features[r], g.condition_buckets[r]),
-    )
-    for r in rule_order:
-        phrases = []
-        for c in range(strategy.CONDITIONS_PER_RULE):
-            fi = int(g.condition_features[r, c])
-            if fi == strategy.WILDCARD:
-                continue
-            spec = strategy.TOP_LEVEL_FEATURES[fi]
-            row = strategy.bucket_gene_row(fi)
-            num_buckets = int(g.num_buckets[row]) if row >= 0 else 2
-            thresholds = g.thresholds[row] if row >= 0 else None
-            phrases.append(_condition_phrase(spec, int(g.condition_buckets[r, c]), num_buckets, thresholds))
-        condition_text = " AND ".join(phrases) if phrases else "*(any situation)*"
-        action = strategy.ACTION_CATEGORIES[int(g.rule_actions[r])]
-        lines.append(f"- `[rule {r}]` IF {condition_text} THEN **{action}**")
-    lines.append("- `[default]` IF nothing above matched THEN **Fold**")
-    lines.append("")
+
+    for street, street_label in enumerate(strategy.STREET_LABELS):
+        lines.append(f"### {street_label}")
+        lines.append("")
+        rule_order = sorted(
+            range(strategy.RULES_PER_STREET),
+            key=lambda r: _rule_sort_key(g.condition_features[street, r], g.condition_buckets[street, r]),
+        )
+        for r in rule_order:
+            phrases = []
+            if street == strategy.PREFLOP:
+                claimed = [
+                    label for label, flag in zip(strategy.HOLE_CATEGORY_LABELS, g.preflop_hole_category_mask[r])
+                    if flag > 0.5
+                ]
+                categories_text = ", ".join(claimed) if claimed else "*none -- never matches*"
+                phrases.append(f"Hole Category in {{{categories_text}}}")
+            for c in range(strategy.CONDITIONS_PER_RULE):
+                fi = int(g.condition_features[street, r, c])
+                if fi == strategy.WILDCARD:
+                    continue
+                spec = strategy.CONDITION_FEATURES[fi]
+                row = strategy.bucket_gene_row(fi)
+                num_buckets = int(g.num_buckets[row]) if row >= 0 else 2
+                thresholds = g.thresholds[row] if row >= 0 else None
+                phrases.append(_condition_phrase(spec, int(g.condition_buckets[street, r, c]), num_buckets, thresholds))
+            condition_text = " AND ".join(phrases) if phrases else "*(any situation)*"
+            action = strategy.ACTION_CATEGORIES[int(g.rule_actions[street, r])]
+            lines.append(f"- `[rule {r}]` IF {condition_text} THEN **{action}**")
+        lines.append("- `[default]` IF nothing above matched THEN **Fold**")
+        lines.append("")
 
     return "\n".join(lines)
 

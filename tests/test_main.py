@@ -13,14 +13,16 @@ from player import Player
 
 def make_genome_with_nonzero_count(count):
     """count must be <= strategy.NUM_RULES * strategy.CONDITIONS_PER_RULE."""
-    condition_features = np.full((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
+    condition_shape = (strategy.NUM_STREETS, strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE)
+    condition_features = np.full(condition_shape, strategy.WILDCARD, dtype=np.int64)
     condition_features.flat[:count] = 0  # feature index 0, arbitrary -- only its wildcard-ness matters here
     return Genome(
         num_buckets=np.full(strategy.NUM_BUCKETABLE, 2),
         thresholds=np.full((strategy.NUM_BUCKETABLE, strategy.MAX_BUCKETS - 1), 0.5),
         condition_features=condition_features,
-        condition_buckets=np.zeros((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), dtype=np.int64),
-        rule_actions=np.full(strategy.NUM_RULES, strategy.ACTION_FOLD),
+        condition_buckets=np.zeros(condition_shape, dtype=np.int64),
+        rule_actions=np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.ACTION_FOLD),
+        preflop_hole_category_mask=np.ones((strategy.RULES_PER_STREET, strategy.NUM_HOLE_CATEGORIES)),
         bucket_noise_std=1.0, gto_flags=np.zeros(NUM_GTO_SPOTS),
     )
 

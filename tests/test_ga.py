@@ -77,8 +77,8 @@ class TestPopulationInit:
         cfg = GAConfig(population_size=2)
         seeds = [Genome.random(np.random.default_rng(0)) for _ in range(2)]
         pop = Population(cfg, np.random.default_rng(1), seed_genomes=seeds)
-        pop.players[0].genome.condition_features[0, 0] = 999
-        assert seeds[0].condition_features[0, 0] != 999
+        pop.players[0].genome.condition_features[0, 0, 0] = 999
+        assert seeds[0].condition_features[0, 0, 0] != 999
 
 
 class TestPopulationEvolve:

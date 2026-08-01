@@ -3,37 +3,61 @@ ordered "if this situation, then this action" list a human could actually
 memorize and execute at a table -- the replacement for the old linear V/L/
 theta system (see genome.py's module docstring for that history).
 
-Two kinds of evolvable gene live here:
+Rules are organized into 4 independent, fixed-size pools, one per street
+(RULES_PER_STREET each) -- every rule belongs to exactly one street, and each
+street has its own separate rule-count limit, so a genome can't spend its
+whole "budget" of rules on preflop and leave the river bare. Two fields are
+*mandatory* on every rule rather than optional conditions competing for one
+of its CONDITIONS_PER_RULE slots (and so don't count against
+nonzero_weight_count()'s complexity/sparsity accounting, which only counts
+active *optional* conditions):
 
-  Feature bucketing (genome-wide, shared by every rule): every "top-level"
-  feature (see TOP_LEVEL_FEATURES -- the ~50 generalized concepts, not the
-  ~150 one-hot indicator children) already lives on an evenly-spaced 0-1
-  scale (features.py normalizes everything that way). That means "learn a
-  threshold" and "learn to bucket a categorical into groups" are the *same*
-  mechanism: pick `num_buckets` (2 or 3) cut points on that 0-1 line. This is
-  genome-global rather than per-rule, so a concept like "Hand Strength" has
-  one shared definition every rule reads from -- "weak/medium/strong, cut
-  here" -- rather than every rule re-deriving its own cutoffs. Boolean
-  features need no genes at all: they're already exactly 2 buckets (0/1).
+  - Which street a rule belongs to isn't a gene at all -- it's simply which
+    of the 4 per-street pools the rule lives in (see Genome.condition_features
+    etc., shaped (NUM_STREETS, RULES_PER_STREET, ...)). decide() only ever
+    checks the pool matching the current Situation.street.
+  - Every preflop rule also carries a mandatory hole_category_mask (see
+    Genome) -- which of the 12 hole-hand-category buckets (features.py's
+    hole_hand_category_norm -- Premium Pairs, Axs, Suited Connectors, Junk,
+    etc.) it applies to. Preflop strategy is built around exactly this axis
+    on a real range chart, so it gets full 12-way resolution and a mandatory
+    presence, rather than being squeezed through the usual 2-3-bucket
+    mechanism and an optional condition slot like everything else.
 
-  Rules (a fixed-size ordered decision list): each rule is a small
-  conjunction of up to CONDITIONS_PER_RULE (feature, required-bucket) checks
-  -- or a wildcard, "don't care" -- plus one action category. Checked in
-  fixed array order, first full match wins (the same idiom gto.py's
-  GTOSpot.action_ranges/SpotMatcher already use); no match at all falls back
-  to Fold (matching GTOSpot.default_action's "everything not colored in is a
-  fold" convention). A rule's array *position* carries no priority meaning
-  beyond that fixed check order -- like a weight vector's index today, a
-  slot's content is what matters, not which slot it happens to sit in -- so
-  there's no reordering mutation operator.
+Two kinds of evolvable gene live here besides the rules themselves:
+
+  Feature bucketing (genome-wide, shared by every rule): every "condition"
+  feature (see CONDITION_FEATURES -- the ~49 generalized concepts a rule can
+  reference, not the ~150 one-hot indicator children, and not street_norm,
+  which is redundant now that street is handled structurally) already lives
+  on an evenly-spaced 0-1 scale (features.py normalizes everything that
+  way). That means "learn a threshold" and "learn to bucket a categorical
+  into groups" are the *same* mechanism: pick `num_buckets` (2 or 3) cut
+  points on that 0-1 line. This is genome-global rather than per-rule, so a
+  concept like "Hand Strength" has one shared definition every rule reads
+  from -- "weak/medium/strong, cut here" -- rather than every rule
+  re-deriving its own cutoffs. Boolean features need no genes at all:
+  they're already exactly 2 buckets (0/1).
+
+  Rules (a fixed-size ordered decision list, per street): each rule is a
+  small conjunction of up to CONDITIONS_PER_RULE (feature, required-bucket)
+  checks -- or a wildcard, "don't care" -- plus one action category (and, for
+  preflop rules, the mandatory hole_category_mask above). Checked in fixed
+  array order within their street's pool, first full match wins (the same
+  idiom gto.py's GTOSpot.action_ranges/SpotMatcher already use); no match at
+  all falls back to Fold (matching GTOSpot.default_action's "everything not
+  colored in is a fold" convention). A rule's array *position* carries no
+  priority meaning beyond that fixed check order -- like a weight vector's
+  index today, a slot's content is what matters, not which slot it happens
+  to sit in -- so there's no reordering mutation operator.
 
 Multi-street plans ("raise now, fold if raised back") are never represented
-explicitly: every decision re-evaluates this same rule list fresh from the
-current Situation. "Fold if raised back" simply falls out of a *later*
-decision's bigger call_amount/facing_bet routing to a different (likely
-Fold) rule -- no state needs to be carried between decisions. Likewise "call
-up to X, else fold" is just an ordinary rule condition on the existing
-call_amount_norm feature's bucket, not a special parameter.
+explicitly: every decision re-evaluates the current street's rule pool fresh
+from the current Situation. "Fold if raised back" simply falls out of a
+*later* decision's bigger call_amount/facing_bet routing to a different
+(likely Fold) rule -- no state needs to be carried between decisions.
+Likewise "call up to X, else fold" is just an ordinary rule condition on the
+existing call_amount_norm feature's bucket, not a special parameter.
 """
 
 from __future__ import annotations
@@ -46,31 +70,40 @@ from features import FEATURE_SPECS, FeatureSpec
 # Feature vocabulary
 # ---------------------------------------------------------------------------
 
-# Only the "generalized" top-level features (parents of a one-hot family, or
-# standalone booleans) are usable as rule conditions -- the ~150 linked
+# The "generalized" top-level features (parents of a one-hot family, or
+# standalone booleans) usable as rule conditions -- the ~150 linked
 # indicator children are just precomputed alternate views of these same
 # concepts (see features.py's module docstring), so exposing them too would
 # only let two conditions restate the same fact under different keys.
-TOP_LEVEL_FEATURES: list[FeatureSpec] = [s for s in FEATURE_SPECS if s.linked_to is None]
-NUM_TOP_LEVEL_FEATURES = len(TOP_LEVEL_FEATURES)
+# street_norm is excluded too: which street a rule applies to is now a
+# mandatory, structural property of which per-street pool it lives in (see
+# module docstring), so referencing it again as a regular condition would be
+# permanently redundant -- every rule in, say, the flop pool only ever sees
+# flop situations, making any street_norm condition on it either trivially
+# always-true or permanently dead.
+CONDITION_FEATURES: list[FeatureSpec] = [
+    s for s in FEATURE_SPECS if s.linked_to is None and s.key != "street_norm"
+]
+NUM_CONDITION_FEATURES = len(CONDITION_FEATURES)
 
 # Index into the *full* features.py vector (as extract_features returns it)
-# for each top-level feature, precomputed once so decide() doesn't need to
+# for each condition feature, precomputed once so decide() doesn't need to
 # rebuild this mapping (or do a linear FEATURE_NAMES.index lookup) every call.
-TOP_LEVEL_FULL_INDEX = np.array(
-    [i for i, s in enumerate(FEATURE_SPECS) if s.linked_to is None], dtype=np.int64
+CONDITION_FEATURES_FULL_INDEX = np.array(
+    [i for i, s in enumerate(FEATURE_SPECS) if s.linked_to is None and s.key != "street_norm"],
+    dtype=np.int64,
 )
 
-_FEATURE_INDEX_BY_KEY: dict[str, int] = {s.key: i for i, s in enumerate(TOP_LEVEL_FEATURES)}
+_FEATURE_INDEX_BY_KEY: dict[str, int] = {s.key: i for i, s in enumerate(CONDITION_FEATURES)}
 
-BOOLEAN_MASK = np.array([s.kind == "boolean" for s in TOP_LEVEL_FEATURES], dtype=bool)
-# Indices (into TOP_LEVEL_FEATURES) of features that need bucketing genes --
+BOOLEAN_MASK = np.array([s.kind == "boolean" for s in CONDITION_FEATURES], dtype=bool)
+# Indices (into CONDITION_FEATURES) of features that need bucketing genes --
 # every non-boolean feature. Booleans are already exactly 0/1, no genes needed.
 BUCKETABLE_INDICES = np.flatnonzero(~BOOLEAN_MASK)
 NUM_BUCKETABLE = len(BUCKETABLE_INDICES)
-# Inverse of the above: top-level feature index -> row in the (NUM_BUCKETABLE,
+# Inverse of the above: condition feature index -> row in the (NUM_BUCKETABLE,
 # ...) gene arrays, or -1 for a boolean feature (which has no such row).
-_BUCKET_GENE_ROW = np.full(NUM_TOP_LEVEL_FEATURES, -1, dtype=np.int64)
+_BUCKET_GENE_ROW = np.full(NUM_CONDITION_FEATURES, -1, dtype=np.int64)
 _BUCKET_GENE_ROW[BUCKETABLE_INDICES] = np.arange(NUM_BUCKETABLE)
 
 MIN_BUCKETS = 2
@@ -78,8 +111,17 @@ MAX_BUCKETS = 3  # most features settle on 2-3 buckets; nothing hard-caps below 
 
 WILDCARD = -1  # condition_features sentinel: "don't care" for this condition slot
 
-NUM_RULES = 24
+# ---------------------------------------------------------------------------
+# Streets and rule pools
+# ---------------------------------------------------------------------------
+
+NUM_STREETS = 4  # matches Situation.street: 0=preflop, 1=flop, 2=turn, 3=river
+STREET_LABELS = ("Preflop", "Flop", "Turn", "River")
+PREFLOP = 0
+
+RULES_PER_STREET = 8  # each street's own independent rule-count limit
 CONDITIONS_PER_RULE = 3
+NUM_RULES = NUM_STREETS * RULES_PER_STREET  # derived: total rule slots across all 4 streets
 
 # Fraction of a rule's condition slots that start non-wildcard for a freshly
 # random genome -- kept low (mirroring gto.py's GTO_INIT_PROB philosophy:
@@ -134,15 +176,43 @@ RAISE_POT_FRACTION = {
     ACTION_RAISE_100: 1.0, ACTION_RAISE_125: 1.25, ACTION_RAISE_150: 1.5,
 }
 
+# ---------------------------------------------------------------------------
+# Hole hand category -- the mandatory preflop rule axis
+# ---------------------------------------------------------------------------
+
+HOLE_CATEGORY_FEATURE_KEY = "hole_hand_category_norm"
+_HOLE_CATEGORY_CONDITION_INDEX = _FEATURE_INDEX_BY_KEY[HOLE_CATEGORY_FEATURE_KEY]
+HOLE_CATEGORY_LABELS = [label for _point, label in CONDITION_FEATURES[_HOLE_CATEGORY_CONDITION_INDEX].value_table]
+NUM_HOLE_CATEGORIES = len(HOLE_CATEGORY_LABELS)
+
+# Init probability per category per freshly random preflop rule -- a neutral
+# coin flip (unlike CONDITION_ACTIVE_INIT_PROB's "start sparse" philosophy)
+# since this field is mandatory, not optional: there's no "inactive" state to
+# default to, so a 50/50 starting spread is the least-biased starting point.
+HOLE_CATEGORY_INIT_PROB = 0.5
+
 
 def feature_index(key: str) -> int:
     return _FEATURE_INDEX_BY_KEY[key]
 
 
-def bucket_gene_row(top_level_index: int) -> int:
+def bucket_gene_row(condition_index: int) -> int:
     """Row into the (NUM_BUCKETABLE, ...) num_buckets/thresholds gene arrays
-    for this top-level feature, or -1 if it's boolean (no bucketing genes)."""
-    return int(_BUCKET_GENE_ROW[top_level_index])
+    for this condition feature, or -1 if it's boolean (no bucketing genes)."""
+    return int(_BUCKET_GENE_ROW[condition_index])
+
+
+def hole_category_index(condition_values: np.ndarray) -> int:
+    """Exact (not bucketed, not jittered) hole-hand-category index 0..11,
+    read directly out of `condition_values` (the same array decide() slices
+    out of extract_features via CONDITION_FEATURES_FULL_INDEX). features.py
+    normalizes hole_hand_category_norm as category_index / 11, so this
+    round-trips exactly. Preflop rules match on this directly (see
+    match_preflop_rule) rather than through the usual bucket-threshold
+    mechanism -- a real range chart is exact about which starting hands are
+    in which line, not fuzzy, and this is preflop's one mandatory axis."""
+    value = float(condition_values[_HOLE_CATEGORY_CONDITION_INDEX])
+    return int(round(value * (NUM_HOLE_CATEGORIES - 1)))
 
 
 # ---------------------------------------------------------------------------
@@ -159,28 +229,29 @@ def compute_bucket(value: float, num_buckets: int, thresholds: np.ndarray) -> in
 
 
 def compute_all_buckets(
-    top_level_values: np.ndarray,
+    condition_values: np.ndarray,
     num_buckets: np.ndarray,
     thresholds: np.ndarray,
     noise_std: float,
     rng: np.random.Generator | None,
 ) -> np.ndarray:
-    """top_level_values: (NUM_TOP_LEVEL_FEATURES,) normalized 0-1 readings,
+    """condition_values: (NUM_CONDITION_FEATURES,) normalized 0-1 readings,
     already sliced out of extract_features' full vector via
-    TOP_LEVEL_FULL_INDEX. num_buckets/thresholds: this genome's bucketing
-    genes (see Genome). Returns one bucket index per top-level feature.
+    CONDITION_FEATURES_FULL_INDEX. num_buckets/thresholds: this genome's
+    bucketing genes (see Genome). Returns one bucket index per condition
+    feature.
 
     `noise_std` jitters non-boolean values before bucketing -- near a
     threshold this occasionally flips which bucket a hand falls in, giving
     cheap, natural mixed-strategy behavior at decision boundaries (booleans
     are hard 0/1 facts, e.g. "is this a pair," so they're never jittered)."""
-    values = top_level_values
+    values = condition_values
     if noise_std > 0 and rng is not None:
         values = values.copy()
         jitter = rng.normal(0.0, noise_std, size=NUM_BUCKETABLE)
         values[BUCKETABLE_INDICES] = np.clip(values[BUCKETABLE_INDICES] + jitter, 0.0, 1.0)
 
-    buckets = np.empty(NUM_TOP_LEVEL_FEATURES, dtype=np.int64)
+    buckets = np.empty(NUM_CONDITION_FEATURES, dtype=np.int64)
     buckets[BOOLEAN_MASK] = (values[BOOLEAN_MASK] > 0.5).astype(np.int64)
     for row, idx in enumerate(BUCKETABLE_INDICES):
         buckets[idx] = compute_bucket(float(values[idx]), int(num_buckets[row]), thresholds[row])
@@ -246,10 +317,38 @@ def match_rule(buckets: np.ndarray, condition_features: np.ndarray, condition_bu
 def first_matching_rule(
     buckets: np.ndarray, condition_features: np.ndarray, condition_buckets: np.ndarray, rule_actions: np.ndarray
 ) -> int | None:
-    """Returns the action index of the first (in fixed array order) matching
-    rule, or None if no rule matches (caller should default to Fold)."""
-    for r in range(NUM_RULES):
+    """Returns the action index of the first (in fixed array order, within
+    the given street's rule pool) matching rule, or None if no rule matches
+    (caller should default to Fold)."""
+    for r in range(len(rule_actions)):
         if match_rule(buckets, condition_features[r], condition_buckets[r]):
+            return int(rule_actions[r])
+    return None
+
+
+def match_preflop_rule(
+    buckets: np.ndarray, condition_features: np.ndarray, condition_buckets: np.ndarray,
+    hole_category_mask: np.ndarray, hole_category: int,
+) -> bool:
+    """Like match_rule, but a preflop rule also always requires the current
+    hand's exact hole-hand-category to be one this rule claims
+    (hole_category_mask[hole_category]) -- the mandatory, full-resolution
+    axis every real preflop range chart is built around, on top of the
+    (up to 3) regular optional conditions."""
+    if not hole_category_mask[hole_category]:
+        return False
+    return match_rule(buckets, condition_features, condition_buckets)
+
+
+def first_matching_preflop_rule(
+    buckets: np.ndarray, condition_features: np.ndarray, condition_buckets: np.ndarray,
+    rule_actions: np.ndarray, hole_category_mask: np.ndarray, hole_category: int,
+) -> int | None:
+    """Preflop counterpart to first_matching_rule -- see match_preflop_rule."""
+    for r in range(len(rule_actions)):
+        if match_preflop_rule(
+            buckets, condition_features[r], condition_buckets[r], hole_category_mask[r], hole_category,
+        ):
             return int(rule_actions[r])
     return None
 
@@ -284,7 +383,7 @@ def mutate_condition_features(condition_features: np.ndarray, rate: float, rng: 
     a bucket index or an action category, so there's no meaningful "nudge"
     move here -- only a full reassignment."""
     mask = rng.random(condition_features.shape) < rate
-    choices = rng.integers(-1, NUM_TOP_LEVEL_FEATURES, size=condition_features.shape)  # -1 (wildcard) .. N-1
+    choices = rng.integers(-1, NUM_CONDITION_FEATURES, size=condition_features.shape)  # -1 (wildcard) .. N-1
     return np.where(mask, choices, condition_features)
 
 
@@ -332,9 +431,10 @@ def apply_row_mask(a: np.ndarray, b: np.ndarray, from_a: np.ndarray) -> np.ndarr
     mask across multiple arrays that must stay internally coherent -- e.g.
     num_buckets[i] and thresholds[i] always from the same parent (never a
     bucket count from one parent paired with cut points sized for a
-    different bucket count), or a rule's conditions and its action always
-    from the same parent (never a feature index from one parent matched
-    against an unrelated bucket index from the other). Same reasoning
-    genome.py's old crossover_weights docstring gives for why quantized/
-    categorical genes use uniform discrete inheritance instead of blending."""
+    different bucket count), or a rule's conditions, action, and (for
+    preflop) hole_category_mask always from the same parent (never a feature
+    index from one parent matched against an unrelated bucket index from the
+    other). Same reasoning genome.py's old crossover_weights docstring gives
+    for why quantized/categorical genes use uniform discrete inheritance
+    instead of blending."""
     return np.where(from_a.reshape((-1,) + (1,) * (a.ndim - 1)), a, b)

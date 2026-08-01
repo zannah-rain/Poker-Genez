@@ -5,21 +5,27 @@ import strategy
 from features import FEATURE_SPECS
 
 
-class TestTopLevelFeatures:
-    def test_matches_specs_with_no_linked_to(self):
-        expected = [s.key for s in FEATURE_SPECS if s.linked_to is None]
-        assert [s.key for s in strategy.TOP_LEVEL_FEATURES] == expected
+class TestConditionFeatures:
+    def test_matches_specs_with_no_linked_to_excluding_street(self):
+        # street_norm is excluded: which street a rule applies to is a
+        # mandatory, structural property (which per-street pool it lives
+        # in), not a regular condition -- see strategy.py's module docstring.
+        expected = [s.key for s in FEATURE_SPECS if s.linked_to is None and s.key != "street_norm"]
+        assert [s.key for s in strategy.CONDITION_FEATURES] == expected
+
+    def test_street_norm_is_not_a_condition_feature(self):
+        assert "street_norm" not in [s.key for s in strategy.CONDITION_FEATURES]
 
     def test_boolean_mask_matches_kind(self):
-        for spec, is_bool in zip(strategy.TOP_LEVEL_FEATURES, strategy.BOOLEAN_MASK):
+        for spec, is_bool in zip(strategy.CONDITION_FEATURES, strategy.BOOLEAN_MASK):
             assert is_bool == (spec.kind == "boolean")
 
     def test_bucketable_indices_exclude_booleans(self):
         for idx in strategy.BUCKETABLE_INDICES:
-            assert strategy.TOP_LEVEL_FEATURES[idx].kind != "boolean"
+            assert strategy.CONDITION_FEATURES[idx].kind != "boolean"
 
     def test_bucket_gene_row_is_valid_for_bucketable_and_negative_for_boolean(self):
-        for idx, spec in enumerate(strategy.TOP_LEVEL_FEATURES):
+        for idx, spec in enumerate(strategy.CONDITION_FEATURES):
             row = strategy.bucket_gene_row(idx)
             if spec.kind == "boolean":
                 assert row == -1
@@ -27,7 +33,7 @@ class TestTopLevelFeatures:
                 assert 0 <= row < strategy.NUM_BUCKETABLE
 
     def test_feature_index_round_trips_with_key(self):
-        for i, spec in enumerate(strategy.TOP_LEVEL_FEATURES):
+        for i, spec in enumerate(strategy.CONDITION_FEATURES):
             assert strategy.feature_index(spec.key) == i
 
     def test_feature_index_raises_for_unknown_key(self):
@@ -61,7 +67,7 @@ class TestComputeBucket:
 
 class TestComputeAllBuckets:
     def test_boolean_features_bucket_at_0_5(self):
-        values = np.zeros(strategy.NUM_TOP_LEVEL_FEATURES)
+        values = np.zeros(strategy.NUM_CONDITION_FEATURES)
         bool_idx = np.flatnonzero(strategy.BOOLEAN_MASK)[0]
         values[bool_idx] = 1.0
         num_buckets = np.full(strategy.NUM_BUCKETABLE, 2)
@@ -72,7 +78,7 @@ class TestComputeAllBuckets:
         assert buckets[other_bool_idx] == 0
 
     def test_bucketable_feature_uses_its_own_thresholds(self):
-        values = np.zeros(strategy.NUM_TOP_LEVEL_FEATURES)
+        values = np.zeros(strategy.NUM_CONDITION_FEATURES)
         target = strategy.BUCKETABLE_INDICES[0]
         values[target] = 0.7
         num_buckets = np.full(strategy.NUM_BUCKETABLE, 2)
@@ -81,7 +87,7 @@ class TestComputeAllBuckets:
         assert buckets[target] == 1
 
     def test_zero_noise_is_deterministic(self):
-        values = np.random.default_rng(0).random(strategy.NUM_TOP_LEVEL_FEATURES)
+        values = np.random.default_rng(0).random(strategy.NUM_CONDITION_FEATURES)
         num_buckets = np.full(strategy.NUM_BUCKETABLE, 3)
         thresholds = np.sort(np.random.default_rng(1).random((strategy.NUM_BUCKETABLE, strategy.MAX_BUCKETS - 1)), axis=-1)
         rng = np.random.default_rng(2)
@@ -90,7 +96,7 @@ class TestComputeAllBuckets:
         assert np.array_equal(a, b)
 
     def test_does_not_mutate_input_values(self):
-        values = np.full(strategy.NUM_TOP_LEVEL_FEATURES, 0.5)
+        values = np.full(strategy.NUM_CONDITION_FEATURES, 0.5)
         original = values.copy()
         num_buckets = np.full(strategy.NUM_BUCKETABLE, 2)
         thresholds = np.full((strategy.NUM_BUCKETABLE, strategy.MAX_BUCKETS - 1), 0.3)
@@ -101,21 +107,21 @@ class TestComputeAllBuckets:
 
 class TestDescribeBucket:
     def test_boolean_true_bucket_is_the_label(self):
-        spec = next(s for s in strategy.TOP_LEVEL_FEATURES if s.kind == "boolean")
+        spec = next(s for s in strategy.CONDITION_FEATURES if s.kind == "boolean")
         assert strategy.describe_bucket(spec, 1, 2, None) == spec.label
 
     def test_boolean_false_bucket_is_negated(self):
-        spec = next(s for s in strategy.TOP_LEVEL_FEATURES if s.kind == "boolean")
+        spec = next(s for s in strategy.CONDITION_FEATURES if s.kind == "boolean")
         assert strategy.describe_bucket(spec, 0, 2, None) == f"Not {spec.label}"
 
     def test_categorical_two_buckets_span_the_value_table(self):
         spec = strategy.feature_index("hand_category_norm")
-        spec = strategy.TOP_LEVEL_FEATURES[spec]
+        spec = strategy.CONDITION_FEATURES[spec]
         label = strategy.describe_bucket(spec, 0, 2, np.array([0.5, 0.5]))
         assert "High Card" in label
 
     def test_last_bucket_includes_the_top_value_table_point(self):
-        spec = strategy.TOP_LEVEL_FEATURES[strategy.feature_index("hand_category_norm")]
+        spec = strategy.CONDITION_FEATURES[strategy.feature_index("hand_category_norm")]
         label = strategy.describe_bucket(spec, 1, 2, np.array([0.5, 0.5]))
         assert "Straight Flush" in label
 
@@ -124,20 +130,20 @@ class TestDescribeBucket:
         # a feature's own (possibly smaller) num_buckets -- match_rule
         # already treats this as "never matches" harmlessly; describe_bucket
         # must degrade gracefully too, not index past the real cut points.
-        spec = strategy.TOP_LEVEL_FEATURES[strategy.feature_index("hand_category_norm")]
+        spec = strategy.CONDITION_FEATURES[strategy.feature_index("hand_category_norm")]
         label = strategy.describe_bucket(spec, 2, 2, np.array([0.5, 0.5]))
         assert "never matches" in label
 
 
 class TestMatchRule:
     def test_all_wildcard_always_matches(self):
-        buckets = np.zeros(strategy.NUM_TOP_LEVEL_FEATURES, dtype=np.int64)
+        buckets = np.zeros(strategy.NUM_CONDITION_FEATURES, dtype=np.int64)
         cf = np.full(strategy.CONDITIONS_PER_RULE, strategy.WILDCARD)
         cb = np.zeros(strategy.CONDITIONS_PER_RULE, dtype=np.int64)
         assert strategy.match_rule(buckets, cf, cb) is True
 
     def test_matches_only_when_every_active_condition_agrees(self):
-        buckets = np.zeros(strategy.NUM_TOP_LEVEL_FEATURES, dtype=np.int64)
+        buckets = np.zeros(strategy.NUM_CONDITION_FEATURES, dtype=np.int64)
         buckets[0] = 1
         buckets[1] = 2
         cf = np.array([0, 1, strategy.WILDCARD])
@@ -145,7 +151,7 @@ class TestMatchRule:
         assert strategy.match_rule(buckets, cf, cb) is True
 
     def test_one_disagreeing_condition_fails_the_match(self):
-        buckets = np.zeros(strategy.NUM_TOP_LEVEL_FEATURES, dtype=np.int64)
+        buckets = np.zeros(strategy.NUM_CONDITION_FEATURES, dtype=np.int64)
         buckets[0] = 1
         cf = np.array([0, strategy.WILDCARD, strategy.WILDCARD])
         cb = np.array([2, 0, 0])
@@ -154,7 +160,7 @@ class TestMatchRule:
 
 class TestFirstMatchingRule:
     def test_first_match_in_array_order_wins(self):
-        buckets = np.zeros(strategy.NUM_TOP_LEVEL_FEATURES, dtype=np.int64)
+        buckets = np.zeros(strategy.NUM_CONDITION_FEATURES, dtype=np.int64)
         cf = np.full((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
         cb = np.zeros((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), dtype=np.int64)
         actions = np.zeros(strategy.NUM_RULES, dtype=np.int64)
@@ -164,7 +170,7 @@ class TestFirstMatchingRule:
         assert result == strategy.ACTION_RAISE_75
 
     def test_none_when_nothing_matches(self):
-        buckets = np.zeros(strategy.NUM_TOP_LEVEL_FEATURES, dtype=np.int64)
+        buckets = np.zeros(strategy.NUM_CONDITION_FEATURES, dtype=np.int64)
         buckets[0] = 1
         cf = np.zeros((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), dtype=np.int64)  # feature 0
         cb = np.zeros((strategy.NUM_RULES, strategy.CONDITIONS_PER_RULE), dtype=np.int64)  # required bucket 0
@@ -213,7 +219,7 @@ class TestMutateConditionFeatures:
         cf = np.full((10, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
         result = strategy.mutate_condition_features(cf, 1.0, rng)
         assert np.all(result >= strategy.WILDCARD)
-        assert np.all(result < strategy.NUM_TOP_LEVEL_FEATURES)
+        assert np.all(result < strategy.NUM_CONDITION_FEATURES)
 
 
 class TestMutateConditionBucketsAndRuleActions:
@@ -281,3 +287,105 @@ class TestRaiseActionCategories:
     def test_action_categories_length_matches_num_action_categories(self):
         assert len(strategy.ACTION_CATEGORIES) == strategy.NUM_ACTION_CATEGORIES
         assert strategy.NUM_ACTION_CATEGORIES == 2 + len(strategy.RAISE_ACTIONS) + 1
+
+
+class TestStreetsAndRulePools:
+    def test_street_labels_match_num_streets(self):
+        assert len(strategy.STREET_LABELS) == strategy.NUM_STREETS
+
+    def test_preflop_is_street_zero(self):
+        assert strategy.PREFLOP == 0
+        assert strategy.STREET_LABELS[strategy.PREFLOP] == "Preflop"
+
+    def test_num_rules_is_streets_times_rules_per_street(self):
+        assert strategy.NUM_RULES == strategy.NUM_STREETS * strategy.RULES_PER_STREET
+
+
+class TestHoleCategory:
+    def test_num_hole_categories_matches_labels(self):
+        assert len(strategy.HOLE_CATEGORY_LABELS) == strategy.NUM_HOLE_CATEGORIES
+
+    def test_hole_hand_category_norm_is_still_a_condition_feature(self):
+        # Unlike street_norm, hole_hand_category_norm stays available as an
+        # ordinary (optional) condition too -- e.g. a turn/river rule caring
+        # "what did I start with" -- on top of being mandatory for preflop.
+        assert strategy.HOLE_CATEGORY_FEATURE_KEY in [s.key for s in strategy.CONDITION_FEATURES]
+
+    def test_index_round_trips_through_the_norm_value(self):
+        for idx in range(strategy.NUM_HOLE_CATEGORIES):
+            condition_values = np.zeros(strategy.NUM_CONDITION_FEATURES)
+            condition_values[strategy._HOLE_CATEGORY_CONDITION_INDEX] = idx / (strategy.NUM_HOLE_CATEGORIES - 1)
+            assert strategy.hole_category_index(condition_values) == idx
+
+    def test_does_not_mutate_input(self):
+        condition_values = np.zeros(strategy.NUM_CONDITION_FEATURES)
+        condition_values[strategy._HOLE_CATEGORY_CONDITION_INDEX] = 0.5
+        before = condition_values.copy()
+        strategy.hole_category_index(condition_values)
+        assert np.array_equal(condition_values, before)
+
+
+class TestMatchPreflopRule:
+    def _buckets(self):
+        return np.zeros(strategy.NUM_CONDITION_FEATURES, dtype=np.int64)
+
+    def test_fails_when_hole_category_not_claimed(self):
+        mask = np.zeros(strategy.NUM_HOLE_CATEGORIES)
+        cf = np.full(strategy.CONDITIONS_PER_RULE, strategy.WILDCARD)
+        cb = np.zeros(strategy.CONDITIONS_PER_RULE, dtype=np.int64)
+        assert strategy.match_preflop_rule(self._buckets(), cf, cb, mask, hole_category=3) is False
+
+    def test_succeeds_when_hole_category_claimed_and_conditions_match(self):
+        mask = np.zeros(strategy.NUM_HOLE_CATEGORIES)
+        mask[3] = 1.0
+        cf = np.full(strategy.CONDITIONS_PER_RULE, strategy.WILDCARD)
+        cb = np.zeros(strategy.CONDITIONS_PER_RULE, dtype=np.int64)
+        assert strategy.match_preflop_rule(self._buckets(), cf, cb, mask, hole_category=3) is True
+
+    def test_claimed_category_but_failing_regular_condition_still_fails(self):
+        mask = np.ones(strategy.NUM_HOLE_CATEGORIES)
+        buckets = self._buckets()
+        buckets[0] = 1
+        cf = np.array([0, strategy.WILDCARD, strategy.WILDCARD])
+        cb = np.array([2, 0, 0])
+        assert strategy.match_preflop_rule(buckets, cf, cb, mask, hole_category=0) is False
+
+    def test_empty_mask_never_matches_any_category(self):
+        mask = np.zeros(strategy.NUM_HOLE_CATEGORIES)
+        cf = np.full(strategy.CONDITIONS_PER_RULE, strategy.WILDCARD)
+        cb = np.zeros(strategy.CONDITIONS_PER_RULE, dtype=np.int64)
+        for category in range(strategy.NUM_HOLE_CATEGORIES):
+            assert strategy.match_preflop_rule(self._buckets(), cf, cb, mask, hole_category=category) is False
+
+
+class TestFirstMatchingPreflopRule:
+    def test_first_match_wins(self):
+        buckets = np.zeros(strategy.NUM_CONDITION_FEATURES, dtype=np.int64)
+        cf = np.full((strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
+        cb = np.zeros((strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE), dtype=np.int64)
+        actions = np.zeros(strategy.RULES_PER_STREET, dtype=np.int64)
+        actions[0] = strategy.ACTION_RAISE_75
+        actions[1] = strategy.ACTION_ALLIN
+        mask = np.ones((strategy.RULES_PER_STREET, strategy.NUM_HOLE_CATEGORIES))
+        result = strategy.first_matching_preflop_rule(buckets, cf, cb, actions, mask, hole_category=0)
+        assert result == strategy.ACTION_RAISE_75
+
+    def test_none_when_no_rule_claims_the_category(self):
+        buckets = np.zeros(strategy.NUM_CONDITION_FEATURES, dtype=np.int64)
+        cf = np.full((strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
+        cb = np.zeros((strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE), dtype=np.int64)
+        actions = np.zeros(strategy.RULES_PER_STREET, dtype=np.int64)
+        mask = np.zeros((strategy.RULES_PER_STREET, strategy.NUM_HOLE_CATEGORIES))
+        assert strategy.first_matching_preflop_rule(buckets, cf, cb, actions, mask, hole_category=5) is None
+
+    def test_skips_rules_that_dont_claim_the_category_even_if_earlier(self):
+        buckets = np.zeros(strategy.NUM_CONDITION_FEATURES, dtype=np.int64)
+        cf = np.full((strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE), strategy.WILDCARD)
+        cb = np.zeros((strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE), dtype=np.int64)
+        actions = np.zeros(strategy.RULES_PER_STREET, dtype=np.int64)
+        actions[0] = strategy.ACTION_ALLIN
+        actions[1] = strategy.ACTION_RAISE_50
+        mask = np.zeros((strategy.RULES_PER_STREET, strategy.NUM_HOLE_CATEGORIES))
+        mask[1, 2] = 1.0  # only rule 1 claims category 2
+        result = strategy.first_matching_preflop_rule(buckets, cf, cb, actions, mask, hole_category=2)
+        assert result == strategy.ACTION_RAISE_50
