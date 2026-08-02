@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 import strategy
-from cfr_networks import AdvantageNet, AdvantageNetConfig, load, save
+from cfr_networks import AdvantageNet, AdvantageNetConfig, clone, load, save
 
 
 class TestAdvantageNetForward:
@@ -63,3 +63,28 @@ class TestSaveLoadRoundTrip:
             save(net, config, path)
             loaded_net, _ = load(path)
         assert loaded_net.input_dim == 2
+
+
+class TestClone:
+    def test_clone_produces_identical_predictions(self):
+        net = AdvantageNet(input_dim=5, hidden_sizes=(8, 8))
+        features = np.random.default_rng(0).random(5).astype(np.float32)
+        cloned = clone(net)
+        assert np.allclose(net.predict(features), cloned.predict(features))
+
+    def test_clone_is_independent_of_later_training_on_the_original(self):
+        net = AdvantageNet(input_dim=4, hidden_sizes=(8,))
+        features = np.random.default_rng(0).random(4).astype(np.float32)
+        cloned = clone(net)
+        before = cloned.predict(features)
+
+        optimizer = torch.optim.SGD(net.parameters(), lr=1.0)
+        net.train()
+        loss = net(torch.from_numpy(features).unsqueeze(0)).sum()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        after = cloned.predict(features)
+        assert np.allclose(before, after)  # unaffected by training on the original
+        assert not np.allclose(net.predict(features), cloned.predict(features))  # original actually did change

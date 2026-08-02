@@ -54,6 +54,19 @@ class AdvantageNet(nn.Module):
         return out.numpy()
 
 
+def clone(net: AdvantageNet) -> AdvantageNet:
+    """An independent copy of `net`'s weights -- e.g. a snapshot taken
+    right before a training update, so it can still be played against
+    (and, if that update didn't help, reverted to) after the original has
+    since moved on. `load_state_dict` copies tensor *values* into the new
+    module's own parameters rather than aliasing the source's, so later
+    training on `net` can never leak into the clone."""
+    cloned = AdvantageNet(input_dim=net.input_dim, hidden_sizes=net.hidden_sizes, output_dim=net.output_dim)
+    cloned.load_state_dict(net.state_dict())
+    cloned.eval()
+    return cloned
+
+
 @dataclass
 class AdvantageNetConfig:
     feature_keys: tuple[str, ...]

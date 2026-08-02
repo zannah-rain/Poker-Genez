@@ -1,3 +1,6 @@
+import os
+import tempfile
+
 import numpy as np
 import torch
 
@@ -84,3 +87,49 @@ class TestSample:
         stored_values = set(buf.features[: len(buf), 0].tolist())
         for row in features:
             assert float(row[0].item()) in stored_values
+
+
+class TestSaveLoadRoundTrip:
+    def test_partially_filled_buffer_round_trips_exactly(self):
+        buf = _make_buffer(capacity=10)
+        for i in range(4):
+            _add(buf, i, t=float(i))
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = os.path.join(tmp_dir, "checkpoint")
+            buf.save(path)
+            assert os.path.exists(f"{path}.npz")
+            loaded = ReservoirBuffer.load(path, rng=np.random.default_rng(1))
+
+        assert loaded.capacity == buf.capacity
+        assert loaded.size == buf.size == 4
+        assert loaded.n_seen == buf.n_seen == 4
+        assert np.array_equal(loaded.features[:4], buf.features[:4])
+        assert np.array_equal(loaded.regrets[:4], buf.regrets[:4])
+        assert np.array_equal(loaded.legal_masks[:4], buf.legal_masks[:4])
+        assert np.array_equal(loaded.weights[:4], buf.weights[:4])
+
+    def test_full_buffer_with_wraparound_round_trips_n_seen(self):
+        buf = _make_buffer(capacity=5)
+        for i in range(30):  # far more than capacity -- exercises Algorithm R replacement
+            _add(buf, i)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = os.path.join(tmp_dir, "checkpoint")
+            buf.save(path)
+            loaded = ReservoirBuffer.load(path, rng=np.random.default_rng(1))
+
+        assert loaded.size == 5
+        assert loaded.n_seen == 30  # future replacement odds depend on this, not just size
+        assert np.array_equal(loaded.features, buf.features)
+
+    def test_loaded_buffer_continues_accepting_new_samples(self):
+        buf = _make_buffer(capacity=10)
+        for i in range(3):
+            _add(buf, i)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = os.path.join(tmp_dir, "checkpoint")
+            buf.save(path)
+            loaded = ReservoirBuffer.load(path, rng=np.random.default_rng(2))
+
+        _add(loaded, 99)
+        assert len(loaded) == 4
+        assert loaded.features[3, 0] == 99.0
