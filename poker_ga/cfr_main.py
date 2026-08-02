@@ -2,13 +2,16 @@
 
 Mirrors main.py's (the GA's) training-loop conveniences: resumes from the
 previous run's checkpoint if one exists, and, every --benchmark-interval
-iterations, snapshots the net's weights right before that iteration's
-training update (cfr_networks.clone) and plays the post-update net
-head-to-head against that pre-update snapshot in a statistically-resolved
-3-vs-3 match (benchmark.py) -- a direct "did this update actually help"
-check, primarily against the net's own immediately-preceding self. If the
-benchmark doesn't show a resolved improvement, the update is undone
-(Trainer.revert_to the pre-update snapshot) and it counts toward early
+iterations, plays the current net head-to-head against a snapshot
+(cfr_networks.clone) taken --benchmark-interval iterations ago in a
+statistically-resolved 3-vs-3 match (benchmark.py) -- a direct "did the
+last --benchmark-interval iterations actually help" check. That snapshot
+is an anchor, not a rolling one iteration behind: it only advances to the
+current net when a check shows improvement, so a run of non-improving
+checks keeps comparing against the last net that was actually beaten (the
+same way main.py's GA benchmark checkpoint only advances on improvement).
+If a check doesn't show a resolved improvement, the update is undone
+(Trainer.revert_to the anchor snapshot) and it counts toward early
 stopping, the same way main.py reverts to (and stops retrying past) a
 non-improving GA checkpoint.
 
@@ -116,13 +119,15 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--benchmark-interval", type=int, default=100,
-        help="The primary progress check: every this many iterations, snapshot the net's weights "
-        "*before* that iteration's training update, run the update, then play the post-update net "
-        "head-to-head against that pre-update snapshot (3-vs-3 tables, benchmark.py) until the "
-        "result is statistically resolved (see --benchmark-min/max-tables, --benchmark-p-value) -- "
-        "a direct, apples-to-apples 'did this update actually help' check, unlike the training loss "
-        "(see cfr_train.py's _train_step for why that's not comparable run over run). Set to 0 to "
-        "disable.",
+        help="The primary progress check: every this many iterations, play the current net "
+        "head-to-head (3-vs-3 tables, benchmark.py) against a snapshot taken this many iterations "
+        "ago -- e.g. at 100, the first check is iteration 100 vs the net as it stood at iteration 0 "
+        "-- until the result is statistically resolved (see --benchmark-min/max-tables, "
+        "--benchmark-p-value). That snapshot only advances to the current net when a check shows "
+        "improvement, so it stays anchored on the last net actually beaten across any non-improving "
+        "checks in between. A direct, apples-to-apples 'did training actually help' check, unlike "
+        "the training loss (see cfr_train.py's _train_step for why that's not comparable run over "
+        "run). Set to 0 to disable.",
     )
     p.add_argument(
         "--benchmark-min-tables", type=int, default=200,
@@ -363,6 +368,12 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
     initial_net, initial_reservoir, config = _reload_checkpoint(checkpoint_path, args.reload_previous, config, rng)
     trainer = Trainer.new(config, rng, initial_net=initial_net, initial_reservoir=initial_reservoir)
 
+    # The --benchmark-interval anchor: starts at this run's own iteration 0
+    # (whatever net the loop below is about to start from, freshly random or
+    # reloaded) and only advances to the current net when a check shows
+    # improvement -- see --benchmark-interval's help text.
+    benchmark_net = cfr_networks.clone(trainer.net) if args.benchmark_interval > 0 else None
+
     eval_fn = None
     if args.eval_interval > 0:
         eval_fn = _make_eval_fn(
@@ -372,14 +383,6 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
     consecutive_non_improvements = 0
 
     for iteration in range(1, args.iterations + 1):
-        # Snapshot the net *before* this iteration's training update -- see
-        # --benchmark-interval's help text -- so the benchmark below always
-        # compares against exactly what changed this iteration, not some
-        # possibly-stale saved checkpoint.
-        pre_update_net = None
-        if args.benchmark_interval > 0 and iteration % args.benchmark_interval == 0:
-            pre_update_net = cfr_networks.clone(trainer.net)
-
         t0 = time.time()
         mean_loss = run_iteration(trainer, rng, iteration)
         elapsed = time.time() - t0
@@ -397,11 +400,11 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
         if args.checkpoint_interval > 0 and iteration % args.checkpoint_interval == 0:
             trainer.save(checkpoint_path)
 
-        if pre_update_net is not None:
+        if args.benchmark_interval > 0 and iteration % args.benchmark_interval == 0:
             current_players = _benchmark_players(trainer.net, config.feature_keys, "current", id_offset=0)
-            pre_update_players = _benchmark_players(pre_update_net, config.feature_keys, "pre_update", id_offset=-100)
+            checkpoint_players = _benchmark_players(benchmark_net, config.feature_keys, "checkpoint", id_offset=-100)
             outcome = run_benchmark_until_resolved(
-                current_players, pre_update_players, game_config, rng,
+                current_players, checkpoint_players, game_config, rng,
                 min_tables=args.benchmark_min_tables, max_tables=args.benchmark_max_tables,
                 table_batch=args.benchmark_table_batch, p_value=args.benchmark_p_value,
                 show_progress=True, num_workers=num_workers, executor=executor,
@@ -412,20 +415,21 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
                 verdict = "INCONCLUSIVE (table cap hit; treated as not improved)"
             confidence_pct = (1.0 - args.benchmark_p_value) * 100.0
             print(
-                f"         | benchmark vs pre-update net | {outcome.tables_played} tables | "
-                f"current edge {outcome.mean_bb_per_100:+7.2f} bb/100 "
+                f"         | benchmark vs checkpoint ({args.benchmark_interval} iters ago) | "
+                f"{outcome.tables_played} tables | current edge {outcome.mean_bb_per_100:+7.2f} bb/100 "
                 f"({confidence_pct:.0f}% CI [{outcome.ci_low:+7.2f}, {outcome.ci_high:+7.2f}]) | {verdict}"
             )
             if outcome.improved:
                 consecutive_non_improvements = 0
+                benchmark_net = cfr_networks.clone(trainer.net)
             else:
                 consecutive_non_improvements += 1
                 patience_label = args.early_stop_patience if args.early_stop_patience > 0 else "unlimited"
                 print(
-                    f"         | this update didn't help -- reverting net to its pre-update state "
+                    f"         | this update didn't help -- reverting net to its benchmark checkpoint "
                     f"({consecutive_non_improvements}/{patience_label} consecutive non-improvements)"
                 )
-                trainer.revert_to(pre_update_net)
+                trainer.revert_to(benchmark_net)
                 trainer.save(checkpoint_path)
                 if args.early_stop_patience > 0 and consecutive_non_improvements >= args.early_stop_patience:
                     print(
