@@ -40,14 +40,14 @@ def make_situation(**overrides) -> Situation:
 
 def make_genome(
     num_buckets=None, thresholds=None,
-    condition_features=None, condition_buckets=None, rule_actions=None,
+    condition_features=None, condition_buckets=None, rule_actions=None, rule_mix_actions=None,
     preflop_hole_category_mask=None,
-    bucket_noise_std=0.0, gto_flags=None,
+    gto_flags=None,
 ) -> Genome:
     """Defaults to an "empty" genome: every rule wildcard-conditioned to
-    Fold, 2 buckets (cut at 0.5) for every bucketable feature, every preflop
-    rule claiming *every* hole category (so it behaves like a wildcard
-    there too, unless a test overrides it), no GTO charts trusted --
+    Fold (never a Mix), 2 buckets (cut at 0.5) for every bucketable feature,
+    every preflop rule claiming *every* hole category (so it behaves like a
+    wildcard there too, unless a test overrides it), no GTO charts trusted --
     individual tests override just the piece they're exercising."""
     if num_buckets is None:
         num_buckets = np.full(strategy.NUM_BUCKETABLE, 2)
@@ -60,6 +60,8 @@ def make_genome(
         condition_buckets = np.zeros(condition_shape, dtype=np.int64)
     if rule_actions is None:
         rule_actions = np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.ACTION_FOLD)
+    if rule_mix_actions is None:
+        rule_mix_actions = np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.NO_MIX)
     if preflop_hole_category_mask is None:
         preflop_hole_category_mask = np.ones((strategy.RULES_PER_STREET, strategy.NUM_HOLE_CATEGORIES))
     if gto_flags is None:
@@ -67,8 +69,8 @@ def make_genome(
     return Genome(
         num_buckets=num_buckets, thresholds=thresholds,
         condition_features=condition_features, condition_buckets=condition_buckets,
-        rule_actions=rule_actions, preflop_hole_category_mask=preflop_hole_category_mask,
-        bucket_noise_std=bucket_noise_std,
+        rule_actions=rule_actions, rule_mix_actions=rule_mix_actions,
+        preflop_hole_category_mask=preflop_hole_category_mask,
         gto_flags=gto_flags,
     )
 
@@ -143,6 +145,7 @@ class TestGenomeRandom:
         assert g.condition_features.shape == condition_shape
         assert g.condition_buckets.shape == condition_shape
         assert g.rule_actions.shape == (strategy.NUM_STREETS, strategy.RULES_PER_STREET)
+        assert g.rule_mix_actions.shape == (strategy.NUM_STREETS, strategy.RULES_PER_STREET)
         assert g.preflop_hole_category_mask.shape == (strategy.RULES_PER_STREET, strategy.NUM_HOLE_CATEGORIES)
         assert g.gto_flags.shape == (NUM_GTO_SPOTS,)
 
@@ -163,11 +166,28 @@ class TestGenomeRandom:
         assert np.all(g.condition_features >= strategy.WILDCARD)
         assert np.all(g.condition_features < strategy.NUM_CONDITION_FEATURES)
 
+    def test_preflop_never_references_ineligible_features(self):
+        g = Genome.random(np.random.default_rng(0))
+        eligible = set(strategy.ELIGIBLE_CONDITION_INDICES_BY_STREET[strategy.PREFLOP].tolist())
+        for cf in g.condition_features[strategy.PREFLOP].flat:
+            assert cf == strategy.WILDCARD or int(cf) in eligible
+
     def test_rule_actions_in_valid_range(self):
         rng = np.random.default_rng(0)
         g = Genome.random(rng)
         assert np.all(g.rule_actions >= 0)
         assert np.all(g.rule_actions < strategy.NUM_ACTION_CATEGORIES)
+
+    def test_rule_mix_actions_in_valid_range(self):
+        rng = np.random.default_rng(0)
+        g = Genome.random(rng)
+        assert np.all(g.rule_mix_actions >= strategy.NO_MIX)
+        assert np.all(g.rule_mix_actions < strategy.NUM_ACTION_CATEGORIES)
+
+    def test_rule_mix_actions_start_mostly_no_mix(self):
+        rng = np.random.default_rng(0)
+        mixes = np.concatenate([Genome.random(rng).rule_mix_actions.flatten() for _ in range(5)])
+        assert (mixes == strategy.NO_MIX).mean() > 0.5
 
     def test_preflop_hole_category_mask_is_boolean_valued(self):
         rng = np.random.default_rng(0)
@@ -185,6 +205,18 @@ class TestGenomeRandom:
         dense = np.mean([Genome.random(rng, scale=0.5).nonzero_weight_count() for _ in range(30)])
         assert sparse < dense
 
+    def test_every_rule_has_at_least_one_condition(self):
+        # Even at a very low init scale (mostly-wildcard rules), the repair
+        # pass must still leave every rule with >= 1 active condition -- an
+        # all-wildcard rule matches literally anything, which only the
+        # pool's own trailing default is allowed to do.
+        for scale in (0.02, 0.5):
+            g = Genome.random(np.random.default_rng(1), scale=scale)
+            for street in range(strategy.NUM_STREETS):
+                for r in range(strategy.RULES_PER_STREET):
+                    row = g.condition_features[street, r]
+                    assert np.count_nonzero(row != strategy.WILDCARD) >= 1
+
 
 class TestGenomeCopy:
     def test_copy_is_independent(self):
@@ -200,10 +232,11 @@ class TestGenomeCopy:
         assert g.gto_flags[0] == original_first_flag
         assert g.preflop_hole_category_mask[0, 0] == original_first_category
 
-    def test_copy_preserves_scalars(self):
-        g = make_genome(bucket_noise_std=0.07)
+    def test_copy_is_independent_for_rule_mix_actions(self):
+        g = make_genome()
         g2 = g.copy()
-        assert g2.bucket_noise_std == pytest.approx(0.07)
+        g2.rule_mix_actions[0, 0] = strategy.ACTION_ALLIN
+        assert g.rule_mix_actions[0, 0] == strategy.NO_MIX
 
 
 class TestNonzeroWeightCount:
@@ -336,6 +369,18 @@ class TestDecideRuleMatching:
         assert action_both == BET_RAISE
         assert action_one == FOLD
 
+    def test_a_condition_bucket_beyond_the_feature_num_buckets_is_clipped_not_dead(self):
+        # A stored condition bucket of 2 on a feature the genome has bucketed
+        # into only 2 groups (valid indices 0-1) must clip to bucket 1, not
+        # become a permanently unmatchable ("impossible") condition.
+        num_buckets = np.full(strategy.NUM_BUCKETABLE, 2)
+        g = genome_with_condition(
+            "hole_high_card_norm", bucket=2, action=strategy.ACTION_ALLIN, num_buckets=num_buckets,
+        )
+        situation = make_situation(hole=[Card.from_str("Ah"), Card.from_str("Kd")])  # high card norm -> 1.0, bucket 1
+        action, _ = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
+        assert action == BET_RAISE
+
 
 class TestDecideStreetRouting:
     def test_each_street_only_checks_its_own_pool(self):
@@ -416,43 +461,57 @@ class TestDecidePreflopHoleCategory:
             action, _ = g.decide(situation, legal_actions=[FOLD, CHECK_CALL, BET_RAISE])
             assert action == FOLD
 
-    def test_hole_category_check_is_exact_not_bucketed_by_noise(self):
-        # bucket_noise_std jitters ordinary conditions but must never blur
-        # which exact hole category a hand belongs to.
+    def test_hole_category_check_is_exact_not_bucketed(self):
         mask = np.zeros((strategy.RULES_PER_STREET, strategy.NUM_HOLE_CATEGORIES))
         mask[0, strategy.HOLE_CATEGORY_LABELS.index("Premium Pairs")] = 1.0
-        g = genome_with_default_action(strategy.ACTION_ALLIN, preflop_hole_category_mask=mask, bucket_noise_std=5.0)
+        g = genome_with_default_action(strategy.ACTION_ALLIN, preflop_hole_category_mask=mask)
         rng = np.random.default_rng(0)
         situation = self._situation_for_category("Junk")
         outcomes = {g.decide(situation, [FOLD, CHECK_CALL, BET_RAISE], rng=rng)[0] for _ in range(100)}
         assert outcomes == {FOLD}
 
 
-class TestDecideBucketNoise:
-    def test_zero_noise_is_deterministic(self):
-        g = genome_with_default_action(strategy.ACTION_RAISE_75, bucket_noise_std=0.0)
+class TestDecideMixActions:
+    def test_no_mix_is_deterministic(self):
+        g = genome_with_default_action(strategy.ACTION_RAISE_75)
         situation = make_situation()
         rng = np.random.default_rng(0)
         a1 = g.decide(situation, [FOLD, CHECK_CALL, BET_RAISE], rng=rng)
         a2 = g.decide(situation, [FOLD, CHECK_CALL, BET_RAISE], rng=rng)
         assert a1 == a2
 
-    def test_deterministic_without_rng_even_with_nonzero_noise(self):
-        g = genome_with_default_action(strategy.ACTION_RAISE_75, bucket_noise_std=0.5)
+    def test_deterministic_without_rng_even_when_mix(self):
+        rule_mix_actions = np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.NO_MIX)
+        rule_mix_actions[:, 0] = strategy.ACTION_FOLD
+        g = genome_with_default_action(strategy.ACTION_RAISE_75, rule_mix_actions=rule_mix_actions)
         situation = make_situation()
         results = {g.decide(situation, [FOLD, CHECK_CALL, BET_RAISE]) for _ in range(5)}
         assert len(results) == 1
 
-    def test_large_noise_can_flip_a_borderline_bucket(self):
-        # A condition requiring hole_high_card_norm's bucket 1 (threshold at
-        # 0.5) with a hand landing (Ace-King -> 1.0, comfortably bucket 1
-        # without noise) should sometimes flip to bucket 0 under large jitter.
-        g = genome_with_condition("hole_high_card_norm", bucket=1, action=strategy.ACTION_ALLIN, bucket_noise_std=0.8)
-        situation = make_situation(hole=[Card.from_str("Ah"), Card.from_str("Kd")])
+    def test_mix_with_rng_plays_both_actions_over_many_decisions(self):
+        rule_mix_actions = np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.NO_MIX)
+        rule_mix_actions[:, 0] = strategy.ACTION_FOLD
+        g = genome_with_default_action(strategy.ACTION_ALLIN, rule_mix_actions=rule_mix_actions)
+        situation = make_situation()
         rng = np.random.default_rng(0)
         outcomes = {g.decide(situation, [FOLD, CHECK_CALL, BET_RAISE], rng=rng)[0] for _ in range(200)}
         assert BET_RAISE in outcomes
         assert FOLD in outcomes
+
+    def test_mix_does_not_affect_the_mandatory_hole_category_check(self):
+        # A rule that doesn't claim a hand's hole category must still never
+        # fire, regardless of whether it's a Mix.
+        mask = np.zeros((strategy.RULES_PER_STREET, strategy.NUM_HOLE_CATEGORIES))
+        mask[0, strategy.HOLE_CATEGORY_LABELS.index("Premium Pairs")] = 1.0
+        rule_mix_actions = np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.NO_MIX)
+        rule_mix_actions[:, 0] = strategy.ACTION_CALL
+        g = genome_with_default_action(
+            strategy.ACTION_ALLIN, preflop_hole_category_mask=mask, rule_mix_actions=rule_mix_actions,
+        )
+        rng = np.random.default_rng(0)
+        junk = make_situation(hole=[Card.from_str("7h"), Card.from_str("2d")])
+        outcomes = {g.decide(junk, [FOLD, CHECK_CALL, BET_RAISE], rng=rng)[0] for _ in range(50)}
+        assert outcomes == {FOLD}
 
 
 class TestDecideGtoOverride:
@@ -576,12 +635,11 @@ class TestDecideGtoSizeSpecs(object):
 
 
 class TestGenomeMutate:
-    def test_mutate_returns_new_object_and_keeps_noise_nonnegative(self):
+    def test_mutate_returns_new_object(self):
         rng = np.random.default_rng(1)
-        g = make_genome(bucket_noise_std=0.01)
+        g = make_genome()
         mutated = g.mutate(rng, rate=1.0, continuous_scale=0.3)
         assert mutated is not g
-        assert mutated.bucket_noise_std >= 0
 
     def test_zero_rate_leaves_genes_unchanged(self):
         rng = np.random.default_rng(1)
@@ -592,8 +650,8 @@ class TestGenomeMutate:
         assert np.array_equal(mutated.condition_features, g.condition_features)
         assert np.array_equal(mutated.condition_buckets, g.condition_buckets)
         assert np.array_equal(mutated.rule_actions, g.rule_actions)
+        assert np.array_equal(mutated.rule_mix_actions, g.rule_mix_actions)
         assert np.array_equal(mutated.preflop_hole_category_mask, g.preflop_hole_category_mask)
-        assert mutated.bucket_noise_std == g.bucket_noise_std
 
     def test_full_rate_flips_hole_category_mask(self):
         rng = np.random.default_rng(1)
@@ -614,6 +672,52 @@ class TestGenomeMutate:
         mutated = g.mutate(rng, rate=1.0, continuous_scale=0.3)
         assert np.all(mutated.thresholds >= 0.0) and np.all(mutated.thresholds <= 1.0)
         assert np.all(mutated.thresholds[:, 0] <= mutated.thresholds[:, 1])
+
+    def test_full_rate_mutation_preserves_per_street_eligibility(self):
+        # A full-rate mutation could easily reassign a preflop condition to
+        # an ineligible feature -- mutate() must restrict its pool per street
+        # every time (see strategy.ELIGIBLE_CONDITION_INDICES_BY_STREET).
+        rng = np.random.default_rng(1)
+        g = Genome.random(np.random.default_rng(4))
+        for _ in range(20):
+            g = g.mutate(rng, rate=1.0, continuous_scale=0.3)
+        eligible = set(strategy.ELIGIBLE_CONDITION_INDICES_BY_STREET[strategy.PREFLOP].tolist())
+        for cf in g.condition_features[strategy.PREFLOP].flat:
+            assert cf == strategy.WILDCARD or int(cf) in eligible
+
+    def test_full_rate_mutation_keeps_rule_mix_actions_in_valid_range(self):
+        rng = np.random.default_rng(1)
+        g = Genome.random(np.random.default_rng(4))
+        mutated = g.mutate(rng, rate=1.0, continuous_scale=0.3)
+        assert np.all(mutated.rule_mix_actions >= strategy.NO_MIX)
+        assert np.all(mutated.rule_mix_actions < strategy.NUM_ACTION_CATEGORIES)
+
+    def test_mutation_never_leaves_a_rule_with_no_conditions(self):
+        # A full-rate mutation could easily reassign every one of a rule's
+        # condition slots to wildcard -- the repair pass inside mutate()
+        # must restore at least one condition every time.
+        rng = np.random.default_rng(1)
+        g = Genome.random(np.random.default_rng(4))
+        for _ in range(20):
+            g = g.mutate(rng, rate=1.0, continuous_scale=0.3)
+            for street in range(strategy.NUM_STREETS):
+                for r in range(strategy.RULES_PER_STREET):
+                    row = g.condition_features[street, r]
+                    assert np.count_nonzero(row != strategy.WILDCARD) >= 1
+
+    def test_repaired_condition_bucket_travels_with_its_repaired_feature(self):
+        # enforce_min_one_condition's repair fills a matched (feature,
+        # bucket) pair into the same slot -- confirm mutate() doesn't
+        # apply the fresh condition_buckets mutation *after* repair and
+        # accidentally desync the two (a bucket mutated for a different
+        # rng draw than the one that picked the repaired feature).
+        rng = np.random.default_rng(9)
+        g = make_genome()  # every rule wildcard -- forces a repair on every rule
+        mutated = g.mutate(rng, rate=1.0, continuous_scale=0.3)
+        for street in range(strategy.NUM_STREETS):
+            for r in range(strategy.RULES_PER_STREET):
+                row = mutated.condition_features[street, r]
+                assert np.count_nonzero(row != strategy.WILDCARD) >= 1
 
 
 class TestGenomeCrossover:
@@ -644,21 +748,25 @@ class TestGenomeCrossover:
             assert np.all(child.thresholds[from_a] == 0.1)
             assert np.all(child.thresholds[from_b] == 0.9)
 
-    def test_rule_conditions_and_action_stay_coupled_per_rule(self):
+    def test_rule_conditions_action_and_mix_action_stay_coupled_per_rule(self):
         rng = np.random.default_rng(2)
         condition_shape = (strategy.NUM_STREETS, strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE)
         cf_a = np.full(condition_shape, 1)
         cf_b = np.full(condition_shape, 2)
         actions_a = np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.ACTION_FOLD)
         actions_b = np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.ACTION_ALLIN)
-        a = make_genome(condition_features=cf_a, rule_actions=actions_a)
-        b = make_genome(condition_features=cf_b, rule_actions=actions_b)
+        mix_a = np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.NO_MIX)
+        mix_b = np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.ACTION_CALL)
+        a = make_genome(condition_features=cf_a, rule_actions=actions_a, rule_mix_actions=mix_a)
+        b = make_genome(condition_features=cf_b, rule_actions=actions_b, rule_mix_actions=mix_b)
         for _ in range(20):
             child = a.crossover(b, rng)
             from_a_rows = np.all(child.condition_features == 1, axis=-1)
             from_b_rows = np.all(child.condition_features == 2, axis=-1)
             assert np.all(child.rule_actions[from_a_rows] == strategy.ACTION_FOLD)
             assert np.all(child.rule_actions[from_b_rows] == strategy.ACTION_ALLIN)
+            assert np.all(child.rule_mix_actions[from_a_rows] == strategy.NO_MIX)
+            assert np.all(child.rule_mix_actions[from_b_rows] == strategy.ACTION_CALL)
 
     def test_preflop_hole_category_mask_stays_coupled_with_its_rule(self):
         rng = np.random.default_rng(2)
@@ -676,14 +784,6 @@ class TestGenomeCrossover:
             assert np.all(child.preflop_hole_category_mask[from_a_rows] == 0.0)
             assert np.all(child.preflop_hole_category_mask[from_b_rows] == 1.0)
 
-    def test_blended_bucket_noise_is_between_parents(self):
-        rng = np.random.default_rng(2)
-        a = make_genome(bucket_noise_std=0.1)
-        b = make_genome(bucket_noise_std=0.5)
-        for _ in range(20):
-            child = a.crossover(b, rng)
-            assert 0.1 <= child.bucket_noise_std <= 0.5
-
 
 class TestSerialization:
     def test_to_dict_from_dict_round_trip_preserves_values(self):
@@ -696,9 +796,9 @@ class TestSerialization:
         assert np.array_equal(g.condition_features, restored.condition_features)
         assert np.array_equal(g.condition_buckets, restored.condition_buckets)
         assert np.array_equal(g.rule_actions, restored.rule_actions)
+        assert np.array_equal(g.rule_mix_actions, restored.rule_mix_actions)
         assert np.array_equal(g.preflop_hole_category_mask, restored.preflop_hole_category_mask)
         assert np.array_equal(g.gto_flags, restored.gto_flags)
-        assert g.bucket_noise_std == pytest.approx(restored.bucket_noise_std)
 
     def test_to_dict_splits_rules_by_street_label(self):
         g = Genome.random(np.random.default_rng(3))
@@ -716,6 +816,14 @@ class TestSerialization:
             for rule in data["rules"][label]:
                 assert "hole_categories" not in rule
 
+    def test_to_dict_includes_mix_action_field(self):
+        rule_mix_actions = np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.NO_MIX)
+        rule_mix_actions[strategy.PREFLOP, 0] = strategy.ACTION_ALLIN
+        g = make_genome(rule_mix_actions=rule_mix_actions)
+        data = g.to_dict()
+        assert data["rules"]["Preflop"][0]["mix_action"] == strategy.ACTION_CATEGORIES[strategy.ACTION_ALLIN]
+        assert data["rules"]["Preflop"][1]["mix_action"] is None
+
     def test_from_dict_drops_unknown_feature_and_fills_missing(self, capsys):
         rng = np.random.default_rng(4)
         g = Genome.random(rng)
@@ -732,11 +840,41 @@ class TestSerialization:
         rng = np.random.default_rng(4)
         g = Genome.random(rng)
         data = g.to_dict()
-        data["rules"]["Flop"][0]["conditions"][0]["feature"] = "not_a_real_feature"
+        data["rules"]["Preflop"][0]["conditions"][0]["feature"] = "not_a_real_feature"
         restored = Genome.from_dict(data, rng)
-        assert restored.condition_features[1, 0, 0] == strategy.WILDCARD
+        assert restored.condition_features[strategy.PREFLOP, 0, 0] == strategy.WILDCARD
         captured = capsys.readouterr()
         assert "unknown" in captured.out.lower()
+
+    def test_from_dict_drops_ineligible_feature_referenced_by_preflop_rule(self, capsys):
+        rng = np.random.default_rng(4)
+        g = Genome.random(rng)
+        data = g.to_dict()
+        ineligible_feature = next(
+            strategy.CONDITION_FEATURES[i].key
+            for i in strategy._PREFLOP_EXCLUDED_INDICES
+        )
+        data["rules"]["Preflop"][0]["conditions"][0]["feature"] = ineligible_feature
+        data["rules"]["Preflop"][0]["conditions"][0]["bucket"] = 0
+        restored = Genome.from_dict(data, rng)
+        assert restored.condition_features[strategy.PREFLOP, 0, 0] == strategy.WILDCARD
+        captured = capsys.readouterr()
+        assert "aren't allowed there" in captured.out.lower()
+
+    def test_from_dict_repairs_a_rule_with_no_conditions(self, capsys):
+        # Simulates a save from before this constraint existed: a rule
+        # with every condition slot wildcard.
+        rng = np.random.default_rng(4)
+        g = Genome.random(rng)
+        data = g.to_dict()
+        data["rules"]["Flop"][0]["conditions"] = [
+            {"feature": None, "bucket": 0}, {"feature": None, "bucket": 0}, {"feature": None, "bucket": 0},
+        ]
+        restored = Genome.from_dict(data, rng)
+        row = restored.condition_features[1, 0]
+        assert np.count_nonzero(row != strategy.WILDCARD) >= 1
+        captured = capsys.readouterr()
+        assert "no conditions at all" in captured.out.lower()
 
     def test_from_dict_handles_missing_rules_for_a_street(self, capsys):
         rng = np.random.default_rng(4)
@@ -788,15 +926,13 @@ class TestSerialization:
         captured = capsys.readouterr()
         assert "hole_categories" in captured.out
 
-    def test_from_dict_handles_missing_bucket_noise(self, capsys):
-        rng = np.random.default_rng(5)
+    def test_from_dict_defaults_missing_mix_action_to_no_mix(self):
+        rng = np.random.default_rng(4)
         g = Genome.random(rng)
         data = g.to_dict()
-        del data["bucket_noise_std"]
+        del data["rules"]["Preflop"][0]["mix_action"]
         restored = Genome.from_dict(data, rng)
-        assert restored.bucket_noise_std >= 0
-        captured = capsys.readouterr()
-        assert "bucket_noise_std" in captured.out
+        assert restored.rule_mix_actions[strategy.PREFLOP, 0] == strategy.NO_MIX
 
     def test_from_dict_handles_missing_and_unknown_gto_flags(self, capsys):
         rng = np.random.default_rng(6)
@@ -816,6 +952,7 @@ class TestSerialization:
         loaded = Genome.load(str(path), rng)
         assert np.array_equal(g.condition_features, loaded.condition_features)
         assert np.array_equal(g.rule_actions, loaded.rule_actions)
+        assert np.array_equal(g.rule_mix_actions, loaded.rule_mix_actions)
         assert np.array_equal(g.preflop_hole_category_mask, loaded.preflop_hole_category_mask)
 
     def test_save_population_and_load_population_round_trip(self, tmp_path):

@@ -162,13 +162,9 @@ def rank_players(
     return sorted(players, key=score, reverse=True)
 
 
-# Sort priority for the Strategy Rules section: broad "what spot am I in"
+# Sort priority for the Feature Buckets section: broad "what spot am I in"
 # context features print first, "what just happened this street" trigger
-# features print last, so rules sharing the same context but differing only
-# on a trigger (e.g. facing a bet or not) end up as adjacent lines --
-# readable as "in this spot: checked to -> raise; raised to -> fold."
-# Anything not listed falls in the middle. This governs *report order*
-# only, not evaluation order -- see the note printed above the section.
+# features print last. Anything not listed falls in the middle.
 _REPORT_GROUP_PRIORITY = {
     "Table & Game State Features": 0,
     "Hole Card Characteristics": 1,
@@ -180,24 +176,11 @@ _REPORT_GROUP_PRIORITY = {
     "Betting Behaviour Features": 7,
 }
 _UNGROUPED_CONDITION_PRIORITY = 50
-_WILDCARD_CONDITION_KEY = (99, "", 99)
 
 
 def _condition_phrase(spec, bucket_index: int, num_buckets: int, thresholds) -> str:
     label = strategy.describe_bucket(spec, bucket_index, num_buckets, thresholds)
     return label if spec.kind == "boolean" else f"{spec.label} = {label}"
-
-
-def _rule_sort_key(condition_features, condition_buckets) -> tuple:
-    keyed = []
-    for fi, bucket in zip(condition_features, condition_buckets):
-        if fi == strategy.WILDCARD:
-            keyed.append(_WILDCARD_CONDITION_KEY)
-            continue
-        spec = strategy.CONDITION_FEATURES[int(fi)]
-        priority = _REPORT_GROUP_PRIORITY.get(group_of(spec), _UNGROUPED_CONDITION_PRIORITY)
-        keyed.append((priority, spec.key, int(bucket)))
-    return tuple(sorted(keyed))
 
 
 def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig, rank: int) -> str:
@@ -219,22 +202,19 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
     lines.append(f"- Worst single session: {min(stats.session_results, default=0.0):+.1f}")
     lines.append("")
 
+    fold_label = strategy.ACTION_CATEGORIES[strategy.ACTION_FOLD]
     total_conditions = strategy.NUM_RULES * strategy.CONDITIONS_PER_RULE
     lines.append("## How this genome decides")
     lines.append(
         "Every decision buckets a small set of features into 2-3 groups (see Feature Buckets "
         "below for this genome's own cutoffs), then checks a fixed list of rules -- first full "
-        "match wins -- and plays that rule's action (Fold, Call, one of 6 fixed-size Raises, "
-        "or All-In -- each rule picks its own raise size, see Strategy Rules below). No match "
-        "at all defaults to Fold, the same way a real range chart's blank squares are a fold."
+        f"match wins -- and plays that rule's action ({fold_label}, Call, one of 6 fixed-size "
+        "Raises, or All-In -- each rule picks its own raise size, see Strategy Rules below). A "
+        "rule can also be a \"Mix\" of two actions, played 50/50 at decision time -- the only "
+        f"source of randomness in a genome's decisions. No match at all defaults to {fold_label}, "
+        "the same way a real range chart's blank squares are a fold."
     )
     lines.append("")
-    lines.append(
-        f"- **Decision noise:** {g.bucket_noise_std:.3f} -- small randomness applied to a feature's "
-        "reading before it's bucketed, so a hand right at a threshold occasionally falls on "
-        "either side (a cheap, natural mixed strategy at the margins). Near zero means fully "
-        "deterministic."
-    )
     lines.append(
         f"- **Active rule conditions:** {g.nonzero_weight_count()} of {total_conditions} possible -- "
         "how many (feature, threshold) facts this genome's strategy actually depends on; "
@@ -305,28 +285,19 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
     lines.append(
         "Split into 4 independent rulesets, one per street -- each street has its own fixed "
         f"budget of {strategy.RULES_PER_STREET} rule slots, so a genome can't spend its whole "
-        "rule budget on one street and leave another bare. Within each street, rules are "
-        "grouped here by shared situation for readability (context features first, "
-        "situational triggers like facing a bet or call size last), **not** in true evaluation "
-        "order -- each line is tagged with its actual rule number in brackets. When two rules "
-        "*in the same street* could both match the same hand, the lower-numbered one wins; "
-        "this only matters when rules' conditions actually overlap, which is uncommon since "
-        "most rules in the same spot differ on a trigger condition (facing a bet or not, etc.) "
-        "that makes them mutually exclusive in practice. Every Preflop rule also always names "
-        "the exact hole hand categories it applies to (Premium Pairs, Axs, Suited Connectors, "
-        "Junk, etc.) -- the one axis a real preflop range chart is built around, checked "
-        "exactly rather than through the usual bucket-threshold mechanism."
+        "rule budget on one street and leave another bare. Within each street, rules are listed "
+        "in priority order exactly as checked -- top to bottom, first full match wins. Every "
+        "Preflop rule also always names the exact hole hand categories it applies to (Premium "
+        "Pairs, Axs, Suited Connectors, Junk, etc.) -- the one axis a real preflop range chart "
+        "is built around, checked exactly rather than through the usual bucket-threshold "
+        "mechanism."
     )
     lines.append("")
 
     for street, street_label in enumerate(strategy.STREET_LABELS):
         lines.append(f"### {street_label}")
         lines.append("")
-        rule_order = sorted(
-            range(strategy.RULES_PER_STREET),
-            key=lambda r: _rule_sort_key(g.condition_features[street, r], g.condition_buckets[street, r]),
-        )
-        for r in rule_order:
+        for r in range(strategy.RULES_PER_STREET):
             phrases = []
             if street == strategy.PREFLOP:
                 claimed = [
@@ -345,9 +316,9 @@ def describe_genome(player: Player, stats: PlayerStats, game_config: GameConfig,
                 thresholds = g.thresholds[row] if row >= 0 else None
                 phrases.append(_condition_phrase(spec, int(g.condition_buckets[street, r, c]), num_buckets, thresholds))
             condition_text = " AND ".join(phrases) if phrases else "*(any situation)*"
-            action = strategy.ACTION_CATEGORIES[int(g.rule_actions[street, r])]
+            action = strategy.describe_rule_action(int(g.rule_actions[street, r]), int(g.rule_mix_actions[street, r]))
             lines.append(f"- `[rule {r}]` IF {condition_text} THEN **{action}**")
-        lines.append("- `[default]` IF nothing above matched THEN **Fold**")
+        lines.append(f"- `[default]` IF nothing above matched THEN **{fold_label}**")
         lines.append("")
 
     return "\n".join(lines)

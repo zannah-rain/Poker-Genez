@@ -22,8 +22,9 @@ def make_genome_with_nonzero_count(count):
         condition_features=condition_features,
         condition_buckets=np.zeros(condition_shape, dtype=np.int64),
         rule_actions=np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.ACTION_FOLD),
+        rule_mix_actions=np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.NO_MIX),
         preflop_hole_category_mask=np.ones((strategy.RULES_PER_STREET, strategy.NUM_HOLE_CATEGORIES)),
-        bucket_noise_std=1.0, gto_flags=np.zeros(NUM_GTO_SPOTS),
+        gto_flags=np.zeros(NUM_GTO_SPOTS),
     )
 
 

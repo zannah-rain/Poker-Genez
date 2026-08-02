@@ -16,12 +16,12 @@ from tournament import (
 
 
 def make_genome(
-    condition_features=None, condition_buckets=None, rule_actions=None,
+    condition_features=None, condition_buckets=None, rule_actions=None, rule_mix_actions=None,
     preflop_hole_category_mask=None, gto_flags=None,
 ):
     """Defaults to an "empty" genome: every rule wildcard-conditioned to
-    Fold, 2 buckets (cut at 0.5) for every bucketable feature, every
-    preflop rule claiming every hole category."""
+    Fold (never a Mix), 2 buckets (cut at 0.5) for every bucketable feature,
+    every preflop rule claiming every hole category."""
     condition_shape = (strategy.NUM_STREETS, strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE)
     if condition_features is None:
         condition_features = np.full(condition_shape, strategy.WILDCARD, dtype=np.int64)
@@ -29,6 +29,8 @@ def make_genome(
         condition_buckets = np.zeros(condition_shape, dtype=np.int64)
     if rule_actions is None:
         rule_actions = np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.ACTION_FOLD)
+    if rule_mix_actions is None:
+        rule_mix_actions = np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.NO_MIX)
     if preflop_hole_category_mask is None:
         preflop_hole_category_mask = np.ones((strategy.RULES_PER_STREET, strategy.NUM_HOLE_CATEGORIES))
     if gto_flags is None:
@@ -37,8 +39,9 @@ def make_genome(
         num_buckets=np.full(strategy.NUM_BUCKETABLE, 2),
         thresholds=np.full((strategy.NUM_BUCKETABLE, strategy.MAX_BUCKETS - 1), 0.5),
         condition_features=condition_features, condition_buckets=condition_buckets,
-        rule_actions=rule_actions, preflop_hole_category_mask=preflop_hole_category_mask,
-        bucket_noise_std=1.0, gto_flags=gto_flags,
+        rule_actions=rule_actions, rule_mix_actions=rule_mix_actions,
+        preflop_hole_category_mask=preflop_hole_category_mask,
+        gto_flags=gto_flags,
     )
 
 
@@ -223,6 +226,13 @@ class TestDescribeGenome:
         stats = PlayerStats(player_id=1)
         report = describe_genome(player, stats, GameConfig(), rank=1)
         assert "No rule references a feature" in report
+
+    def test_fold_action_reads_check_fold_give_up(self):
+        player = Player(player_id=1, genome=make_genome())  # every rule defaults to Fold
+        stats = PlayerStats(player_id=1)
+        report = describe_genome(player, stats, GameConfig(), rank=1)
+        assert "**Check / Fold (Give up)**" in report
+        assert "**Fold**" not in report
 
     def test_report_lists_referenced_features_and_rule(self):
         condition_shape = (strategy.NUM_STREETS, strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE)

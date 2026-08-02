@@ -24,21 +24,24 @@ delegates to):
      condition competing for one of a rule's CONDITIONS_PER_RULE slots (or
      counting against nonzero_weight_count()'s complexity accounting) --
      it's simply which pool it lives in.
-  3. Within that street's pool, check its rules in fixed order; each is a
-     small conjunction of up to CONDITIONS_PER_RULE (feature, required
-     bucket) checks (or a wildcard "don't care"). Every *preflop* rule also
-     always carries a mandatory hole_category_mask -- which of the 12
-     hole-hand-category buckets (Premium Pairs, Axs, Suited Connectors,
-     Junk, etc. -- features.py's hole_hand_category_norm) it applies to,
-     checked exactly (not bucketed/jittered like everything else) since
-     that's the one axis a real preflop range chart is built around. Like
-     street, this doesn't count against nonzero_weight_count() either.
-     First full match wins -- the same idiom gto.py's
-     GTOSpot.action_ranges/SpotMatcher already use.
-  4. That rule's action category -- Fold / Call / one of 6 fixed-size Raises
-     (25/50/75/100/125/150% pot) / All-In -- is what gets played. No match at
-     all defaults to Fold (mirrors GTOSpot.default_action's "everything not
-     colored in is a fold").
+  3. Within that street's pool, check its rules in fixed array order (which
+     also doubles as the priority order shown in exported reports -- see
+     tournament.py); each is a small conjunction of up to CONDITIONS_PER_RULE
+     (feature, required bucket) checks (or a wildcard "don't care"). Every
+     *preflop* rule also always carries a mandatory hole_category_mask --
+     which of the 12 hole-hand-category buckets (Premium Pairs, Axs, Suited
+     Connectors, Junk, etc. -- features.py's hole_hand_category_norm) it
+     applies to, checked exactly (not bucketed) since that's the one axis a
+     real preflop range chart is built around. Like street, this doesn't
+     count against nonzero_weight_count() either. First full match wins --
+     the same idiom gto.py's GTOSpot.action_ranges/SpotMatcher already use.
+  4. That rule's action -- Fold / Call / one of 6 fixed-size Raises
+     (25/50/75/100/125/150% pot) / All-In -- is what gets played, *or* a
+     "Mix" of two such actions, played 50/50 at decision time (see
+     strategy.resolve_rule_action) -- the only source of randomized
+     behavior in a genome's decisions; there's no separate noise mechanism.
+     No rule matching at all defaults to Fold (mirrors GTOSpot.default_
+     action's "everything not colored in is a fold").
 
 Every decision re-evaluates its street's rule pool fresh from the current
 Situation -- there's no memory of "I'm currently bluffing" carried between
@@ -83,18 +86,12 @@ ACTION_NAMES = ["fold", "check/call", "bet/raise"]
 # crossover some initial material.
 GTO_INIT_PROB = 0.1
 
-# Init center/spread for bucket_noise_std -- small, since it lives on
-# features.py's native 0-1 scale (jittering a normalized feature value, not
-# a V/L-style percentile) and is meant to only nudge borderline calls near a
-# threshold, not meaningfully blur the strategy.
-BUCKET_NOISE_STD_INIT = (0.03, 0.03)  # (center, spread), then abs()
-
 
 def mutate_bool_flags(flags: np.ndarray, rate: float, rng: np.random.Generator) -> np.ndarray:
     """Bit-flip mutation for boolean genes (0.0/1.0 floats): each selected
     gene flips to its opposite, rather than being nudged like a continuous
     value or alphabet-jumped like a categorical one -- there's nothing "in
-    between" on or off. Used for gto_flags."""
+    between" on or off. Used for preflop_hole_category_mask and gto_flags."""
     mask = rng.random(flags.shape) < rate
     return np.where(mask, 1.0 - flags, flags)
 
@@ -118,38 +115,38 @@ class Genome:
     up-to-3 (feature, required bucket) conditions, indexed [street][rule]
     (street: 0=preflop, 1=flop, 2=turn, 3=river, matching Situation.street);
     condition_features entries are strategy.WILDCARD for an inactive ("don't
-    care") slot.
-    rule_actions: (strategy.NUM_STREETS, strategy.RULES_PER_STREET) -- each
-    rule's action category (index into strategy.ACTION_CATEGORIES -- Fold,
-    Call, one of 6 fixed-size Raises, or All-In; each rule picks its own
-    raise size independently, so there's no separate genome-wide raise-size
-    gene).
+    care") slot. A stored bucket that its feature's current num_buckets
+    doesn't have is clipped down to the highest one that does exist rather
+    than ever left dangling (see strategy.effective_condition_bucket).
+    rule_actions/rule_mix_actions: (strategy.NUM_STREETS,
+    strategy.RULES_PER_STREET) -- each rule's action (index into
+    strategy.ACTION_CATEGORIES -- Fold, Call, one of 6 fixed-size Raises, or
+    All-In; each rule picks its own raise size independently). If
+    rule_mix_actions is strategy.NO_MIX, the rule always plays rule_actions;
+    otherwise it's a "Mix" -- a 50/50 coin flip between rule_actions and
+    rule_mix_actions every time it fires (see strategy.resolve_rule_action).
     preflop_hole_category_mask: (strategy.RULES_PER_STREET,
     strategy.NUM_HOLE_CATEGORIES) -- mandatory for every rule in the preflop
     pool (street index strategy.PREFLOP) only: which of the 12
     hole-hand-category buckets that rule applies to (1.0 = applies, 0.0 =
     doesn't). Checked exactly against the current hand's hole hand category,
     not through the usual bucket-threshold mechanism -- see strategy.py.
-    bucket_noise_std: small Gaussian jitter applied to a feature's
-    normalized value before bucketing it, giving cheap, natural mixed-
-    strategy behavior right at a threshold boundary.
     gto_flags: unchanged from before -- see module docstring.
     """
 
     __slots__ = (
         "num_buckets", "thresholds",
-        "condition_features", "condition_buckets", "rule_actions",
+        "condition_features", "condition_buckets", "rule_actions", "rule_mix_actions",
         "preflop_hole_category_mask",
-        "bucket_noise_std",
         "gto_flags",
     )
 
     def __init__(
         self,
         num_buckets: np.ndarray, thresholds: np.ndarray,
-        condition_features: np.ndarray, condition_buckets: np.ndarray, rule_actions: np.ndarray,
+        condition_features: np.ndarray, condition_buckets: np.ndarray,
+        rule_actions: np.ndarray, rule_mix_actions: np.ndarray,
         preflop_hole_category_mask: np.ndarray,
-        bucket_noise_std: float,
         gto_flags: np.ndarray,
     ):
         self.num_buckets = num_buckets
@@ -157,8 +154,8 @@ class Genome:
         self.condition_features = condition_features
         self.condition_buckets = condition_buckets
         self.rule_actions = rule_actions
+        self.rule_mix_actions = rule_mix_actions
         self.preflop_hole_category_mask = preflop_hole_category_mask
-        self.bucket_noise_std = bucket_noise_std
         self.gto_flags = gto_flags
 
     @classmethod
@@ -172,28 +169,41 @@ class Genome:
         thresholds = np.sort(rng.random((strategy.NUM_BUCKETABLE, strategy.MAX_BUCKETS - 1)), axis=-1)
 
         active_prob = float(np.clip(strategy.CONDITION_ACTIVE_INIT_PROB * (scale / 0.5), 0.0, 1.0))
-        condition_shape = (strategy.NUM_STREETS, strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE)
-        random_features = rng.integers(0, strategy.NUM_CONDITION_FEATURES, size=condition_shape)
-        is_active = rng.random(condition_shape) < active_prob
+        per_street_shape = (strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE)
+        # Each street draws its random feature choices from its own eligible
+        # pool (preflop excludes board/made-hand features that need a board
+        # that doesn't exist yet -- see strategy.ELIGIBLE_CONDITION_INDICES_BY_STREET).
+        random_features = np.stack([
+            rng.choice(strategy.ELIGIBLE_CONDITION_INDICES_BY_STREET[street], size=per_street_shape)
+            for street in range(strategy.NUM_STREETS)
+        ])
+        is_active = rng.random(random_features.shape) < active_prob
         condition_features = np.where(is_active, random_features, strategy.WILDCARD)
-        condition_buckets = rng.integers(0, strategy.MAX_BUCKETS, size=condition_shape)
-        rule_actions = rng.integers(
-            0, strategy.NUM_ACTION_CATEGORIES, size=(strategy.NUM_STREETS, strategy.RULES_PER_STREET)
-        )
+        condition_buckets = rng.integers(0, strategy.MAX_BUCKETS, size=random_features.shape)
+        # A rule with every slot wildcard is indistinguishable from the
+        # pool's own trailing default -- never a meaningful thing for a rule
+        # itself to be (see strategy.enforce_min_one_condition).
+        for street in range(strategy.NUM_STREETS):
+            condition_features[street], condition_buckets[street], _ = strategy.enforce_min_one_condition(
+                condition_features[street], condition_buckets[street],
+                strategy.ELIGIBLE_CONDITION_INDICES_BY_STREET[street], rng,
+            )
+
+        action_shape = (strategy.NUM_STREETS, strategy.RULES_PER_STREET)
+        rule_actions = rng.integers(0, strategy.NUM_ACTION_CATEGORIES, size=action_shape)
+        is_mix = rng.random(action_shape) < strategy.MIX_INIT_PROB
+        random_mix = rng.integers(0, strategy.NUM_ACTION_CATEGORIES, size=action_shape)
+        rule_mix_actions = np.where(is_mix, random_mix, strategy.NO_MIX)
 
         preflop_hole_category_mask = (
             rng.random((strategy.RULES_PER_STREET, strategy.NUM_HOLE_CATEGORIES)) < strategy.HOLE_CATEGORY_INIT_PROB
         ).astype(np.float64)
 
-        center, spread = BUCKET_NOISE_STD_INIT
-        bucket_noise_std = abs(float(rng.normal(center, spread)))
-
         return cls(
             num_buckets=num_buckets, thresholds=thresholds,
             condition_features=condition_features, condition_buckets=condition_buckets,
-            rule_actions=rule_actions,
+            rule_actions=rule_actions, rule_mix_actions=rule_mix_actions,
             preflop_hole_category_mask=preflop_hole_category_mask,
-            bucket_noise_std=bucket_noise_std,
             gto_flags=(rng.random(NUM_GTO_SPOTS) < GTO_INIT_PROB).astype(np.float64),
         )
 
@@ -221,9 +231,11 @@ class Genome:
                         "feature": strategy.CONDITION_FEATURES[fi].key if fi != strategy.WILDCARD else None,
                         "bucket": int(self.condition_buckets[street, r, c]),
                     })
+                mix_idx = int(self.rule_mix_actions[street, r])
                 rule = {
                     "conditions": conditions,
                     "action": strategy.ACTION_CATEGORIES[int(self.rule_actions[street, r])],
+                    "mix_action": strategy.ACTION_CATEGORIES[mix_idx] if mix_idx != strategy.NO_MIX else None,
                 }
                 if street == strategy.PREFLOP:
                     rule["hole_categories"] = [
@@ -236,7 +248,6 @@ class Genome:
         return {
             "feature_buckets": feature_buckets,
             "rules": rules,
-            "bucket_noise_std": float(self.bucket_noise_std),
             "gto_flags": {spot.key: float(flag) for spot, flag in zip(GTO_SPOTS, self.gto_flags)},
         }
 
@@ -292,12 +303,16 @@ class Genome:
         condition_shape = (strategy.NUM_STREETS, strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE)
         condition_features = np.full(condition_shape, strategy.WILDCARD, dtype=np.int64)
         condition_buckets = np.zeros(condition_shape, dtype=np.int64)
-        rule_actions = np.zeros((strategy.NUM_STREETS, strategy.RULES_PER_STREET), dtype=np.int64)
+        action_shape = (strategy.NUM_STREETS, strategy.RULES_PER_STREET)
+        rule_actions = np.zeros(action_shape, dtype=np.int64)
+        rule_mix_actions = np.full(action_shape, strategy.NO_MIX, dtype=np.int64)
         preflop_hole_category_mask = np.zeros((strategy.RULES_PER_STREET, strategy.NUM_HOLE_CATEGORIES), dtype=np.float64)
         hole_category_index_by_label = {label: i for i, label in enumerate(strategy.HOLE_CATEGORY_LABELS)}
         action_index_by_name = {name: i for i, name in enumerate(strategy.ACTION_CATEGORIES)}
         unknown_rule_features = set()
         unknown_hole_categories = set()
+        ineligible_preflop_features = set()
+        repaired_no_condition_by_street: dict[str, int] = {}
 
         for street, street_label in enumerate(strategy.STREET_LABELS):
             saved_rules = saved_rules_by_street.get(street_label, [])
@@ -317,11 +332,22 @@ class Genome:
                             condition_features[street, r, c] = strategy.WILDCARD
                             continue
                         try:
-                            condition_features[street, r, c] = strategy.feature_index(feature_key)
+                            fi = strategy.feature_index(feature_key)
                         except KeyError:
                             unknown_rule_features.add(feature_key)
                             condition_features[street, r, c] = strategy.WILDCARD
+                            continue
+                        # Some features are meaningless preflop (no board yet, or
+                        # nothing to compare the hole cards against) -- a save
+                        # containing one there (e.g. from before this restriction
+                        # existed) has it dropped, same as an unknown one.
+                        if street == strategy.PREFLOP and fi not in strategy.ELIGIBLE_CONDITION_INDICES_BY_STREET[street]:
+                            ineligible_preflop_features.add(feature_key)
+                            condition_features[street, r, c] = strategy.WILDCARD
+                            continue
+                        condition_features[street, r, c] = fi
                     rule_actions[street, r] = action_index_by_name.get(rule.get("action"), strategy.ACTION_FOLD)
+                    rule_mix_actions[street, r] = action_index_by_name.get(rule.get("mix_action"), strategy.NO_MIX)
                     if street == strategy.PREFLOP:
                         for label in rule.get("hole_categories", []):
                             if label in hole_category_index_by_label:
@@ -337,32 +363,54 @@ class Genome:
                                 rng.random(strategy.NUM_HOLE_CATEGORIES) < strategy.HOLE_CATEGORY_INIT_PROB
                             )
                 else:
-                    random_features = rng.integers(0, strategy.NUM_CONDITION_FEATURES, size=strategy.CONDITIONS_PER_RULE)
+                    eligible = strategy.ELIGIBLE_CONDITION_INDICES_BY_STREET[street]
+                    random_features = rng.choice(eligible, size=strategy.CONDITIONS_PER_RULE)
                     is_active = rng.random(strategy.CONDITIONS_PER_RULE) < strategy.CONDITION_ACTIVE_INIT_PROB
                     condition_features[street, r] = np.where(is_active, random_features, strategy.WILDCARD)
                     condition_buckets[street, r] = rng.integers(0, strategy.MAX_BUCKETS, size=strategy.CONDITIONS_PER_RULE)
                     rule_actions[street, r] = rng.integers(0, strategy.NUM_ACTION_CATEGORIES)
+                    rule_mix_actions[street, r] = (
+                        int(rng.integers(0, strategy.NUM_ACTION_CATEGORIES))
+                        if rng.random() < strategy.MIX_INIT_PROB else strategy.NO_MIX
+                    )
                     if street == strategy.PREFLOP:
                         preflop_hole_category_mask[r] = (
                             rng.random(strategy.NUM_HOLE_CATEGORIES) < strategy.HOLE_CATEGORY_INIT_PROB
                         )
+            # A saved rule with no conditions at all (e.g. from before this
+            # constraint existed) is indistinguishable from the pool's own
+            # trailing default -- repaired the same way a freshly random or
+            # freshly mutated all-wildcard rule is (see
+            # strategy.enforce_min_one_condition).
+            condition_features[street], condition_buckets[street], num_repaired = strategy.enforce_min_one_condition(
+                condition_features[street], condition_buckets[street],
+                strategy.ELIGIBLE_CONDITION_INDICES_BY_STREET[street], rng,
+            )
+            if num_repaired:
+                repaired_no_condition_by_street[street_label] = num_repaired
         if unknown_rule_features:
             print(
                 f"Warning: ignoring {len(unknown_rule_features)} unknown feature(s) referenced by saved "
                 f"genome's rules (no longer in the feature catalog): {', '.join(sorted(unknown_rule_features))}"
+            )
+        if ineligible_preflop_features:
+            print(
+                f"Warning: ignoring {len(ineligible_preflop_features)} feature(s) referenced by saved "
+                "genome's Preflop rules that aren't allowed there (need a board, or something to compare "
+                f"the hole cards against, that doesn't exist preflop): {', '.join(sorted(ineligible_preflop_features))}"
+            )
+        if repaired_no_condition_by_street:
+            total_repaired = sum(repaired_no_condition_by_street.values())
+            detail = ", ".join(f"{n} {label}" for label, n in repaired_no_condition_by_street.items())
+            print(
+                f"Warning: {total_repaired} rule(s) in saved genome had no conditions at all -- adding one "
+                f"random condition to each ({detail})."
             )
         if unknown_hole_categories:
             print(
                 f"Warning: ignoring {len(unknown_hole_categories)} unknown hole hand category label(s) in "
                 f"saved genome's preflop rules (no longer in the catalog): {', '.join(sorted(unknown_hole_categories))}"
             )
-
-        if "bucket_noise_std" in data:
-            bucket_noise_std = float(data["bucket_noise_std"])
-        else:
-            print("Warning: 'bucket_noise_std' missing from saved genome -- initializing randomly.")
-            center, spread = BUCKET_NOISE_STD_INIT
-            bucket_noise_std = abs(float(rng.normal(center, spread)))
 
         saved_gto = data.get("gto_flags", {})
         gto_keys = [spot.key for spot in GTO_SPOTS]
@@ -387,8 +435,9 @@ class Genome:
         )
 
         return cls(
-            num_buckets, thresholds, condition_features, condition_buckets, rule_actions,
-            preflop_hole_category_mask, bucket_noise_std, gto_flags,
+            num_buckets, thresholds, condition_features, condition_buckets,
+            rule_actions, rule_mix_actions,
+            preflop_hole_category_mask, gto_flags,
         )
 
     def save(self, path: str) -> None:
@@ -404,44 +453,59 @@ class Genome:
     def copy(self) -> "Genome":
         return Genome(
             self.num_buckets.copy(), self.thresholds.copy(),
-            self.condition_features.copy(), self.condition_buckets.copy(), self.rule_actions.copy(),
+            self.condition_features.copy(), self.condition_buckets.copy(),
+            self.rule_actions.copy(), self.rule_mix_actions.copy(),
             self.preflop_hole_category_mask.copy(),
-            self.bucket_noise_std,
             self.gto_flags.copy(),
         )
 
     def mutate(self, rng: np.random.Generator, rate: float, continuous_scale: float) -> "Genome":
         """Returns a mutated copy. Each gene kind gets the operator that
         matches its structure (see strategy.py for the reasoning behind
-        each): num_buckets bit-flips between 2/3; thresholds and
-        bucket_noise_std get additive-gaussian noise rescaled for their 0-1
-        domain (see strategy.THRESHOLD_MUTATION_SCALE_FACTOR); condition
-        features get a full random reassignment (no meaningful "nudge" for
-        feature identity); condition buckets and rule actions get the
-        nudge-mostly/jump-sometimes blend, since those integers *are*
-        meaningfully ordered (rule actions run Fold < Call < Raise 25% < ...
-        < Raise 150% < All-In, so a nudge means "slightly more/less
-        aggressive, or a slightly bigger/smaller raise"); preflop_hole_
-        category_mask and gto_flags bit-flip (same operator, reused --
-        there's nothing "in between" a rule claiming a hole category or a
-        genome trusting a GTO chart, same as any other boolean gene). Each
-        gene is independently selected for mutation with probability `rate`,
-        whichever kind it is."""
+        each): num_buckets bit-flips between 2/3; thresholds get additive-
+        gaussian noise rescaled for their 0-1 domain (see
+        strategy.THRESHOLD_MUTATION_SCALE_FACTOR); condition features get a
+        full random reassignment (no meaningful "nudge" for feature
+        identity), restricted per street to that street's eligible pool
+        (preflop excludes features that need a board -- see
+        strategy.ELIGIBLE_CONDITION_INDICES_BY_STREET); condition buckets
+        and rule_actions get the nudge-mostly/jump-sometimes blend, since
+        those integers *are* meaningfully ordered (rule actions run
+        Check/Fold < Call < Raise 25% < ... < Raise 150% < All-In, so a
+        nudge means "slightly more/less aggressive, or a slightly bigger/
+        smaller raise"); rule_mix_actions gets a full random reassignment
+        like condition features (turning a rule into/out of a Mix isn't an
+        incremental move); preflop_hole_category_mask and gto_flags
+        bit-flip (same operator, reused -- there's nothing "in between" a
+        rule claiming a hole category or a genome trusting a GTO chart,
+        same as any other boolean gene). Each gene is independently
+        selected for mutation with probability `rate`, whichever kind it is.
+        A repair pass afterward restores any rule mutation reduced to all-
+        wildcard back to having at least one condition (see
+        strategy.enforce_min_one_condition)."""
         threshold_scale = continuous_scale * strategy.THRESHOLD_MUTATION_SCALE_FACTOR
 
-        def mutate_noise_std(value: float) -> float:
-            if rng.random() < rate:
-                value = value + float(rng.normal(0, threshold_scale))
-            return abs(value)
+        condition_buckets = strategy.mutate_condition_buckets(self.condition_buckets, rate, rng)
+        condition_features = []
+        for street in range(strategy.NUM_STREETS):
+            mutated_features = strategy.mutate_condition_features(
+                self.condition_features[street], rate, rng, strategy.ELIGIBLE_CONDITION_INDICES_BY_STREET[street],
+            )
+            repaired_features, repaired_buckets, _ = strategy.enforce_min_one_condition(
+                mutated_features, condition_buckets[street], strategy.ELIGIBLE_CONDITION_INDICES_BY_STREET[street], rng,
+            )
+            condition_features.append(repaired_features)
+            condition_buckets[street] = repaired_buckets
+        condition_features = np.stack(condition_features)
 
         return Genome(
             strategy.mutate_num_buckets(self.num_buckets, rate, rng),
             strategy.mutate_thresholds(self.thresholds, rate, threshold_scale, rng),
-            strategy.mutate_condition_features(self.condition_features, rate, rng),
-            strategy.mutate_condition_buckets(self.condition_buckets, rate, rng),
+            condition_features,
+            condition_buckets,
             strategy.mutate_rule_actions(self.rule_actions, rate, rng),
+            strategy.mutate_rule_mix_actions(self.rule_mix_actions, rate, rng),
             mutate_bool_flags(self.preflop_hole_category_mask, rate, rng),
-            mutate_noise_std(self.bucket_noise_std),
             mutate_bool_flags(self.gto_flags, rate, rng),
         )
 
@@ -452,13 +516,12 @@ class Genome:
         num_buckets always travels with its own thresholds (never a bucket
         count from one parent paired with cut points sized for a different
         count), and -- across every street's pool at once, one coin flip per
-        (street, rule) slot -- a rule's conditions, action, and (for preflop)
-        hole_category_mask always travel together (never a feature index
-        from one parent matched against an unrelated bucket index from the
-        other, or a hole-category claim that belonged to a different rule's
-        conditions). gto_flags are independent per-gene choices, so they use
-        plain uniform crossover; bucket_noise_std is a genuinely continuous
-        scalar, so it keeps blend crossover."""
+        (street, rule) slot -- a rule's conditions, action, mix action, and
+        (for preflop) hole_category_mask always travel together (never a
+        feature index from one parent matched against an unrelated bucket
+        index from the other, or a hole-category claim that belonged to a
+        different rule's conditions). gto_flags are independent per-gene
+        choices, so they use plain uniform crossover."""
         feature_mask = strategy.row_crossover_mask(strategy.NUM_BUCKETABLE, rng)
         num_buckets = strategy.apply_row_mask(self.num_buckets, other.num_buckets, feature_mask)
         thresholds = strategy.apply_row_mask(self.thresholds, other.thresholds, feature_mask)
@@ -483,19 +546,21 @@ class Genome:
             other.rule_actions.reshape(num_rule_slots),
             rule_mask_flat,
         ).reshape(self.rule_actions.shape)
+        rule_mix_actions = strategy.apply_row_mask(
+            self.rule_mix_actions.reshape(num_rule_slots),
+            other.rule_mix_actions.reshape(num_rule_slots),
+            rule_mask_flat,
+        ).reshape(self.rule_mix_actions.shape)
 
         preflop_rule_mask = rule_mask_flat.reshape(strategy.NUM_STREETS, strategy.RULES_PER_STREET)[strategy.PREFLOP]
         preflop_hole_category_mask = strategy.apply_row_mask(
             self.preflop_hole_category_mask, other.preflop_hole_category_mask, preflop_rule_mask,
         )
 
-        alpha = rng.uniform(0.0, 1.0)
-        bucket_noise_std = abs(alpha * self.bucket_noise_std + (1 - alpha) * other.bucket_noise_std)
-
         return Genome(
-            num_buckets, thresholds, condition_features, condition_buckets, rule_actions,
+            num_buckets, thresholds, condition_features, condition_buckets,
+            rule_actions, rule_mix_actions,
             preflop_hole_category_mask,
-            bucket_noise_std,
             uniform_crossover(self.gto_flags, other.gto_flags, rng),
         )
 
@@ -536,23 +601,26 @@ class Genome:
 
         features = extract_features(situation)
         condition_values = features[strategy.CONDITION_FEATURES_FULL_INDEX]
-        buckets = strategy.compute_all_buckets(
-            condition_values, self.num_buckets, self.thresholds, self.bucket_noise_std, rng,
-        )
+        buckets = strategy.compute_all_buckets(condition_values, self.num_buckets, self.thresholds)
 
         street = situation.street
         if street == strategy.PREFLOP:
             hole_category = strategy.hole_category_index(condition_values)
-            action_idx = strategy.first_matching_preflop_rule(
-                buckets, self.condition_features[street], self.condition_buckets[street], self.rule_actions[street],
+            rule_idx = strategy.first_matching_preflop_rule_index(
+                buckets, self.condition_features[street], self.condition_buckets[street], self.num_buckets,
                 self.preflop_hole_category_mask, hole_category,
             )
         else:
-            action_idx = strategy.first_matching_rule(
-                buckets, self.condition_features[street], self.condition_buckets[street], self.rule_actions[street],
+            rule_idx = strategy.first_matching_rule_index(
+                buckets, self.condition_features[street], self.condition_buckets[street], self.num_buckets,
             )
-        if action_idx is None:
+
+        if rule_idx is None:
             action_idx = strategy.ACTION_FOLD  # no rule matched: default to Fold, like a real chart's blank squares
+        else:
+            action_idx = strategy.resolve_rule_action(
+                int(self.rule_actions[street, rule_idx]), int(self.rule_mix_actions[street, rule_idx]), rng,
+            )
 
         if action_idx == strategy.ACTION_FOLD:
             action = FOLD if FOLD in legal_actions else CHECK_CALL
