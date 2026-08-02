@@ -156,7 +156,10 @@ def _render_sidebar(
 
     for key, importance in feature_order:
         col = _feature_col(key)
-        role = st.sidebar.selectbox(f"{key}  (SHAP {importance:.4f})", ROLES, key=f"role::{key}")
+        label = f"{cfr_features.feature_label(key)}  (SHAP {importance:.4f})"
+        role = st.sidebar.selectbox(
+            label, ROLES, key=f"role::{key}", help=cfr_features.feature_description(key),
+        )
         if role == ROLE_FILTER:
             observed = [c for c in cfr_features.bucket_categories(key) if c in set(df[col])]
             filters[key] = st.sidebar.multiselect("keep values", observed, default=observed, key=f"filter::{key}")
@@ -167,9 +170,11 @@ def _render_sidebar(
 
     if len(table_split_keys) > MAX_TABLE_SPLIT_FEATURES:
         kept, dropped = table_split_keys[:MAX_TABLE_SPLIT_FEATURES], table_split_keys[MAX_TABLE_SPLIT_FEATURES:]
+        kept_labels = ", ".join(cfr_features.feature_label(k) for k in kept)
+        dropped_labels = ", ".join(cfr_features.feature_label(k) for k in dropped)
         st.error(
             f"Only {MAX_TABLE_SPLIT_FEATURES} features can be used as table splits at once -- "
-            f"using {', '.join(kept)} (by SHAP rank) and ignoring {', '.join(dropped)}. Change one "
+            f"using {kept_labels} (by SHAP rank) and ignoring {dropped_labels}. Change one "
             "of those features' roles to use a different pair."
         )
         table_split_keys = kept
@@ -196,13 +201,22 @@ def _render_table(group_df: pd.DataFrame, table_split_keys: list[str], collapsed
         counts = pd.DataFrame({"n": [len(view)]}, index=["All rows"])
     elif len(table_split_keys) == 1:
         idx_col = _feature_col(table_split_keys[0])
+        row_label = cfr_features.feature_label(table_split_keys[0])
         summary = view.groupby(idx_col, observed=True)[action_cols].mean()
         counts = view.groupby(idx_col, observed=True).size().to_frame("n")
+        summary.index.name = row_label
+        counts.index.name = row_label
     else:
         row_col, col_col = _feature_col(table_split_keys[0]), _feature_col(table_split_keys[1])
+        row_label = cfr_features.feature_label(table_split_keys[0])
+        col_label = cfr_features.feature_label(table_split_keys[1])
         summary = pd.pivot_table(view, values=action_cols, index=row_col, columns=col_col, aggfunc="mean", observed=True)
         summary = summary.swaplevel(axis=1).sort_index(axis=1, level=0)
         counts = pd.pivot_table(view, values=action_cols[0], index=row_col, columns=col_col, aggfunc="count", observed=True)
+        summary.index.name = row_label
+        counts.index.name = row_label
+        summary.columns = summary.columns.set_names(col_label, level=0)
+        counts.columns.name = col_label
 
     st.dataframe((summary * 100).round(1).astype(str) + "%")
     with st.expander(f"Sample counts (total n={len(view):,})"):
@@ -247,7 +261,9 @@ def main() -> None:
                 continue
             if not isinstance(group_values, tuple):
                 group_values = (group_values,)
-            header = ", ".join(f"{k} = {v}" for k, v in zip(group_split_keys, group_values))
+            header = ", ".join(
+                f"{cfr_features.feature_label(k)} = {v}" for k, v in zip(group_split_keys, group_values)
+            )
             st.subheader(f"{header}  (n={len(group_df):,})")
             _render_table(group_df, table_split_keys, collapsed)
 

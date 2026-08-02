@@ -50,6 +50,19 @@ def extract_subset(situation, indices: np.ndarray) -> np.ndarray:
     return extract_features(situation)[indices].astype(np.float32)
 
 
+def feature_label(key: str) -> str:
+    """Short human-readable name for `key` (features.FeatureSpec.label) --
+    the name a strategy.md export would use, for display in place of the
+    raw internal key."""
+    return _SPEC_BY_KEY[key].label
+
+
+def feature_description(key: str) -> str:
+    """Precise definition of how `key` is computed
+    (features.FeatureSpec.description) -- for a hover tooltip."""
+    return _SPEC_BY_KEY[key].description
+
+
 def bucket_label(key: str, value: float) -> str:
     """Human-readable label for one raw normalized feature value -- for a
     boolean feature, `spec.label`/f"Not {spec.label}" (mirrors
