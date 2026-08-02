@@ -64,8 +64,8 @@ class TestPopulationInit:
         seeds = [Genome.random(np.random.default_rng(0)) for _ in range(2)]
         pop = Population(cfg, np.random.default_rng(1), seed_genomes=seeds)
         assert len(pop.players) == 6
-        assert np.array_equal(pop.players[0].genome.condition_features, seeds[0].condition_features)
-        assert np.array_equal(pop.players[1].genome.condition_features, seeds[1].condition_features)
+        assert pop.players[0].genome.rules_by_street == seeds[0].rules_by_street
+        assert pop.players[1].genome.rules_by_street == seeds[1].rules_by_street
 
     def test_seed_genomes_longer_than_population_are_truncated(self):
         cfg = GAConfig(population_size=3)
@@ -77,8 +77,13 @@ class TestPopulationInit:
         cfg = GAConfig(population_size=2)
         seeds = [Genome.random(np.random.default_rng(0)) for _ in range(2)]
         pop = Population(cfg, np.random.default_rng(1), seed_genomes=seeds)
-        pop.players[0].genome.condition_features[0, 0, 0] = 999
-        assert seeds[0].condition_features[0, 0, 0] != 999
+        original_rules = seeds[0].rules_by_street
+        # Genome.copy() shares the same immutable rule tuples by reference
+        # (safe -- nothing about a Rule/Action/Condition can ever be mutated
+        # in place) -- reassigning the player's own genome attribute must
+        # not be able to reach back and change the seed's.
+        pop.players[0].genome.rules_by_street = ()
+        assert seeds[0].rules_by_street == original_rules
 
 
 class TestPopulationEvolve:
@@ -104,7 +109,7 @@ class TestPopulationEvolve:
         next_gen = pop.evolve(fitness)
         elites_in_next_gen = next_gen[:2]
         for elite, original in zip(elites_in_next_gen, best_two):
-            assert np.array_equal(elite.genome.condition_features, original.genome.condition_features)
+            assert elite.genome.rules_by_street == original.genome.rules_by_street
             assert elite.genome is not original.genome  # copied, not shared
 
     def test_new_player_ids_are_unique_and_continue_counting(self):
@@ -168,12 +173,15 @@ class TestIslandModel:
         island_cfg = IslandConfig(num_islands=2, migration_interval=0)
         seeds = [Genome.random(np.random.default_rng(i)) for i in range(12)]
         model = IslandModel(ga_cfg, island_cfg, np.random.default_rng(0), seed_genomes=seeds)
-        island0_weights = {p.genome.condition_features.tobytes() for p in model.islands[0].players}
-        island1_weights = {p.genome.condition_features.tobytes() for p in model.islands[1].players}
-        expected0 = {seeds[i].condition_features.tobytes() for i in range(0, 12, 2)}
-        expected1 = {seeds[i].condition_features.tobytes() for i in range(1, 12, 2)}
-        assert island0_weights == expected0
-        assert island1_weights == expected1
+        # Rule/Action/Condition are frozen dataclasses -- structurally
+        # hashable/comparable for free, so a genome's rule content can be
+        # used as a set key directly rather than hashing a raw array.
+        island0_rules = {p.genome.rules_by_street for p in model.islands[0].players}
+        island1_rules = {p.genome.rules_by_street for p in model.islands[1].players}
+        expected0 = {seeds[i].rules_by_street for i in range(0, 12, 2)}
+        expected1 = {seeds[i].rules_by_street for i in range(1, 12, 2)}
+        assert island0_rules == expected0
+        assert island1_rules == expected1
 
     def test_evolve_all_increments_generation(self):
         ga_cfg = GAConfig(population_size=6)
@@ -228,7 +236,7 @@ class TestForceGtoIslands:
         model = IslandModel(ga_cfg, island_cfg, np.random.default_rng(0))
         # With GTO_INIT_PROB well under 1, a freshly random population of 12
         # genomes practically never lands on "every flag active" by chance.
-        assert not all(np.all(p.genome.gto_flags > 0.5) for p in model.all_players)
+        assert not all(all(r.active for r in p.genome.gto_rules) for p in model.all_players)
 
     def test_forced_islands_start_with_every_gto_flag_active(self):
         ga_cfg = GAConfig(population_size=6)
@@ -236,13 +244,13 @@ class TestForceGtoIslands:
         model = IslandModel(ga_cfg, island_cfg, np.random.default_rng(0))
         for island in model.islands[:2]:
             for p in island.players:
-                assert np.all(p.genome.gto_flags > 0.5)
+                assert all(r.active for r in p.genome.gto_rules)
 
     def test_non_forced_islands_are_unaffected(self):
         ga_cfg = GAConfig(population_size=6)
         island_cfg = IslandConfig(num_islands=3, migration_interval=0, force_gto_islands=2)
         model = IslandModel(ga_cfg, island_cfg, np.random.default_rng(0))
-        assert not all(np.all(p.genome.gto_flags > 0.5) for p in model.islands[2].players)
+        assert not all(all(r.active for r in p.genome.gto_rules) for p in model.islands[2].players)
 
     def test_forced_flags_survive_evolution(self):
         ga_cfg = GAConfig(population_size=12, elite_count=2, mutation_rate=1.0)
@@ -251,7 +259,7 @@ class TestForceGtoIslands:
         fitness_by_island = [{p.player_id: float(i) for i, p in enumerate(isl.players)} for isl in model.islands]
         model.evolve_all(fitness_by_island)
         for p in model.islands[0].players:
-            assert np.all(p.genome.gto_flags > 0.5)
+            assert all(r.active for r in p.genome.gto_rules)
 
     def test_forced_flags_survive_migration_into_a_forced_island(self):
         ga_cfg = GAConfig(population_size=12, elite_count=2)
@@ -263,4 +271,4 @@ class TestForceGtoIslands:
         fitness_by_island = [{p.player_id: float(i) for i, p in enumerate(isl.players)} for isl in model.islands]
         model.evolve_all(fitness_by_island)
         for p in model.islands[0].players:
-            assert np.all(p.genome.gto_flags > 0.5)
+            assert all(r.active for r in p.genome.gto_rules)

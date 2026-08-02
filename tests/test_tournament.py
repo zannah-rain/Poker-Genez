@@ -6,43 +6,14 @@ import pytest
 import strategy
 from game import GameConfig
 from genome import Genome
-from gto import NUM_GTO_SPOTS
+from gto import GTO_SPOTS, NUM_GTO_SPOTS
 from player import Player
+from rule_helpers import condition, make_genome, make_rule
 from simulate import SimConfig
 from tournament import (
     PlayerStats, describe_genome, export_top_n, rank_players,
     run_final_tournament,
 )
-
-
-def make_genome(
-    condition_features=None, condition_buckets=None, rule_actions=None, rule_mix_actions=None,
-    preflop_hole_category_mask=None, gto_flags=None,
-):
-    """Defaults to an "empty" genome: every rule wildcard-conditioned to
-    Fold (never a Mix), 2 buckets (cut at 0.5) for every bucketable feature,
-    every preflop rule claiming every hole category."""
-    condition_shape = (strategy.NUM_STREETS, strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE)
-    if condition_features is None:
-        condition_features = np.full(condition_shape, strategy.WILDCARD, dtype=np.int64)
-    if condition_buckets is None:
-        condition_buckets = np.zeros(condition_shape, dtype=np.int64)
-    if rule_actions is None:
-        rule_actions = np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.ACTION_FOLD)
-    if rule_mix_actions is None:
-        rule_mix_actions = np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.NO_MIX)
-    if preflop_hole_category_mask is None:
-        preflop_hole_category_mask = np.ones((strategy.RULES_PER_STREET, strategy.NUM_HOLE_CATEGORIES))
-    if gto_flags is None:
-        gto_flags = np.zeros(NUM_GTO_SPOTS)
-    return Genome(
-        num_buckets=np.full(strategy.NUM_BUCKETABLE, 2),
-        thresholds=np.full((strategy.NUM_BUCKETABLE, strategy.MAX_BUCKETS - 1), 0.5),
-        condition_features=condition_features, condition_buckets=condition_buckets,
-        rule_actions=rule_actions, rule_mix_actions=rule_mix_actions,
-        preflop_hole_category_mask=preflop_hole_category_mask,
-        gto_flags=gto_flags,
-    )
 
 
 def make_random_players(n, seed=0):
@@ -178,14 +149,23 @@ class TestRankPlayers:
         assert [p.player_id for p in ranked] == [players[1].player_id, players[0].player_id, players[2].player_id]
 
     def test_sparsity_penalty_can_change_the_ranking(self):
-        condition_shape = (strategy.NUM_STREETS, strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE)
-        cf_sparse = np.full(condition_shape, strategy.WILDCARD, dtype=np.int64)
-        cf_dense = np.full(condition_shape, strategy.WILDCARD, dtype=np.int64)
-        # 20 active conditions -- 7 full preflop rules minus one wildcard slot.
-        cf_dense[strategy.PREFLOP, :7, :] = 0
-        cf_dense[strategy.PREFLOP, 6, 2] = strategy.WILDCARD
-        sparse_player = Player(player_id=0, genome=make_genome(condition_features=cf_sparse))
-        dense_player = Player(player_id=1, genome=make_genome(condition_features=cf_dense))
+        # sparse: the default minimal genome (1 rule, 1 condition per street -> 8 total).
+        sparse_genome = make_genome()
+        # dense: 5 preflop rules, each with 4 real conditions -> 5 rules + 20
+        # conditions = 25 on preflop, plus 6 more from the 3 default streets = 31.
+        dense_rules = tuple(
+            make_rule(
+                strategy.ACTION_FOLD,
+                conditions=[condition("facing_bet", 1)] * 4,
+                priority=1.0 - i * 0.1,
+            )
+            for i in range(5)
+        )
+        dense_genome = make_genome(rules_by_street={strategy.PREFLOP: dense_rules})
+        assert dense_genome.nonzero_weight_count() > sparse_genome.nonzero_weight_count()
+
+        sparse_player = Player(player_id=0, genome=sparse_genome)
+        dense_player = Player(player_id=1, genome=dense_genome)
         stats = {
             0: PlayerStats(player_id=0, sessions_played=1, total_net_chips=90.0),
             1: PlayerStats(player_id=1, sessions_played=1, total_net_chips=100.0),
@@ -213,36 +193,24 @@ class TestDescribeGenome:
         assert "doesn't trust any memorized chart" in report
 
     def test_active_gto_spot_is_listed(self):
-        flags = np.zeros(NUM_GTO_SPOTS)
-        flags[0] = 1.0
-        player = Player(player_id=1, genome=make_genome(gto_flags=flags))
+        player = Player(player_id=1, genome=make_genome(gto_active={GTO_SPOTS[0].key: True}))
         stats = PlayerStats(player_id=1)
         report = describe_genome(player, stats, GameConfig(), rank=1)
         assert "GTO Chart Overrides" in report
         assert "When this applies" in report
 
-    def test_empty_genome_reports_no_referenced_features(self):
-        player = Player(player_id=1, genome=make_genome())
-        stats = PlayerStats(player_id=1)
-        report = describe_genome(player, stats, GameConfig(), rank=1)
-        assert "No rule references a feature" in report
-
     def test_fold_action_reads_check_fold_give_up(self):
-        player = Player(player_id=1, genome=make_genome())  # every rule defaults to Fold
+        player = Player(player_id=1, genome=make_genome())  # default rule always plays Fold
         stats = PlayerStats(player_id=1)
         report = describe_genome(player, stats, GameConfig(), rank=1)
         assert "**Check / Fold (Give up)**" in report
         assert "**Fold**" not in report
 
     def test_report_lists_referenced_features_and_rule(self):
-        condition_shape = (strategy.NUM_STREETS, strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE)
-        cf = np.full(condition_shape, strategy.WILDCARD, dtype=np.int64)
-        cb = np.zeros(condition_shape, dtype=np.int64)
-        actions = np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.ACTION_FOLD)
-        cf[strategy.PREFLOP, 0, 0] = strategy.feature_index("hand_category_norm")
-        cb[strategy.PREFLOP, 0, 0] = 1
-        actions[strategy.PREFLOP, 0] = strategy.ACTION_RAISE_75
-        player = Player(player_id=1, genome=make_genome(condition_features=cf, condition_buckets=cb, rule_actions=actions))
+        rule = make_rule(
+            strategy.ACTION_RAISE_75, conditions=[condition("hand_category_norm", 1)],
+        )
+        player = Player(player_id=1, genome=make_genome(rules_by_street={strategy.PREFLOP: (rule,)}))
         stats = PlayerStats(player_id=1)
         report = describe_genome(player, stats, GameConfig(), rank=1)
         assert "Hand Strength Tier" in report
@@ -257,12 +225,18 @@ class TestDescribeGenome:
             assert f"### {street_label}" in report
 
     def test_preflop_rules_always_show_hole_category(self):
-        mask = np.zeros((strategy.RULES_PER_STREET, strategy.NUM_HOLE_CATEGORIES))
-        mask[0, strategy.HOLE_CATEGORY_LABELS.index("Premium Pairs")] = 1.0
-        player = Player(player_id=1, genome=make_genome(preflop_hole_category_mask=mask))
+        rule = make_rule(strategy.ACTION_FOLD, hole_categories=["Premium Pairs"])
+        player = Player(player_id=1, genome=make_genome(rules_by_street={strategy.PREFLOP: (rule,)}))
         stats = PlayerStats(player_id=1)
         report = describe_genome(player, stats, GameConfig(), rank=1)
         assert "Hole Category in {Premium Pairs}" in report
+
+    def test_report_mentions_rule_and_condition_counts(self):
+        player = Player(player_id=1, genome=make_genome())
+        stats = PlayerStats(player_id=1)
+        report = describe_genome(player, stats, GameConfig(), rank=1)
+        assert "Rules:" in report
+        assert "Active conditions:" in report
 
 
 class TestExportTopN:

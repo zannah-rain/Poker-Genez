@@ -1,31 +1,13 @@
 import os
 
-import numpy as np
 import pytest
 
 import main as main_module
+import rules
 import strategy
-from genome import Genome
-from gto import NUM_GTO_SPOTS
 from main import apply_sparsity_penalty, main, parse_args
 from player import Player
-
-
-def make_genome_with_nonzero_count(count):
-    """count must be <= strategy.NUM_RULES * strategy.CONDITIONS_PER_RULE."""
-    condition_shape = (strategy.NUM_STREETS, strategy.RULES_PER_STREET, strategy.CONDITIONS_PER_RULE)
-    condition_features = np.full(condition_shape, strategy.WILDCARD, dtype=np.int64)
-    condition_features.flat[:count] = 0  # feature index 0, arbitrary -- only its wildcard-ness matters here
-    return Genome(
-        num_buckets=np.full(strategy.NUM_BUCKETABLE, 2),
-        thresholds=np.full((strategy.NUM_BUCKETABLE, strategy.MAX_BUCKETS - 1), 0.5),
-        condition_features=condition_features,
-        condition_buckets=np.zeros(condition_shape, dtype=np.int64),
-        rule_actions=np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.ACTION_FOLD),
-        rule_mix_actions=np.full((strategy.NUM_STREETS, strategy.RULES_PER_STREET), strategy.NO_MIX),
-        preflop_hole_category_mask=np.ones((strategy.RULES_PER_STREET, strategy.NUM_HOLE_CATEGORIES)),
-        gto_flags=np.zeros(NUM_GTO_SPOTS),
-    )
+from rule_helpers import condition, make_genome, make_rule
 
 
 class TestParseArgs:
@@ -108,26 +90,34 @@ class TestParseArgs:
 
 class TestApplySparsityPenalty:
     def test_zero_coefficient_returns_fitness_unchanged(self):
-        players = [Player(player_id=1, genome=make_genome_with_nonzero_count(5))]
+        players = [Player(player_id=1, genome=make_genome())]
         fitness = {1: 100.0}
         result = apply_sparsity_penalty(players, fitness, coefficient=0.0)
         assert result == fitness
 
     def test_negative_coefficient_returns_fitness_unchanged(self):
-        players = [Player(player_id=1, genome=make_genome_with_nonzero_count(5))]
+        players = [Player(player_id=1, genome=make_genome())]
         fitness = {1: 100.0}
         result = apply_sparsity_penalty(players, fitness, coefficient=-1.0)
         assert result == fitness
 
     def test_positive_coefficient_subtracts_per_nonzero_weight(self):
+        sparse_genome = make_genome()  # minimal: 1 rule, 1 condition per street
+        dense_rule = make_rule(
+            strategy.ACTION_FOLD, conditions=[condition("facing_bet", 1)] * rules.MAX_CONDITIONS_PER_RULE,
+        )
+        dense_genome = make_genome(rules_by_street={strategy.PREFLOP: (dense_rule,)})
+        assert dense_genome.nonzero_weight_count() > sparse_genome.nonzero_weight_count()
+
         players = [
-            Player(player_id=1, genome=make_genome_with_nonzero_count(0)),
-            Player(player_id=2, genome=make_genome_with_nonzero_count(10)),
+            Player(player_id=1, genome=sparse_genome),
+            Player(player_id=2, genome=dense_genome),
         ]
         fitness = {1: 100.0, 2: 100.0}
         result = apply_sparsity_penalty(players, fitness, coefficient=2.0)
-        assert result[1] == 100.0
-        assert result[2] == 100.0 - 2.0 * 10
+        assert result[1] == pytest.approx(100.0 - 2.0 * sparse_genome.nonzero_weight_count())
+        assert result[2] == pytest.approx(100.0 - 2.0 * dense_genome.nonzero_weight_count())
+        assert result[2] < result[1]
 
 
 class TestMainSmoke:
