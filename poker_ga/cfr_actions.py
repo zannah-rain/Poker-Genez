@@ -64,3 +64,19 @@ def regret_matching(regrets: np.ndarray, legal_mask: np.ndarray) -> np.ndarray:
         return positive / total
     num_legal = legal_mask.sum()
     return legal_mask.astype(np.float64) / num_legal
+
+
+def regret_matching_batch(regrets: np.ndarray, legal_masks: np.ndarray) -> np.ndarray:
+    """Vectorized regret_matching over a whole batch at once -- same
+    positive-regret-normalized, else-uniform-over-legal logic, row by row,
+    but without a Python-level loop. `regrets`/`legal_masks`: shape
+    (n, NUM_ACTIONS). Returns shape (n, NUM_ACTIONS). Used where
+    regret_matching would otherwise need calling once per row over
+    thousands+ of samples (e.g. cfr_explorer.py computing the current net's
+    action probabilities for a whole loaded reservoir up front)."""
+    positive = np.where(legal_masks, np.maximum(regrets, 0.0), 0.0)
+    totals = positive.sum(axis=1, keepdims=True)
+    num_legal = legal_masks.sum(axis=1, keepdims=True)
+    uniform = legal_masks.astype(np.float64) / num_legal
+    has_positive = totals > 1e-9
+    return np.where(has_positive, positive / np.where(has_positive, totals, 1.0), uniform)

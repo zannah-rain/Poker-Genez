@@ -117,3 +117,31 @@ class TestRegretMatching:
         assert sigma[1] == 0.0
         assert sigma[0] == pytest.approx(0.5)
         assert sigma[2] == pytest.approx(0.5)
+
+
+class TestRegretMatchingBatch:
+    def test_agrees_with_regret_matching_row_by_row(self):
+        rng = np.random.default_rng(0)
+        regrets = rng.normal(size=(20, strategy.NUM_ACTION_CATEGORIES))
+        legal_masks = rng.random((20, strategy.NUM_ACTION_CATEGORIES)) > 0.4
+        legal_masks[:, strategy.ACTION_CALL] = True  # Call is always legal, matching legal_action_categories
+
+        batch = cfr_actions.regret_matching_batch(regrets, legal_masks)
+
+        for i in range(20):
+            expected = cfr_actions.regret_matching(regrets[i], legal_masks[i])
+            assert np.allclose(batch[i], expected), f"row {i}"
+
+    def test_output_shape(self):
+        regrets = np.zeros((7, strategy.NUM_ACTION_CATEGORIES))
+        legal_masks = np.ones((7, strategy.NUM_ACTION_CATEGORIES), dtype=bool)
+        batch = cfr_actions.regret_matching_batch(regrets, legal_masks)
+        assert batch.shape == (7, strategy.NUM_ACTION_CATEGORIES)
+
+    def test_every_row_sums_to_one(self):
+        rng = np.random.default_rng(1)
+        regrets = rng.normal(size=(50, strategy.NUM_ACTION_CATEGORIES))
+        legal_masks = rng.random((50, strategy.NUM_ACTION_CATEGORIES)) > 0.3
+        legal_masks[:, strategy.ACTION_CALL] = True
+        batch = cfr_actions.regret_matching_batch(regrets, legal_masks)
+        assert np.allclose(batch.sum(axis=1), 1.0)

@@ -65,6 +65,54 @@ class TestDefaultFeatureKeys:
         assert len(set(cfr_features.DEFAULT_FEATURE_KEYS)) == len(cfr_features.DEFAULT_FEATURE_KEYS)
 
 
+class TestBucketLabel:
+    def test_boolean_feature_uses_spec_label_and_negation(self):
+        assert cfr_features.bucket_label("facing_bet", 1.0) == "Facing A Bet"
+        assert cfr_features.bucket_label("facing_bet", 0.0) == "Not Facing A Bet"
+
+    def test_categorical_feature_matches_exact_value_table_points(self):
+        assert cfr_features.bucket_label("street_norm", 0.0) == "Preflop"
+        assert cfr_features.bucket_label("street_norm", 1 / 3) == "Flop"
+        assert cfr_features.bucket_label("street_norm", 2 / 3) == "Turn"
+        assert cfr_features.bucket_label("street_norm", 1.0) == "River"
+
+    def test_categorical_feature_snaps_to_nearest_point(self):
+        # 0.3 is closer to 1/3 (Flop) than to 0.0 (Preflop).
+        assert cfr_features.bucket_label("street_norm", 0.3) == "Flop"
+
+    def test_nine_way_hand_category(self):
+        assert cfr_features.bucket_label("hand_category_norm", 0.0) == "High Card"
+        assert cfr_features.bucket_label("hand_category_norm", 0.5) == "Straight"
+        assert cfr_features.bucket_label("hand_category_norm", 1.0) == "Straight Flush"
+
+
+class TestBucketLabels:
+    def test_vectorized_matches_scalar_per_element(self):
+        values = np.array([0.0, 1 / 3, 2 / 3, 1.0, 0.3])
+        labels = cfr_features.bucket_labels("street_norm", values)
+        expected = [cfr_features.bucket_label("street_norm", v) for v in values]
+        assert list(labels) == expected
+
+    def test_boolean_vectorized(self):
+        values = np.array([0.0, 1.0, 1.0, 0.0])
+        labels = cfr_features.bucket_labels("facing_bet", values)
+        assert list(labels) == ["Not Facing A Bet", "Facing A Bet", "Facing A Bet", "Not Facing A Bet"]
+
+
+class TestBucketCategories:
+    def test_categorical_order_matches_value_table_not_alphabetical(self):
+        assert cfr_features.bucket_categories("street_norm") == ["Preflop", "Flop", "Turn", "River"]
+
+    def test_boolean_order_is_false_then_true(self):
+        assert cfr_features.bucket_categories("facing_bet") == ["Not Facing A Bet", "Facing A Bet"]
+
+    def test_every_bucket_label_output_is_a_valid_category(self):
+        values = np.array([0.0, 1 / 3, 2 / 3, 1.0, 0.1, 0.9])
+        categories = set(cfr_features.bucket_categories("street_norm"))
+        for label in cfr_features.bucket_labels("street_norm", values):
+            assert label in categories
+
+
 class TestExtractSubset:
     def test_matches_full_extraction_at_selected_positions(self):
         situation = _make_situation()

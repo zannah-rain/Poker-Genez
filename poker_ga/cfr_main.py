@@ -54,12 +54,12 @@ BENCHMARK_SEATS_PER_SIDE = 3
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train a Single Deep CFR poker strategy.")
-    p.add_argument("--iterations", type=int, default=100)
-    p.add_argument("--traversals-per-iteration", type=int, default=10)
-    p.add_argument("--sgd-steps-per-iteration", type=int, default=1)
-    p.add_argument("--batch-size", type=int, default=256)
+    p.add_argument("--iterations", type=int, default=10_000)
+    p.add_argument("--traversals-per-iteration", type=int, default=20)
+    p.add_argument("--sgd-steps-per-iteration", type=int, default=10)
+    p.add_argument("--batch-size", type=int, default=2048)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--reservoir-capacity", type=int, default=2_000_000)
+    p.add_argument("--reservoir-capacity", type=int, default=1_000_000)
     p.add_argument(
         "--num-equity-rollouts", type=int, default=cfr_tree.DEFAULT_NUM_EQUITY_ROLLOUTS,
         help="Terminal showdowns reached before the river (an early all-in) average this many "
@@ -115,7 +115,7 @@ def parse_args() -> argparse.Namespace:
         "picked up. Falls back to freshly random genomes (with a warning) if the file doesn't exist.",
     )
     p.add_argument(
-        "--benchmark-interval", type=int, default=20,
+        "--benchmark-interval", type=int, default=100,
         help="The primary progress check: every this many iterations, snapshot the net's weights "
         "*before* that iteration's training update, run the update, then play the post-update net "
         "head-to-head against that pre-update snapshot (3-vs-3 tables, benchmark.py) until the "
@@ -130,7 +130,7 @@ def parse_args() -> argparse.Namespace:
         "whether the result is statistically resolved.",
     )
     p.add_argument(
-        "--benchmark-max-tables", type=int, default=2000,
+        "--benchmark-max-tables", type=int, default=10_000,
         help="Hard cap on 3-vs-3 tables played in one benchmark check. If the confidence interval "
         "still straddles 0 at this point, the check ends anyway and is conservatively treated as "
         "'not improved'.",
