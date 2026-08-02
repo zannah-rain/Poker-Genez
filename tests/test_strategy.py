@@ -538,19 +538,19 @@ class TestEligibleConditionIndicesByStreet:
     def test_one_array_per_street(self):
         assert len(strategy.ELIGIBLE_CONDITION_INDICES_BY_STREET) == strategy.NUM_STREETS
 
-    def test_preflop_excludes_board_texture_and_postflop_only_made_hand_features(self):
+    def test_preflop_excludes_board_texture_and_postflop_only_features(self):
         from features import group_of
         preflop_eligible = set(strategy.ELIGIBLE_CONDITION_INDICES_BY_STREET[strategy.PREFLOP].tolist())
         for i, spec in enumerate(strategy.CONDITION_FEATURES):
-            is_excluded = group_of(spec) == "Board / Flop Characteristics" or spec.key in strategy._POST_FLOP_ONLY_MADE_HAND_KEYS
+            is_excluded = group_of(spec) == "Board / Flop Characteristics" or spec.key in strategy._POST_FLOP_ONLY_FEATURE_KEYS
             if is_excluded:
                 assert i not in preflop_eligible
             else:
                 assert i in preflop_eligible
 
-    def test_preflop_excludes_the_specific_made_hand_keys_named_in_the_request(self):
+    def test_preflop_excludes_the_specific_keys_named_in_the_request(self):
         excluded_keys = {strategy.CONDITION_FEATURES[i].key for i in strategy._PREFLOP_EXCLUDED_INDICES}
-        for key in ("num_overcards_norm", "top_pair", "third_pair", "overpair", "underpair"):
+        for key in ("num_overcards_norm", "top_pair", "third_pair", "overpair", "underpair", "nuts_flush_draw", "gutshot"):
             assert key in excluded_keys
 
     def test_hand_category_and_high_card_features_stay_eligible_preflop(self):

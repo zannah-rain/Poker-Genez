@@ -266,23 +266,25 @@ def hole_category_index(condition_values: np.ndarray) -> int:
 # Two kinds of feature qualify:
 #   - The whole "Board / Flop Characteristics" group (board suit/pairing/
 #     connectivity/wetness texture, the board's own high card).
-#   - A specific handful of "Made Hand Features" that compare the hole cards
-#     to the board (top/second/third pair, over/under/low pair, board
-#     overcards) -- structurally these always evaluate to their same
-#     "nothing to compare against yet" value preflop (extract_features
-#     computes them from `board_ranks`, empty preflop), so referencing them
-#     would be a permanently dead condition, same reasoning as the board-
-#     texture group. hand_category_norm (Pair vs High Card from the hole
-#     cards alone) and ace_high_no_pair/king_high_no_pair (from the hole
-#     cards' own high card) are *not* excluded -- both are well-defined,
-#     genuinely informative preflop.
+#   - A specific handful of "Made Hand Features"/"Draw Features" that compare
+#     the hole cards to the board (top/second/third pair, over/under/low
+#     pair, board overcards, a flush draw's nut status, a gutshot straight
+#     draw) -- structurally these always evaluate to their same "nothing to
+#     compare against yet" value preflop (extract_features computes them
+#     from `board_ranks`, empty preflop), so referencing them would be a
+#     permanently dead condition, same reasoning as the board-texture group.
+#     hand_category_norm (Pair vs High Card from the hole cards alone) and
+#     ace_high_no_pair/king_high_no_pair (from the hole cards' own high
+#     card) are *not* excluded -- both are well-defined, genuinely
+#     informative preflop.
 _BOARD_TEXTURE_GROUP = "Board / Flop Characteristics"
-_POST_FLOP_ONLY_MADE_HAND_KEYS = frozenset({
+_POST_FLOP_ONLY_FEATURE_KEYS = frozenset({
     "num_overcards_norm", "top_pair", "second_pair", "third_pair", "overpair", "underpair", "low_pair",
+    "nuts_flush_draw", "gutshot",
 })
 _PREFLOP_EXCLUDED_INDICES = frozenset(
     i for i, s in enumerate(CONDITION_FEATURES)
-    if group_of(s) == _BOARD_TEXTURE_GROUP or s.key in _POST_FLOP_ONLY_MADE_HAND_KEYS
+    if group_of(s) == _BOARD_TEXTURE_GROUP or s.key in _POST_FLOP_ONLY_FEATURE_KEYS
 )
 ELIGIBLE_CONDITION_INDICES_BY_STREET: tuple[np.ndarray, ...] = tuple(
     (
