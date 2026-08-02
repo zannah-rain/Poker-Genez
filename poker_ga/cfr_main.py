@@ -121,8 +121,10 @@ def parse_args() -> argparse.Namespace:
         "--benchmark-interval", type=int, default=100,
         help="The primary progress check: every this many iterations, play the current net "
         "head-to-head (3-vs-3 tables, benchmark.py) against a snapshot taken this many iterations "
-        "ago -- e.g. at 100, the first check is iteration 100 vs the net as it stood at iteration 0 "
-        "-- until the result is statistically resolved (see --benchmark-min/max-tables, "
+        "ago -- e.g. at 100, the first check is iteration 100 vs the net as it stood when this run "
+        "started (iteration 0 for a fresh run, or wherever a reloaded checkpoint's own iteration "
+        "count left off -- see --reload-previous) -- until the result is statistically resolved "
+        "(see --benchmark-min/max-tables, "
         "--benchmark-p-value). That snapshot only advances to the current net when a check shows "
         "improvement, so it stays anchored on the last net actually beaten across any non-improving "
         "checks in between. A direct, apples-to-apples 'did training actually help' check, unlike "
@@ -267,30 +269,40 @@ def _benchmark_players(net: cfr_networks.AdvantageNet, feature_keys: tuple[str, 
 
 def _reload_checkpoint(
     checkpoint_path: str, reload_previous: bool, config: DeepCFRConfig, rng: np.random.Generator,
-) -> tuple[cfr_networks.AdvantageNet | None, cfr_reservoir.ReservoirBuffer | None, DeepCFRConfig]:
+) -> tuple[
+    cfr_networks.AdvantageNet | None, cfr_reservoir.ReservoirBuffer | None, dict | None, int, DeepCFRConfig,
+]:
     """Returns (net_to_resume_from_or_None, reservoir_to_resume_from_or_None,
-    config), where `config` has been updated in place to match the reloaded
-    net's own architecture if one was found -- a saved net's input/hidden
-    layer shapes can't change after the fact, so the checkpoint's own
+    optimizer_state_to_resume_from_or_None, completed_iterations, config),
+    where `config` has been updated in place to match the reloaded net's
+    own architecture if one was found -- a saved net's input/hidden layer
+    shapes can't change after the fact, so the checkpoint's own
     feature_keys/hidden_sizes/table_size always win over whatever
     --feature-keys/--hidden-sizes/--table-size were passed on the command
-    line. The reservoir (Trainer.save's `<path>.npz`) is reloaded alongside
-    the net whenever both exist -- see Trainer.save's docstring for why
-    they're always written together -- but a net checkpoint from before this
-    was added won't have one, so that half is allowed to come back None
-    (a fresh empty reservoir) without treating it as an error."""
+    line. The reservoir (Trainer.save's `<path>.npz`) and optimizer
+    state/completed_iterations (Trainer.save's `<path>_trainer_state.pt`)
+    are reloaded alongside the net whenever they exist -- see Trainer.save's
+    docstring for why all three are always written together -- but a net
+    checkpoint from before one of them was added won't have it, so each is
+    allowed to come back None/0 (a fresh empty reservoir, a fresh optimizer,
+    t=0) without treating it as an error. completed_iterations is always
+    part of the training loop's iteration numbering (0 whenever no trainer
+    state was found), never left dangling, since a mismatch between it and
+    the reloaded reservoir's own stored `t` values is exactly the bug that
+    caused training loss to spike after a resume -- see Trainer's
+    docstring."""
     if not reload_previous:
         print("--no-reload-previous passed; starting from a fresh random net and reservoir.")
-        return None, None, config
+        return None, None, None, 0, config
     if not (os.path.exists(f"{checkpoint_path}.pt") and os.path.exists(f"{checkpoint_path}.json")):
         print(f"No previous checkpoint found at {checkpoint_path}; starting from scratch.")
-        return None, None, config
+        return None, None, None, 0, config
 
     try:
         net, loaded_config = cfr_networks.load(checkpoint_path)
     except Exception as exc:
         print(f"Warning: could not reload checkpoint from {checkpoint_path} ({exc}); starting from scratch.")
-        return None, None, config
+        return None, None, None, 0, config
 
     print(
         f"Reloaded checkpoint from {checkpoint_path} "
@@ -332,7 +344,26 @@ def _reload_checkpoint(
     else:
         print(f"No reservoir checkpoint found at {checkpoint_path}.npz; starting with an empty reservoir.")
 
-    return net, reservoir, config
+    optimizer_state = None
+    completed_iterations = 0
+    try:
+        optimizer_state, completed_iterations = Trainer.load_trainer_state(checkpoint_path)
+    except Exception as exc:
+        print(
+            f"Warning: could not reload optimizer/iteration state from {checkpoint_path} ({exc}); "
+            "resuming with a fresh optimizer at iteration 0 (this will re-spike the reported loss "
+            "the same way a missing trainer-state file does -- see Trainer's docstring)."
+        )
+    else:
+        if optimizer_state is not None:
+            print(f"Reloaded optimizer state and iteration count ({completed_iterations}) from {checkpoint_path}.")
+        else:
+            print(
+                f"No optimizer/iteration state found at {checkpoint_path} (checkpoint predates it); "
+                "resuming with a fresh optimizer at iteration 0."
+            )
+
+    return net, reservoir, optimizer_state, completed_iterations, config
 
 
 def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_workers: int, executor: Executor | None) -> None:
@@ -365,13 +396,20 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
 
     os.makedirs(args.out_dir, exist_ok=True)
     checkpoint_path = os.path.join(args.out_dir, "checkpoint_latest")
-    initial_net, initial_reservoir, config = _reload_checkpoint(checkpoint_path, args.reload_previous, config, rng)
-    trainer = Trainer.new(config, rng, initial_net=initial_net, initial_reservoir=initial_reservoir)
+    initial_net, initial_reservoir, initial_optimizer_state, completed_iterations, config = _reload_checkpoint(
+        checkpoint_path, args.reload_previous, config, rng,
+    )
+    trainer = Trainer.new(
+        config, rng, initial_net=initial_net, initial_reservoir=initial_reservoir,
+        initial_optimizer_state=initial_optimizer_state, completed_iterations=completed_iterations,
+    )
 
-    # The --benchmark-interval anchor: starts at this run's own iteration 0
-    # (whatever net the loop below is about to start from, freshly random or
-    # reloaded) and only advances to the current net when a check shows
-    # improvement -- see --benchmark-interval's help text.
+    # The --benchmark-interval anchor: starts at whatever net this run's
+    # iteration loop below is about to start from (freshly random, or
+    # reloaded -- including trainer.completed_iterations iterations of
+    # prior training, since that's carried forward too -- see
+    # _reload_checkpoint) and only advances to the current net when a check
+    # shows improvement -- see --benchmark-interval's help text.
     benchmark_net = cfr_networks.clone(trainer.net) if args.benchmark_interval > 0 else None
 
     eval_fn = None
@@ -382,7 +420,13 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
 
     consecutive_non_improvements = 0
 
-    for iteration in range(1, args.iterations + 1):
+    # --iterations is "how many more iterations to run", not a total --
+    # continuing the count from trainer.completed_iterations (0 for a fresh
+    # net) rather than restarting at 1 keeps it on the same scale as any
+    # reloaded reservoir samples' own stored `t` values -- see Trainer's
+    # docstring for why a resumed run must not renumber from 1.
+    start_iteration = trainer.completed_iterations
+    for iteration in range(start_iteration + 1, start_iteration + args.iterations + 1):
         t0 = time.time()
         mean_loss = run_iteration(trainer, rng, iteration)
         elapsed = time.time() - t0

@@ -59,35 +59,61 @@ class DeepCFRConfig:
     game_config: GameConfig = field(default_factory=GameConfig)
 
 
+def _trainer_state_path(path: str) -> str:
+    return f"{path}_trainer_state.pt"
+
+
 @dataclass
 class Trainer:
     """Everything one outer training iteration needs to advance: the shared
     advantage net, its optimizer, and its reservoir buffer -- built once
     from a DeepCFRConfig (optionally starting from a reloaded net instead
     of a fresh random one) and then threaded through repeated
-    run_iteration calls."""
+    run_iteration calls.
+
+    completed_iterations is how many outer iterations this net/optimizer
+    have actually been trained through -- run_iteration keeps it in sync
+    (see its own docstring). It's not just bookkeeping: every reservoir
+    sample is stored with the outer iteration `t` it was collected at (see
+    cfr_reservoir.ReservoirBuffer.add) and _train_step normalizes those by
+    the *current* outer iteration to get Linear CFR's recency weighting
+    (see _train_step's own comment). A resumed run whose iteration counter
+    restarted at 1 while its reloaded reservoir's `t` values were still on
+    the old run's scale (e.g. up to a few hundred) would divide by a much
+    smaller number than the samples were collected under -- inflating old
+    samples' weights by up to that old-scale/1 ratio and spiking the
+    reported loss -- so a resume must carry this forward and keep counting
+    from it, not restart at 1."""
 
     config: DeepCFRConfig
     net: cfr_networks.AdvantageNet
     optimizer: torch.optim.Optimizer
     reservoir: cfr_reservoir.ReservoirBuffer
     feature_indices: np.ndarray
+    completed_iterations: int = 0
 
     @classmethod
     def new(
         cls, config: DeepCFRConfig, rng: np.random.Generator,
         initial_net: Optional[cfr_networks.AdvantageNet] = None,
         initial_reservoir: Optional[cfr_reservoir.ReservoirBuffer] = None,
+        initial_optimizer_state: Optional[dict] = None,
+        completed_iterations: int = 0,
     ) -> "Trainer":
         feature_indices = cfr_features.feature_indices(config.feature_keys)
         net = initial_net if initial_net is not None else cfr_networks.AdvantageNet(
             input_dim=len(feature_indices), hidden_sizes=config.hidden_sizes,
         )
         optimizer = torch.optim.Adam(net.parameters(), lr=config.lr)
+        if initial_optimizer_state is not None:
+            optimizer.load_state_dict(initial_optimizer_state)
         reservoir = initial_reservoir if initial_reservoir is not None else cfr_reservoir.ReservoirBuffer(
             config.reservoir_capacity, len(feature_indices), strategy.NUM_ACTION_CATEGORIES, rng,
         )
-        return cls(config=config, net=net, optimizer=optimizer, reservoir=reservoir, feature_indices=feature_indices)
+        return cls(
+            config=config, net=net, optimizer=optimizer, reservoir=reservoir, feature_indices=feature_indices,
+            completed_iterations=completed_iterations,
+        )
 
     def net_config(self) -> cfr_networks.AdvantageNetConfig:
         return cfr_networks.AdvantageNetConfig(
@@ -96,12 +122,33 @@ class Trainer:
         )
 
     def save(self, path: str) -> None:
-        """Saves the net (cfr_networks.save, `<path>.pt`/`.json`) and its
-        reservoir (cfr_reservoir.ReservoirBuffer.save, `<path>.npz`)
-        together as one call -- the two should never drift out of sync, so
-        there's deliberately no way to save one without the other."""
+        """Saves the net (cfr_networks.save, `<path>.pt`/`.json`), its
+        reservoir (cfr_reservoir.ReservoirBuffer.save, `<path>.npz`), and
+        its optimizer state + completed_iterations (`<path>_trainer_state.pt`)
+        together as one call -- the three should never drift out of sync
+        (see load_trainer_state / completed_iterations' own docstring for
+        why leaving either of the latter two behind corrupts a resumed
+        run's loss weighting), so there's deliberately no way to save a
+        subset."""
         cfr_networks.save(self.net, self.net_config(), path)
         self.reservoir.save(path)
+        torch.save(
+            {"optimizer": self.optimizer.state_dict(), "completed_iterations": self.completed_iterations},
+            _trainer_state_path(path),
+        )
+
+    @staticmethod
+    def load_trainer_state(path: str) -> tuple[Optional[dict], int]:
+        """(optimizer_state_dict, completed_iterations) saved alongside
+        `path` by Trainer.save, or (None, 0) if `<path>_trainer_state.pt`
+        doesn't exist -- e.g. a net checkpoint saved before this was added,
+        which is allowed to come back to a fresh optimizer/t=0 rather than
+        treated as an error, the same way a missing reservoir file is."""
+        state_path = _trainer_state_path(path)
+        if not os.path.exists(state_path):
+            return None, 0
+        state = torch.load(state_path, map_location="cpu")
+        return state["optimizer"], int(state["completed_iterations"])
 
     def revert_to(self, checkpoint_net: cfr_networks.AdvantageNet) -> None:
         """Discards the current net weights and optimizer state, replacing
@@ -168,7 +215,15 @@ def run_iteration(trainer: Trainer, rng: np.random.Generator, iteration: int, sh
     training run (a full recursive tree traversal per hand; a forward+
     backward pass per gradient step), so both get their own tqdm bar --
     `leave=False` so a long run's log isn't cluttered with one finished bar
-    per iteration."""
+    per iteration.
+
+    `iteration` should keep counting up from wherever `trainer` left off
+    (trainer.completed_iterations before this call) rather than restart at
+    1 after a resume -- see Trainer's own docstring for why a discontinuity
+    there corrupts the reservoir's recency weighting. This sets
+    trainer.completed_iterations = iteration at the end, so a caller that
+    resumed from a reload and keeps calling this in sequence doesn't have
+    to track it separately."""
     config = trainer.config
     for _ in tqdm(
         range(config.traversals_per_iteration), desc=f"iter {iteration} traversals",
@@ -188,6 +243,7 @@ def run_iteration(trainer: Trainer, rng: np.random.Generator, iteration: int, sh
         if len(trainer.reservoir) == 0:
             break
         losses.append(_train_step(trainer.net, trainer.optimizer, trainer.reservoir, config.batch_size, iteration))
+    trainer.completed_iterations = iteration
     return float(np.mean(losses)) if losses else float("nan")
 
 
@@ -198,25 +254,39 @@ def train(
     eval_fn: Optional[Callable[[cfr_networks.AdvantageNet, int], None]] = None,
     initial_net: Optional[cfr_networks.AdvantageNet] = None,
     initial_reservoir: Optional[cfr_reservoir.ReservoirBuffer] = None,
+    initial_optimizer_state: Optional[dict] = None,
+    completed_iterations: int = 0,
     show_progress: bool = True,
 ) -> cfr_networks.AdvantageNet:
     """Simple convenience loop for straightforward scripted/test use: runs
-    config.iterations calls to run_iteration back to back, checkpointing
-    (Trainer.save -- net and reservoir together) to `<out_dir>/checkpoint_latest`
-    every `checkpoint_interval` iterations and calling `eval_fn(net, iteration)`
-    (if given) every `eval_interval` iterations -- left as an injected
-    callback (rather than importing cfr_policy/tournament here) so this
-    module doesn't need to depend on the eval/inference stack to do its one
-    job of training. `initial_net`/`initial_reservoir`, if given, resume
-    training from an already-trained net/reservoir instead of fresh ones.
+    config.iterations more calls to run_iteration back to back (continuing
+    the outer iteration count from `completed_iterations`, not restarting
+    at 1 -- see Trainer's docstring for why that matters whenever a reload
+    is involved), checkpointing (Trainer.save -- net, reservoir, optimizer
+    state and completed_iterations together) to
+    `<out_dir>/checkpoint_latest` every `checkpoint_interval` iterations
+    and calling `eval_fn(net, iteration)` (if given) every `eval_interval`
+    iterations -- left as an injected callback (rather than importing
+    cfr_policy/tournament here) so this module doesn't need to depend on
+    the eval/inference stack to do its one job of training.
+    `initial_net`/`initial_reservoir`/`initial_optimizer_state`/
+    `completed_iterations`, if given, resume training from an
+    already-trained net/reservoir/optimizer instead of fresh ones --
+    typically all four sourced from one prior Trainer.save via
+    Trainer.load_trainer_state plus cfr_networks.load/
+    cfr_reservoir.ReservoirBuffer.load.
 
     cfr_main.py's CLI does *not* use this function -- see the module
     docstring for why it drives Trainer/run_iteration directly instead."""
-    trainer = Trainer.new(config, rng, initial_net=initial_net, initial_reservoir=initial_reservoir)
+    trainer = Trainer.new(
+        config, rng, initial_net=initial_net, initial_reservoir=initial_reservoir,
+        initial_optimizer_state=initial_optimizer_state, completed_iterations=completed_iterations,
+    )
     os.makedirs(out_dir, exist_ok=True)
     checkpoint_path = os.path.join(out_dir, "checkpoint_latest")
 
-    for iteration in range(1, config.iterations + 1):
+    start = trainer.completed_iterations
+    for iteration in range(start + 1, start + config.iterations + 1):
         t0 = time.time()
         mean_loss = run_iteration(trainer, rng, iteration, show_progress=show_progress)
         elapsed = time.time() - t0

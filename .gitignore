@@ -4,3 +4,4 @@ cfr_runs/checkpoint_latest.json
 cfr_runs/checkpoint_latest.pt
 cfr_runs/checkpoint_latest.npz
 .claude/scheduled_tasks.lock
+cfr_runs/checkpoint_latest_trainer_state.pt
