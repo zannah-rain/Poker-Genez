@@ -79,7 +79,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--feature-keys", type=str, default=None,
         help="Comma-separated features.FEATURE_NAMES keys the net conditions on. Defaults to "
-        "cfr_features.DEFAULT_FEATURE_KEYS (~49 generalized features, excluding opponent-tendency "
+        "cfr_features.DEFAULT_FEATURE_KEYS (every features.py key, excluding opponent-tendency "
         "reads -- see cfr_features.py). Ignored (with a warning) if a checkpoint is reloaded -- "
         "see --hidden-sizes.",
     )

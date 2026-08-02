@@ -6,14 +6,14 @@ GA's rule conditions may reference), a Deep CFR advantage network can be
 pointed at *any* of features.py's ~200 keys, including the one-hot indicator
 children -- there's no rule-bucketing machinery here that would make the
 children redundant with their parent, just a plain feature vector fed
-straight into a neural net.
+straight into a neural net. The default subset (see DEFAULT_FEATURE_KEYS
+below) takes advantage of that and reads the full vocabulary.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-import strategy
 from features import FEATURE_NAMES, FEATURE_SPECS, extract_features
 
 _INDEX_BY_KEY: dict[str, int] = {key: i for i, key in enumerate(FEATURE_NAMES)}
@@ -26,12 +26,11 @@ _SPEC_BY_KEY = {spec.key: spec for spec in FEATURE_SPECS}
 # selectable explicitly via --feature-keys, just not useful yet).
 _OPPONENT_TENDENCY_PREFIX = "opp_"
 
-# Sane starting default: the same ~49 generalized features strategy.py
-# already curates for the GA's rule conditions, minus the opponent-tendency
+# Sane starting default: every feature.py key, minus the opponent-tendency
 # ones (see above). Fully overridable to any subset of features.FEATURE_NAMES.
 DEFAULT_FEATURE_KEYS: tuple[str, ...] = tuple(
-    spec.key for spec in strategy.CONDITION_FEATURES
-    if not spec.key.startswith(_OPPONENT_TENDENCY_PREFIX)
+    key for key in FEATURE_NAMES
+    if not key.startswith(_OPPONENT_TENDENCY_PREFIX)
 )
 
 
