@@ -2,10 +2,12 @@ import os
 import tempfile
 
 import numpy as np
+import pytest
 import torch
 
 import strategy
-from cfr_networks import AdvantageNet, AdvantageNetConfig, clone, load, save
+from cfr_networks import AdvantageNet, AdvantageNetConfig, clone, load, mean_shap_contributions, save
+from cfr_reservoir import ReservoirBuffer
 
 
 class TestAdvantageNetForward:
@@ -88,3 +90,52 @@ class TestClone:
         after = cloned.predict(features)
         assert np.allclose(before, after)  # unaffected by training on the original
         assert not np.allclose(net.predict(features), cloned.predict(features))  # original actually did change
+
+
+def _filled_reservoir(capacity, feature_dim, rng):
+    buf = ReservoirBuffer(capacity=capacity, feature_dim=feature_dim, num_actions=strategy.NUM_ACTION_CATEGORIES, rng=rng)
+    for _ in range(capacity):
+        buf.add(
+            rng.random(feature_dim).astype(np.float32),
+            rng.random(strategy.NUM_ACTION_CATEGORIES).astype(np.float32),
+            rng.random(strategy.NUM_ACTION_CATEGORIES) > 0.5,
+            float(rng.integers(1, 10)),
+        )
+    return buf
+
+
+class TestMeanShapContributions:
+    def test_empty_reservoir_returns_empty_list(self):
+        rng = np.random.default_rng(0)
+        net = AdvantageNet(input_dim=4, hidden_sizes=(8,))
+        buf = ReservoirBuffer(capacity=10, feature_dim=4, num_actions=strategy.NUM_ACTION_CATEGORIES, rng=rng)
+        keys = ("a", "b", "c", "d")
+        assert mean_shap_contributions(net, buf, keys, rng, sample_size=5, background_size=2, nsamples=5) == []
+
+    def test_returns_one_entry_per_feature_sorted_descending_and_nonnegative(self):
+        rng = np.random.default_rng(0)
+        net = AdvantageNet(input_dim=4, hidden_sizes=(8,))
+        buf = _filled_reservoir(capacity=30, feature_dim=4, rng=rng)
+        keys = ("a", "b", "c", "d")
+
+        result = mean_shap_contributions(net, buf, keys, rng, sample_size=10, background_size=5, nsamples=5)
+
+        assert sorted(k for k, _ in result) == sorted(keys)
+        values = [v for _, v in result]
+        assert all(v >= 0.0 for v in values)
+        assert values == sorted(values, reverse=True)
+
+    def test_a_feature_the_net_structurally_ignores_ranks_last_near_zero(self):
+        rng = np.random.default_rng(1)
+        net = AdvantageNet(input_dim=4, hidden_sizes=(8,))
+        with torch.no_grad():
+            first_layer = net.model[0]
+            first_layer.weight[:, 2] = 0.0  # feature index 2 can never affect any hidden unit
+        buf = _filled_reservoir(capacity=30, feature_dim=4, rng=rng)
+        keys = ("a", "b", "ignored", "d")
+
+        result = mean_shap_contributions(net, buf, keys, rng, sample_size=10, background_size=5, nsamples=5)
+
+        by_key = dict(result)
+        assert by_key["ignored"] == pytest.approx(0.0, abs=1e-6)
+        assert result[-1][0] == "ignored"

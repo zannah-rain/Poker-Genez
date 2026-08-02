@@ -1,4 +1,12 @@
-numpy>=1.24
+numpy>=1.24,<2
 pytest>=7.0
 tqdm>=4.65
 torch>=2.2
+# shap 0.45+ requires numpy>=2, which is incompatible with torch 2.2's numpy 1.x
+# ABI build above -- pinned here (with its own scipy/numba, whose latest
+# releases also require numpy>=2 and would otherwise get pulled in unpinned)
+# to keep a fresh install from silently breaking torch. If torch is ever
+# upgraded to a numpy-2-compatible build, these three can be unpinned too.
+shap==0.44.1
+scipy<1.13
+numba<0.60

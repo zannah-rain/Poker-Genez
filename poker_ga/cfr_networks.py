@@ -12,10 +12,12 @@ import json
 from dataclasses import dataclass
 
 import numpy as np
+import shap
 import torch
 import torch.nn as nn
 
 import cfr_features
+import cfr_reservoir
 import strategy
 
 DEFAULT_HIDDEN_SIZES = (128, 128)
@@ -89,6 +91,51 @@ def save(net: AdvantageNet, config: AdvantageNetConfig, path: str) -> None:
             },
             f,
         )
+
+
+def mean_shap_contributions(
+    net: AdvantageNet, reservoir: cfr_reservoir.ReservoirBuffer, feature_keys: tuple[str, ...],
+    rng: np.random.Generator, sample_size: int = 200, background_size: int = 20, nsamples: int = 20,
+) -> list[tuple[str, float]]:
+    """Mean |SHAP value| per feature (shap.GradientExplainer's Expected
+    Gradients approximation -- exact Shapley values are NP-hard, this is
+    what SHAP itself uses for neural nets too), averaged over a random
+    subsample of the reservoir's current contents and over every one of the
+    net's NUM_ACTION_CATEGORIES outputs -- a feature-importance signal for
+    what the advantage net's predictions currently lean on.
+
+    Drawn fresh from the reservoir every call rather than cached, so it's
+    cheap enough to call once per training iteration (see cfr_main.py)
+    while still tracking how importance shifts as training progresses --
+    `sample_size`/`background_size` bound the cost to roughly constant
+    regardless of how large the reservoir has grown, rather than literally
+    explaining every stored sample. Cost scales roughly with
+    sample_size * nsamples: the defaults here (200 * 20) run in a couple of
+    seconds against a (128, 128) net on CPU, measured directly; pushing
+    sample_size up toward the thousands for a smoother estimate costs
+    closer to a minute, so raise it deliberately via cfr_main.py's
+    --feature-importance-sample-size, not by editing this default.
+
+    Returns (feature_key, mean_abs_shap) pairs sorted most-to-least
+    important. Empty list if the reservoir has nothing in it yet."""
+    if len(reservoir) == 0:
+        return []
+
+    explain_n = min(sample_size, len(reservoir))
+    explain_idx = rng.choice(len(reservoir), size=explain_n, replace=False)
+    x = torch.from_numpy(reservoir.features[explain_idx])
+
+    background_n = min(background_size, len(reservoir))
+    background_idx = rng.choice(len(reservoir), size=background_n, replace=False)
+    background = torch.from_numpy(reservoir.features[background_idx])
+
+    net.eval()
+    explainer = shap.GradientExplainer(net, background)
+    shap_values = explainer.shap_values(x, nsamples=nsamples)  # list of NUM_ACTIONS arrays, each (explain_n, num_features)
+    mean_abs = np.mean(np.abs(np.stack(shap_values, axis=0)), axis=(0, 1))
+
+    order = np.argsort(-mean_abs)
+    return [(feature_keys[i], float(mean_abs[i])) for i in order]
 
 
 def load(path: str) -> tuple[AdvantageNet, AdvantageNetConfig]:

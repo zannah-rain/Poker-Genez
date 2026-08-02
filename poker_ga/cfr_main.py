@@ -115,7 +115,7 @@ def parse_args() -> argparse.Namespace:
         "picked up. Falls back to freshly random genomes (with a warning) if the file doesn't exist.",
     )
     p.add_argument(
-        "--benchmark-interval", type=int, default=1,
+        "--benchmark-interval", type=int, default=20,
         help="The primary progress check: every this many iterations, snapshot the net's weights "
         "*before* that iteration's training update, run the update, then play the post-update net "
         "head-to-head against that pre-update snapshot (3-vs-3 tables, benchmark.py) until the "
@@ -125,23 +125,23 @@ def parse_args() -> argparse.Namespace:
         "disable.",
     )
     p.add_argument(
-        "--benchmark-min-tables", type=int, default=100,
+        "--benchmark-min-tables", type=int, default=200,
         help="Minimum number of 3-vs-3 tables played against the checkpoint before checking "
         "whether the result is statistically resolved.",
     )
     p.add_argument(
-        "--benchmark-max-tables", type=int, default=1000,
+        "--benchmark-max-tables", type=int, default=2000,
         help="Hard cap on 3-vs-3 tables played in one benchmark check. If the confidence interval "
         "still straddles 0 at this point, the check ends anyway and is conservatively treated as "
         "'not improved'.",
     )
     p.add_argument(
-        "--benchmark-table-batch", type=int, default=100,
+        "--benchmark-table-batch", type=int, default=200,
         help="Additional tables played per round once --benchmark-min-tables isn't enough to "
         "resolve the confidence interval (repeats until it resolves or --benchmark-max-tables is hit).",
     )
     p.add_argument(
-        "--benchmark-p-value", type=float, default=0.1,
+        "--benchmark-p-value", type=float, default=0.2,
         help="Improvement p-value threshold: the benchmark keeps playing tables until the "
         "(1 - N) confidence interval of the current net's bb/100 edge over the checkpoint no "
         "longer includes 0. Lower values demand stronger evidence before calling an iteration "
@@ -161,6 +161,31 @@ def parse_args() -> argparse.Namespace:
         "itself is sequential in this version, unlike main.py's fully parallel GA evaluation, so "
         "this only speeds up benchmarking). 1 is fully sequential (the default). 0 or negative "
         "means 'use every available CPU core'.",
+    )
+    p.add_argument(
+        "--feature-importance", action=argparse.BooleanOptionalAction, default=True,
+        help="Every iteration, print the --feature-importance-top-n most- and least-important "
+        "features by mean |SHAP value| (cfr_networks.mean_shap_contributions) over a random "
+        "subsample of the reservoir -- pass --no-feature-importance to skip it (it adds a few "
+        "seconds per iteration at the defaults below; see --feature-importance-sample-size).",
+    )
+    p.add_argument("--feature-importance-top-n", type=int, default=5, help="How many top/bottom features to print.")
+    p.add_argument(
+        "--feature-importance-sample-size", type=int, default=200,
+        help="Reservoir samples explained per --feature-importance check. Cost scales roughly with "
+        "this times --feature-importance-nsamples -- the defaults run in a couple of seconds "
+        "against a (128, 128) net on CPU; pushing this into the thousands for a smoother estimate "
+        "costs closer to a minute.",
+    )
+    p.add_argument(
+        "--feature-importance-background-size", type=int, default=20,
+        help="Background (reference) samples shap.GradientExplainer interpolates from -- see "
+        "cfr_networks.mean_shap_contributions.",
+    )
+    p.add_argument(
+        "--feature-importance-nsamples", type=int, default=20,
+        help="Interpolation samples per explained point (shap.GradientExplainer's own `nsamples`) -- "
+        "see --feature-importance-sample-size for the combined cost.",
     )
     return p.parse_args()
 
@@ -204,6 +229,24 @@ def _make_eval_fn(
         print(f"         | eval @ iter {iteration}: DeepCFR vs {source} = {bb_per_100:+.2f} bb/100")
 
     return eval_fn
+
+
+def _print_feature_importance(
+    trainer: Trainer, rng: np.random.Generator, top_n: int, sample_size: int, background_size: int, nsamples: int,
+) -> None:
+    contributions = cfr_networks.mean_shap_contributions(
+        trainer.net, trainer.reservoir, trainer.config.feature_keys, rng,
+        sample_size=sample_size, background_size=background_size, nsamples=nsamples,
+    )
+    if not contributions:
+        return  # reservoir still empty (e.g. iteration 1 with a tiny traversals_per_iteration)
+    top = contributions[:top_n]
+    bottom = contributions[-top_n:] if len(contributions) > top_n else []
+    top_str = ", ".join(f"{k}={v:.4f}" for k, v in top)
+    print(f"         | feature importance (top {len(top)})    | {top_str}")
+    if bottom:
+        bottom_str = ", ".join(f"{k}={v:.4f}" for k, v in reversed(bottom))
+        print(f"         | feature importance (bottom {len(bottom)}) | {bottom_str}")
 
 
 def _benchmark_players(net: cfr_networks.AdvantageNet, feature_keys: tuple[str, ...], label: str, id_offset: int) -> list[Player]:
@@ -344,6 +387,12 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
             f"iter {iteration:4d} | reservoir {len(trainer.reservoir):7d}/{config.reservoir_capacity} | "
             f"mean loss {mean_loss:10.4f} | {elapsed:5.1f}s"
         )
+
+        if args.feature_importance:
+            _print_feature_importance(
+                trainer, rng, args.feature_importance_top_n, args.feature_importance_sample_size,
+                args.feature_importance_background_size, args.feature_importance_nsamples,
+            )
 
         if args.checkpoint_interval > 0 and iteration % args.checkpoint_interval == 0:
             trainer.save(checkpoint_path)
