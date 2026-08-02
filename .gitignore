@@ -1,2 +1,4 @@
 *.pyc
 runs/
+cfr_runs/checkpoint_latest.json
+cfr_runs/checkpoint_latest.pt

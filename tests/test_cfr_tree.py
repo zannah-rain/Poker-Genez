@@ -1,0 +1,183 @@
+"""Cross-validates cfr_tree's recursive betting/showdown machinery -- the
+one place raise-clamping logic is intentionally duplicated from
+game.betting_round rather than imported (see cfr_tree.py's module
+docstring) -- against the real game.play_hand engine.
+
+Strategy: script every seat to always resolve its action via
+cfr_actions.category_to_game_action(target_category, ...) -- both as a
+genome.decide() implementation fed to the real engine (ScriptedGenome) and
+as a "dominant regret" fake net fed to cfr_tree (DominantRegretNet, whose
+predict() puts all regret-matching probability mass on target_category).
+Both systems then resolve every betting decision identically, for any
+traverser seat.
+
+Two different checks follow from that, depending on whether the scenario
+reaches a *complete* board (all 5 community cards) before it's resolved:
+
+- Full-board scenarios (everyone calls to a river showdown, or everyone
+  folds preflop) are still checked for an *exact* match against
+  game.play_hand's single dealt-out hand -- cfr_tree._terminal_showdown
+  reduces to plain game.compute_payouts with zero equity-averaging
+  whenever the board's already complete (see cfr_tree._equity_payouts), so
+  there's no reason the two should ever disagree.
+- Early-all-in scenarios (a side-pot showdown before the river) are
+  *intentionally* no longer a single dealt-out hand on the cfr_tree side --
+  see cfr_tree.py's module docstring for why terminal values there are now
+  an *equity* estimate instead, which does not correspond to any one
+  concrete game.play_hand outcome. Those are checked instead for the one
+  invariant that must hold exactly regardless of how many board completions
+  get averaged: summing every seat's net payoff across all of them must
+  come out to zero, since the whole pot is always fully redistributed (see
+  _assert_conserves_chips). Equity-value *correctness* itself (not just
+  conservation) is covered separately by test_cfr_equity.py's
+  hand-verifiable scenarios.
+"""
+
+import numpy as np
+import pytest
+
+import cfr_actions
+import cfr_features
+import cfr_tree
+import strategy
+from cards import Deck
+from game import PREFLOP, GameConfig, SeatState, _np_rng_to_random, play_hand
+from player import Player
+from seating import blind_indices
+
+_FEATURE_INDICES = cfr_features.feature_indices(cfr_features.DEFAULT_FEATURE_KEYS)
+
+
+class _ScriptedGenome:
+    """Always resolves via the exact same function cfr_tree uses to turn an
+    action category into a game action -- so a whole-table script of these
+    is byte-for-byte comparable to cfr_tree's own dominant-regret walk."""
+
+    def __init__(self, category):
+        self.category = category
+
+    def decide(self, situation, legal_actions, rng=None):
+        return cfr_actions.category_to_game_action(self.category, situation, legal_actions)
+
+
+class _DominantRegretNet:
+    """Fake advantage net: regret_matching on this output puts probability
+    1.0 on `category` whenever it's legal. When it *isn't* (e.g. a raise
+    category once the street's raise cap is hit, or Fold when checking is
+    free), Call is the second-priority action -- Call is always legal, so
+    this always resolves the same way _apply_decision's own fallback does
+    (Fold/Raise -> Check/Call when illegal), not a uniform draw over
+    whatever else happens to be legal."""
+
+    def __init__(self, category, num_actions=cfr_actions.NUM_ACTIONS):
+        self.category = category
+        self.num_actions = num_actions
+
+    def predict(self, features):
+        regrets = np.full(self.num_actions, -1e9, dtype=np.float64)
+        regrets[strategy.ACTION_CALL] = 1.0
+        regrets[self.category] = 1e9
+        return regrets
+
+
+class _DiscardingReservoir:
+    def add(self, features, regrets, legal_mask, t):
+        pass
+
+
+def _run_reference(stacks, button_idx, config, seed, target_category):
+    seats = [
+        SeatState(player=Player(player_id=i, genome=_ScriptedGenome(target_category)), stack=stacks[i])
+        for i in range(len(stacks))
+    ]
+    result = play_hand(seats, button_idx=button_idx, config=config, rng=np.random.default_rng(seed))
+    return result, seats
+
+
+def _run_cfr(stacks, button_idx, config, seed, target_category, traverser, num_equity_rollouts=cfr_tree.DEFAULT_NUM_EQUITY_ROLLOUTS):
+    rng = np.random.default_rng(seed)
+    deck = Deck(rng=_np_rng_to_random(rng))
+    seats = [
+        SeatState(player=Player(player_id=i, genome=None), stack=stacks[i])
+        for i in range(len(stacks))
+    ]
+    for s in seats:
+        s.reset_for_hand()
+    for i in range(len(seats)):
+        seats[i].hole = deck.deal(2)
+
+    sb_idx, bb_idx = blind_indices(button_idx, len(seats))
+    sb_amt = min(config.small_blind, seats[sb_idx].stack)
+    bb_amt = min(config.big_blind, seats[bb_idx].stack)
+    for idx, amt in ((sb_idx, sb_amt), (bb_idx, bb_amt)):
+        seats[idx].stack -= amt
+        seats[idx].street_committed = amt
+        seats[idx].total_committed = amt
+        if seats[idx].stack <= 1e-9:
+            seats[idx].all_in = True
+    pot = sb_amt + bb_amt
+
+    state = cfr_tree._HandState(seats=seats, board=[], deck=deck, button_idx=button_idx, config=config)
+    ctx = cfr_tree._TraversalContext(
+        traverser=traverser, net=_DominantRegretNet(target_category), reservoir=_DiscardingReservoir(),
+        rng=rng, t=1.0, feature_indices=_FEATURE_INDICES, num_equity_rollouts=num_equity_rollouts,
+    )
+    return cfr_tree._start_street(state, PREFLOP, pot, 0, ctx)
+
+
+def _assert_matches_reference(stacks, button_idx, config, seed, target_category):
+    """For scenarios that always reach a complete board before resolving
+    (see module docstring) -- an exact match is the right invariant here."""
+    reference, reference_seats = _run_reference(stacks, button_idx, config, seed, target_category)
+    for traverser in range(len(stacks)):
+        cfr_value = _run_cfr(stacks, button_idx, config, seed, target_category, traverser)
+        expected = reference.payouts[traverser] - reference_seats[traverser].total_committed
+        # abs tolerance: regret_matching's near-1.0 (not exactly 1.0, due to
+        # the dominant-vs-fallback regret ratio) sigma can leak a ~1e-9
+        # fraction of weight onto a branch whose value differs by O(pot) --
+        # negligible in absolute chip terms, but bigger than pytest.approx's
+        # default abs=1e-12 once expected happens to be exactly 0.
+        assert cfr_value == pytest.approx(expected, abs=1e-6), f"traverser={traverser}"
+
+
+def _assert_conserves_chips(stacks, button_idx, config, seed, target_category):
+    """For scenarios that can reach an early all-in (an incomplete board at
+    showdown, see module docstring): cfr_tree's terminal value there is now
+    an equity estimate, not a single concrete outcome, so it won't match
+    game.play_hand's one dealt-out hand -- but summing every seat's net
+    payoff (each already relative to that seat's own total_committed) must
+    still come out to exactly zero, however the board got completed,
+    because the whole pot always gets fully redistributed (see
+    cfr_tree._equity_payouts's docstring: averaging preserves that sum-to-
+    the-pot invariant exactly, for any set of sampled completions)."""
+    values = [_run_cfr(stacks, button_idx, config, seed, target_category, traverser) for traverser in range(len(stacks))]
+    assert sum(values) == pytest.approx(0.0, abs=1e-6)
+
+
+class TestCfrTreeMatchesGameEngine:
+    def test_everyone_always_calls_reaches_a_full_showdown(self):
+        config = GameConfig(small_blind=1.0, big_blind=2.0, starting_stack=200.0)
+        for seed in range(2):
+            _assert_matches_reference([200.0] * 4, button_idx=0, config=config, seed=seed, target_category=strategy.ACTION_CALL)
+
+    def test_everyone_always_folds_ends_uncontested_preflop(self):
+        config = GameConfig(small_blind=1.0, big_blind=2.0, starting_stack=200.0)
+        for seed in range(3):
+            _assert_matches_reference([200.0] * 3, button_idx=0, config=config, seed=seed, target_category=strategy.ACTION_FOLD)
+
+    def test_different_button_positions(self):
+        config = GameConfig(small_blind=1.0, big_blind=2.0, starting_stack=200.0)
+        for button_idx in range(2):
+            _assert_matches_reference([200.0] * 4, button_idx=button_idx, config=config, seed=42, target_category=strategy.ACTION_CALL)
+
+
+class TestCfrTreeConservesChipsThroughEquityAveraging:
+    def test_everyone_always_shoves_produces_side_pots(self):
+        config = GameConfig(small_blind=1.0, big_blind=2.0, starting_stack=200.0)
+        for seed in range(3):
+            _assert_conserves_chips([50.0, 100.0, 150.0], button_idx=0, config=config, seed=seed, target_category=strategy.ACTION_ALLIN)
+
+    def test_raising_to_the_street_cap_then_calling(self):
+        config = GameConfig(small_blind=1.0, big_blind=2.0, starting_stack=200.0, max_raises_per_street=3)
+        for seed in range(2):
+            _assert_conserves_chips([200.0, 200.0], button_idx=0, config=config, seed=seed, target_category=strategy.ACTION_RAISE_100)
