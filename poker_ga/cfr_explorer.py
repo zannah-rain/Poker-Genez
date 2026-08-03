@@ -354,6 +354,7 @@ def _heatmap_figures(filtered: pd.DataFrame, x_key: str, y_key: str) -> list[go.
 
 def _render_graphs(
     filtered: pd.DataFrame, graph_keys: list[str], display_keys: list[str], collapsed: bool, key_prefix: str = "",
+    level: int = 0,
 ) -> None:
     """One line chart per feature marked Graph, each paired with a
     multiselect of other features to "cross" it with -- every feature
@@ -365,11 +366,19 @@ def _render_graphs(
     calls this once per group split leaf (so every group gets its own,
     independently-computed set of graphs over just its own rows) --
     without it, two groups' widgets for the same graphed feature would
-    collide on the same Streamlit widget key."""
+    collide on the same Streamlit widget key. `level` should already be
+    one past whatever group heading this call's graphs belong to (0 with
+    no grouping at all) -- the "Graphs" heading here renders at exactly
+    that level (_heading_at_level), i.e. one level below its own group's
+    heading, so it always reads as a subsection of that group rather than
+    a sibling of equal weight; with no grouping, it's the page's only
+    section heading, so it keeps the more prominent st.header instead."""
     if not graph_keys:
         return
-    st.divider()
-    st.header("Graphs")
+    if level == 0:
+        st.header("Graphs")
+    else:
+        _heading_at_level("Graphs", level)
 
     for key in graph_keys:
         other_keys = [k for k in display_keys if k != key]
@@ -515,22 +524,33 @@ def _render_table(group_df: pd.DataFrame, table_split_keys: list[str], collapsed
         st.dataframe(counts)
 
 
-def _render_group_heading(text: str, level: int) -> None:
+def _heading_at_level(text: str, level: int) -> None:
     """level 0 uses st.subheader (matching this app's single-group-split
     behavior before nesting existed); each level below that drops one
     further markdown heading size, capped at h6, so a chain of several
-    group splits still reads as a strict hierarchy instead of running out
-    of distinct sizes."""
+    nested headings still reads as a strict hierarchy instead of running
+    out of distinct sizes."""
     if level == 0:
         st.subheader(text)
     else:
         st.markdown(f"{'#' * min(level + 3, 6)} {text}")
 
 
+def _render_group_heading(text: str, level: int) -> None:
+    """A divider above every group heading (at every nesting level) --
+    rather than one between each group's own table and its graphs, which
+    is where a divider used to sit -- so each group's whole block (heading,
+    per-group controls, table, extra additions, graphs) reads as one
+    visually separated unit, ending right before the next group's own
+    divider+heading."""
+    st.divider()
+    _heading_at_level(text, level)
+
+
 def _render_group_controls(
     group_df: pd.DataFrame, key_prefix: str, checkpoint_path: str, max_samples: int,
     filters: dict[str, list[str]], group_constraints: dict[str, list[str]], excluded_keys: set[str],
-    display_keys: list[str], collapsed: bool,
+    display_keys: list[str], collapsed: bool, level: int,
 ) -> tuple[pd.DataFrame, list[str]]:
     """The 4 per-group "Add ..." dropdowns beneath one group heading (see
     _render_grouped): options are every displayed feature except
@@ -541,7 +561,10 @@ def _render_group_controls(
     whole-reservoir ranking (_group_feature_importance). These are local
     to this one group -- they add graphs/tables/filters/subgroups just
     here, on top of whatever the sidebar's "global" role selections
-    already apply to every group.
+    already apply to every group. `level` is this group's own heading's
+    level, passed straight through to _render_graphs (as level + 1) so any
+    locally-added graphs' own "Graphs" heading sits one level below it,
+    same as the rest of this group's content.
 
     Returns (local_df, local_subgroup_keys): local_df is `group_df`
     narrowed by this group's own "Add filter" picks (independent of the
@@ -589,7 +612,7 @@ def _render_group_controls(
         _render_table(local_df, [table_key], collapsed)
 
     cross_options = [k for k in display_keys if k not in excluded_keys]
-    _render_graphs(local_df, local_graph_keys, cross_options, collapsed, f"{key_prefix}local::")
+    _render_graphs(local_df, local_graph_keys, cross_options, collapsed, f"{key_prefix}local::", level + 1)
 
     return local_df, local_subgroup_keys
 
@@ -620,7 +643,7 @@ def _render_grouped(
 
     if not group_split_keys:
         _render_table(df, table_split_keys, collapsed)
-        _render_graphs(df, graph_keys, display_keys, collapsed, key_prefix)
+        _render_graphs(df, graph_keys, display_keys, collapsed, key_prefix, level)
         return
 
     key, *rest = group_split_keys
@@ -635,7 +658,7 @@ def _render_grouped(
         child_constraints = {**group_constraints, key: [str(value)]}
         local_df, local_subgroup_keys = _render_group_controls(
             group_df, child_key_prefix, checkpoint_path, max_samples, filters, child_constraints,
-            set(child_constraints) | set(rest), display_keys, collapsed,
+            set(child_constraints) | set(rest), display_keys, collapsed, level,
         )
 
         _render_grouped(

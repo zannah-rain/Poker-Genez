@@ -303,6 +303,27 @@ class TestHierarchicalGroupSplit:
         headings = [el.value for el in list(at.subheader) + list(at.markdown)]
         assert not any("Street" in h and "Hand Strength Tier" in h for h in headings)
 
+    def test_one_divider_per_group_heading_not_between_table_and_graphs(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
+        at.sidebar.selectbox(key="role::facing_bet").set_value("Graph")
+        at.run(timeout=60)
+
+        assert not at.exception
+        # One divider per observed street_norm value, plus the sidebar's own
+        # divider above its collapse toggle -- none left over between a
+        # group's table and its "Graphs" section, which is where a divider
+        # used to sit.
+        assert len(at.divider) == 4 + 1
+
+    def test_no_divider_at_all_without_any_group_split(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::facing_bet").set_value("Graph")
+        at.run(timeout=60)
+
+        assert not at.exception
+        assert len(at.divider) == 1  # just the sidebar's own divider -- no group headings to put one above
+
 
 class TestGraphs:
     def test_marking_a_feature_as_graph_renders_one_line_chart(self, synthetic_checkpoint):
@@ -379,6 +400,31 @@ class TestGraphs:
             if "graph_heat::" in c.id
         )
         assert heatmap_titles == sorted(f"{label} rate" for label in _COLLAPSED_LABELS)
+
+    def test_ungrouped_graphs_section_uses_the_prominent_header(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::facing_bet").set_value("Graph")
+        at.run(timeout=60)
+
+        assert not at.exception
+        assert any(h.value == "Graphs" for h in at.header)
+        assert not any("Graphs" in m.value for m in at.markdown)
+
+    def test_grouped_graphs_heading_is_one_level_below_its_group_heading(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
+        at.sidebar.selectbox(key="role::facing_bet").set_value("Graph")
+        at.run(timeout=60)
+
+        assert not at.exception
+        # The group heading itself is a subheader (level 0); "Graphs" for
+        # that same group should render one level smaller, as a markdown
+        # heading, not compete with it as another st.header/subheader.
+        assert not any(h.value == "Graphs" for h in at.header)
+        assert not any(h.value == "Graphs" for h in at.subheader)
+        graphs_headings = [m.value for m in at.markdown if "Graphs" in m.value]
+        assert len(graphs_headings) == 4
+        assert all(h == "#### Graphs" for h in graphs_headings)  # one level below level-0's implicit h3
 
     def test_group_split_gives_each_group_its_own_graph(self, synthetic_checkpoint):
         at = _run_app()
