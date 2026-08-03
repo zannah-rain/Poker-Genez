@@ -50,7 +50,14 @@ strategy over the real game engine.
   genuinely self-play). A terminal showdown before the river is scored as
   an *equity* estimate over possible board completions, not one high-
   variance sampled runout, since Single Deep CFR's regression target is
-  exactly that counterfactual value.
+  exactly that counterfactual value. Every traversed hand independently
+  redraws each seat's own starting stack, uniformly between
+  `--min-starting-stack-bb`/`--max-starting-stack-bb` (default 20-200BB) --
+  a real multi-hand tournament session has players sitting at a whole
+  spread of stack depths at once (short after losing pots, deep after
+  winning them), not everyone re-buying to the same depth every hand, so
+  training only ever at one fixed depth would leave the net never having
+  seen the shove/fold and deep-stack decisions that depend on it.
 - **Advantage network** (`poker_ga/cfr_networks.py`): a plain MLP regressing
   each action category's counterfactual regret given the configured feature
   subset -- Single Deep CFR's only network, shared by every seat (no
@@ -108,11 +115,17 @@ Key flags (see `python cfr_main.py --help` for all of them):
 - `--num-equity-rollouts` -- board completions averaged for a pre-river
   all-in's equity estimate (exact whenever that many completions covers
   every possibility, Monte Carlo otherwise).
+- `--min-starting-stack-bb` / `--max-starting-stack-bb` (default 20/200) --
+  range each seat's own starting stack is independently redrawn from, per
+  traversed hand (see CFR tree traversal above).
 - `--hidden-sizes` / `--table-size` / `--feature-keys` -- advantage-net
   architecture and input vocabulary. Ignored (with a warning) when resuming
   from a checkpoint, since a saved net's shape can't change after the fact.
 - `--starting-stack`, `--small-blind`, `--big-blind`,
-  `--max-raises-per-street`, `--min-raise-fraction-of-pot` -- table rules.
+  `--max-raises-per-street`, `--min-raise-fraction-of-pot` -- table rules
+  for real (non-CFR) session play, e.g. the `--benchmark-interval` check --
+  `--starting-stack` doesn't affect training traversals themselves, see
+  `--min-starting-stack-bb` above.
 - `--out-dir` / `--checkpoint-interval` / `--reload-previous` -- where
   checkpoints (`checkpoint_latest.{pt,json,npz}` + trainer state) are
   written, how often, and whether a run resumes from one automatically.

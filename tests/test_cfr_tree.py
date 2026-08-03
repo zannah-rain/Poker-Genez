@@ -117,7 +117,10 @@ def _run_cfr(stacks, button_idx, config, seed, target_category, traverser, num_e
             seats[idx].all_in = True
     pot = sb_amt + bb_amt
 
-    state = cfr_tree._HandState(seats=seats, board=[], deck=deck, button_idx=button_idx, config=config)
+    state = cfr_tree._HandState(
+        seats=seats, board=[], deck=deck, button_idx=button_idx, config=config,
+        starting_stacks=list(stacks),
+    )
     ctx = cfr_tree._TraversalContext(
         traverser=traverser, net=_DominantRegretNet(target_category), reservoir=_DiscardingReservoir(),
         rng=rng, t=1.0, feature_indices=_FEATURE_INDICES, num_equity_rollouts=num_equity_rollouts,
@@ -189,7 +192,10 @@ class TestIsAggressorReflectsThePreviousStreet:
         for s in seats:
             s.hole = [Card.from_str("Ah"), Card.from_str("Kh")]
         deck = Deck(rng=_np_rng_to_random(np.random.default_rng(0)))
-        return cfr_tree._HandState(seats=seats, board=[], deck=deck, button_idx=0, config=GameConfig())
+        return cfr_tree._HandState(
+            seats=seats, board=[], deck=deck, button_idx=0, config=GameConfig(),
+            starting_stacks=[200.0, 200.0],
+        )
 
     def test_build_situation_uses_previous_street_aggressor_not_this_streets(self):
         state = self._make_state()

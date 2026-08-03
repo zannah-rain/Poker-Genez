@@ -52,6 +52,8 @@ class DeepCFRConfig:
     lr: float = 1e-3
     reservoir_capacity: int = 200_000
     num_equity_rollouts: int = cfr_tree.DEFAULT_NUM_EQUITY_ROLLOUTS
+    min_starting_stack_bb: float = cfr_tree.DEFAULT_MIN_STARTING_STACK_BB
+    max_starting_stack_bb: float = cfr_tree.DEFAULT_MAX_STARTING_STACK_BB
     game_config: GameConfig = field(default_factory=GameConfig)
 
 
@@ -226,6 +228,8 @@ def run_iteration(trainer: Trainer, rng: np.random.Generator, iteration: int, sh
         cfr_tree.traverse_hand(
             trainer.net, trainer.reservoir, config.table_size, config.game_config, rng,
             float(iteration), trainer.feature_indices, num_equity_rollouts=config.num_equity_rollouts,
+            min_starting_stack_bb=config.min_starting_stack_bb,
+            max_starting_stack_bb=config.max_starting_stack_bb,
         )
 
     trainer.net.train()

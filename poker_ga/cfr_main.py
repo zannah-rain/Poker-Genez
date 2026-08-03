@@ -56,6 +56,18 @@ def parse_args() -> argparse.Namespace:
         "(e.g. a river-only completion), a Monte Carlo estimate otherwise (e.g. a preflop all-in).",
     )
     p.add_argument(
+        "--min-starting-stack-bb", type=float, default=cfr_tree.DEFAULT_MIN_STARTING_STACK_BB,
+        help="Every traversed hand independently redraws each seat's own starting stack, "
+        "uniformly between this and --max-starting-stack-bb big blinds, rather than dealing every "
+        "training hand from the same fixed depth -- a real tournament session has players sitting "
+        "at a whole spread of stack depths at once, and a net that's only ever seen one fixed "
+        "depth has no basis for the shove/fold and deep-stack decisions that depend on the others.",
+    )
+    p.add_argument(
+        "--max-starting-stack-bb", type=float, default=cfr_tree.DEFAULT_MAX_STARTING_STACK_BB,
+        help="See --min-starting-stack-bb.",
+    )
+    p.add_argument(
         "--hidden-sizes", type=str, default="128,128",
         help="Comma-separated advantage-net hidden layer sizes. Ignored (with a warning) if a "
         "checkpoint is reloaded -- a saved net's architecture can't change after the fact.",
@@ -73,7 +85,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--max-raises-per-street", type=int, default=4)
     p.add_argument("--min-raise-fraction-of-pot", type=float, default=0.25)
-    p.add_argument("--starting-stack", type=float, default=200.0)
+    p.add_argument(
+        "--starting-stack", type=float, default=200.0,
+        help="Only affects real (non-CFR) session play, e.g. the --benchmark-interval check -- "
+        "training traversals ignore this and randomize their own starting stack instead, see "
+        "--min-starting-stack-bb.",
+    )
     p.add_argument("--small-blind", type=float, default=1.0)
     p.add_argument("--big-blind", type=float, default=2.0)
     p.add_argument("--seed", type=int, default=None)
@@ -273,6 +290,8 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
         lr=args.lr,
         reservoir_capacity=args.reservoir_capacity,
         num_equity_rollouts=args.num_equity_rollouts,
+        min_starting_stack_bb=args.min_starting_stack_bb,
+        max_starting_stack_bb=args.max_starting_stack_bb,
         game_config=game_config,
     )
 

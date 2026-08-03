@@ -64,19 +64,39 @@ NUM_ACTIONS = cfr_actions.NUM_ACTIONS
 # tune via cfr_train.DeepCFRConfig/cfr_main's --num-equity-rollouts.
 DEFAULT_NUM_EQUITY_ROLLOUTS = 50
 
+# Default range each seat's own starting stack is independently drawn
+# uniformly from (in big blinds) at the start of every traversed hand -- see
+# traverse_hand. A real multi-hand tournament session has players sitting at
+# a whole spread of stack depths at once (some short after losing pots, some
+# deep after winning them), not everyone re-buying to the same depth every
+# hand -- training only ever on one fixed depth would leave the net never
+# having seen (and so never having learned to play) the shove/fold decisions
+# that depend on being short, or the deep-stack postflop play that depends
+# on not being. Tune via cfr_train.DeepCFRConfig/cfr_main's
+# --min/max-starting-stack-bb.
+DEFAULT_MIN_STARTING_STACK_BB = 20.0
+DEFAULT_MAX_STARTING_STACK_BB = 200.0
+
 
 @dataclass
 class _HandState:
     """The mutable state of one Monte Carlo-sampled hand. Only ever copied
     at the traversing player's own branch points (see _decision_node) --
     every other node mutates in place, since exactly one path forward is
-    ever taken from there."""
+    ever taken from there.
+
+    `starting_stacks`: each seat's own chip count at the very start of this
+    hand, before blinds -- independently randomized per seat, per hand (see
+    traverse_hand), unlike `config.starting_stack` (a single fixed value).
+    Never mutated after the hand is dealt, so -- like `config` -- it's safe
+    to share by reference across copies rather than deep-copying."""
 
     seats: list[SeatState]
     board: list[Card]
     deck: Deck
     button_idx: int
     config: GameConfig
+    starting_stacks: list[float]
 
     def copy(self) -> "_HandState":
         return _HandState(
@@ -85,6 +105,7 @@ class _HandState:
             deck=copy.copy(self.deck),  # shallow: Deck's _cards list is read-only after shuffle
             button_idx=self.button_idx,
             config=self.config,
+            starting_stacks=self.starting_stacks,
         )
 
 
@@ -243,7 +264,7 @@ def _build_situation(
         num_raises_this_street=num_raises,
         num_preflop_raises=(num_raises if street == PREFLOP else preflop_raise_count),
         is_aggressor=(previous_street_aggressor == i),
-        starting_stack=state.config.starting_stack,
+        starting_stack=state.starting_stacks[i],
         big_blind=state.config.big_blind,
         raised_positions=frozenset(seat_role(j, state.button_idx, len(seats)) for j in raiser_seats if j != i),
     )
@@ -386,6 +407,8 @@ def _start_street(
 def traverse_hand(
     net, reservoir, table_size: int, config: GameConfig, rng: np.random.Generator, t: float,
     feature_indices: np.ndarray, num_equity_rollouts: int = DEFAULT_NUM_EQUITY_ROLLOUTS,
+    min_starting_stack_bb: float = DEFAULT_MIN_STARTING_STACK_BB,
+    max_starting_stack_bb: float = DEFAULT_MAX_STARTING_STACK_BB,
 ) -> float:
     """Runs one Monte Carlo external-sampling traversal of a full hand from
     a fresh deal, seating `table_size` players around a randomized button --
@@ -394,9 +417,19 @@ def traverse_hand(
     traverser's net chip result for this sampled hand (mainly useful for
     logging/sanity checks -- the training signal is the reservoir samples,
     not this return value).
+
+    Each seat's own starting stack for this hand is drawn independently and
+    uniformly from [min_starting_stack_bb, max_starting_stack_bb] big
+    blinds -- deliberately *not* `config.starting_stack` for every seat, so
+    the net actually sees (and learns from the resulting regret) the
+    shove/fold and deep-stack decisions that only come up at stack depths a
+    fixed-depth deal would never produce. `config.starting_stack` itself is
+    unused here as a result -- it only still applies to real (non-CFR)
+    session play (game.py/simulate.py).
     """
+    stacks = rng.uniform(min_starting_stack_bb, max_starting_stack_bb, size=table_size) * config.big_blind
     seats = [
-        SeatState(player=Player(player_id=i, genome=None), stack=config.starting_stack)
+        SeatState(player=Player(player_id=i, genome=None), stack=float(stacks[i]))
         for i in range(table_size)
     ]
     for s in seats:
@@ -419,7 +452,10 @@ def traverse_hand(
     pot = sb_amt + bb_amt
 
     traverser = int(rng.integers(0, table_size))
-    state = _HandState(seats=seats, board=[], deck=deck, button_idx=button_idx, config=config)
+    state = _HandState(
+        seats=seats, board=[], deck=deck, button_idx=button_idx, config=config,
+        starting_stacks=[float(x) for x in stacks],
+    )
     ctx = _TraversalContext(
         traverser=traverser, net=net, reservoir=reservoir, rng=rng, t=t,
         feature_indices=feature_indices, num_equity_rollouts=num_equity_rollouts,
