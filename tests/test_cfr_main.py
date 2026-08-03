@@ -20,7 +20,6 @@ _TINY_TRAINING_ARGS = [
     "--feature-keys", _FEATURE_KEYS,
     "--checkpoint-interval", "1",
     "--benchmark-interval", "0",
-    "--no-feature-importance",
     "--workers", "1",
     "--seed", "0",
 ]

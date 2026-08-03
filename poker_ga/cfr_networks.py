@@ -17,7 +17,6 @@ import torch
 import torch.nn as nn
 
 import cfr_features
-import cfr_reservoir
 import strategy
 
 DEFAULT_HIDDEN_SIZES = (512, 512, 512)
@@ -121,8 +120,7 @@ def mean_shap_contributions_for_samples(
     feature_keys: tuple[str, ...], rng: np.random.Generator,
     sample_size: int = 200, background_size: int = 20, nsamples: int = 20,
 ) -> list[tuple[str, float]]:
-    """Shared core behind mean_shap_contributions: normalized mean |SHAP
-    value| per feature (see _normalized_mean_abs_shap;
+    """Normalized mean |SHAP value| per feature (see _normalized_mean_abs_shap;
     shap.GradientExplainer's Expected Gradients approximation -- exact
     Shapley values are NP-hard, this is what SHAP itself uses for neural
     nets too) over a random subsample of `explain_features`, using a
@@ -130,13 +128,11 @@ def mean_shap_contributions_for_samples(
     distribution, averaged over every one of the net's
     NUM_ACTION_CATEGORIES outputs.
 
-    Split out from mean_shap_contributions so a caller that has already
-    picked its own pool of rows to explain -- e.g. cfr_explorer.py
-    restricting to just the reservoir rows that pass the sidebar's current
-    filters -- can reuse the exact same SHAP machinery instead of being
-    forced through a whole-reservoir sample. `sample_size`/`background_size`
-    bound the cost to roughly constant regardless of pool size; see
-    mean_shap_contributions for the measured cost of the defaults.
+    Takes an explicit pool of rows to explain (rather than reading straight
+    from a reservoir) so a caller like cfr_explorer.py can restrict to just
+    the rows that pass the sidebar's current filters. `sample_size`/
+    `background_size` bound the cost to roughly constant regardless of pool
+    size.
 
     Returns (feature_key, mean_abs_shap) pairs sorted most-to-least
     important. Empty list if `explain_features` is empty."""
@@ -158,34 +154,6 @@ def mean_shap_contributions_for_samples(
 
     order = np.argsort(-mean_abs)
     return [(feature_keys[i], float(mean_abs[i])) for i in order]
-
-
-def mean_shap_contributions(
-    net: AdvantageNet, reservoir: cfr_reservoir.ReservoirBuffer, feature_keys: tuple[str, ...],
-    rng: np.random.Generator, sample_size: int = 200, background_size: int = 20, nsamples: int = 20,
-) -> list[tuple[str, float]]:
-    """mean_shap_contributions_for_samples over the reservoir's own current
-    contents, used as both the explained pool and the background reference.
-
-    Drawn fresh from the reservoir every call rather than cached, so it's
-    cheap enough to call once per training iteration (see cfr_main.py)
-    while still tracking how importance shifts as training progresses --
-    `sample_size`/`background_size` bound the cost to roughly constant
-    regardless of how large the reservoir has grown, rather than literally
-    explaining every stored sample. Cost scales roughly with
-    sample_size * nsamples: the defaults here (200 * 20) run in a couple of
-    seconds against a (128, 128) net on CPU, measured directly; pushing
-    sample_size up toward the thousands for a smoother estimate costs
-    closer to a minute, so raise it deliberately via cfr_main.py's
-    --feature-importance-sample-size, not by editing this default.
-
-    Returns (feature_key, mean_abs_shap) pairs sorted most-to-least
-    important. Empty list if the reservoir has nothing in it yet."""
-    valid_features = reservoir.features[: len(reservoir)]
-    return mean_shap_contributions_for_samples(
-        net, valid_features, valid_features, feature_keys, rng,
-        sample_size=sample_size, background_size=background_size, nsamples=nsamples,
-    )
 
 
 def load(path: str) -> tuple[AdvantageNet, AdvantageNetConfig]:

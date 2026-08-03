@@ -85,7 +85,7 @@ def parse_args() -> argparse.Namespace:
         "always start from a fresh random net).",
     )
     p.add_argument(
-        "--benchmark-interval", type=int, default=10,
+        "--benchmark-interval", type=int, default=50,
         help="The progress check: every this many iterations, play the current net "
         "head-to-head (3-vs-3 tables, benchmark.py) against a snapshot taken this many iterations "
         "ago -- e.g. at 100, the first check is iteration 100 vs the net as it stood when this run "
@@ -135,50 +135,7 @@ def parse_args() -> argparse.Namespace:
         "itself is sequential in this version, so this only speeds up benchmarking). 1 is fully "
         "sequential (the default). 0 or negative means 'use every available CPU core'.",
     )
-    p.add_argument(
-        "--feature-importance", action=argparse.BooleanOptionalAction, default=True,
-        help="Every iteration, print the --feature-importance-top-n most- and least-important "
-        "features by mean |SHAP value| (cfr_networks.mean_shap_contributions) over a random "
-        "subsample of the reservoir -- pass --no-feature-importance to skip it (it adds a few "
-        "seconds per iteration at the defaults below; see --feature-importance-sample-size).",
-    )
-    p.add_argument("--feature-importance-top-n", type=int, default=5, help="How many top/bottom features to print.")
-    p.add_argument(
-        "--feature-importance-sample-size", type=int, default=200,
-        help="Reservoir samples explained per --feature-importance check. Cost scales roughly with "
-        "this times --feature-importance-nsamples -- the defaults run in a couple of seconds "
-        "against a (128, 128) net on CPU; pushing this into the thousands for a smoother estimate "
-        "costs closer to a minute.",
-    )
-    p.add_argument(
-        "--feature-importance-background-size", type=int, default=20,
-        help="Background (reference) samples shap.GradientExplainer interpolates from -- see "
-        "cfr_networks.mean_shap_contributions.",
-    )
-    p.add_argument(
-        "--feature-importance-nsamples", type=int, default=20,
-        help="Interpolation samples per explained point (shap.GradientExplainer's own `nsamples`) -- "
-        "see --feature-importance-sample-size for the combined cost.",
-    )
     return p.parse_args()
-
-
-def _print_feature_importance(
-    trainer: Trainer, rng: np.random.Generator, top_n: int, sample_size: int, background_size: int, nsamples: int,
-) -> None:
-    contributions = cfr_networks.mean_shap_contributions(
-        trainer.net, trainer.reservoir, trainer.config.feature_keys, rng,
-        sample_size=sample_size, background_size=background_size, nsamples=nsamples,
-    )
-    if not contributions:
-        return  # reservoir still empty (e.g. iteration 1 with a tiny traversals_per_iteration)
-    top = contributions[:top_n]
-    bottom = contributions[-top_n:] if len(contributions) > top_n else []
-    top_str = ", ".join(f"{k}={v:.4f}" for k, v in top)
-    print(f"         | feature importance (top {len(top)})    | {top_str}")
-    if bottom:
-        bottom_str = ", ".join(f"{k}={v:.4f}" for k, v in reversed(bottom))
-        print(f"         | feature importance (bottom {len(bottom)}) | {bottom_str}")
 
 
 def _benchmark_players(net: cfr_networks.AdvantageNet, feature_keys: tuple[str, ...], label: str, id_offset: int) -> list[Player]:
@@ -353,12 +310,6 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
             f"iter {iteration:4d} | reservoir {len(trainer.reservoir):7d}/{config.reservoir_capacity} | "
             f"mean loss {mean_loss:10.4f} | {elapsed:5.1f}s"
         )
-
-        if args.feature_importance:
-            _print_feature_importance(
-                trainer, rng, args.feature_importance_top_n, args.feature_importance_sample_size,
-                args.feature_importance_background_size, args.feature_importance_nsamples,
-            )
 
         if args.checkpoint_interval > 0 and iteration % args.checkpoint_interval == 0:
             trainer.save(checkpoint_path)

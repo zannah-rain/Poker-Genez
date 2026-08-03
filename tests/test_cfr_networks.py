@@ -7,7 +7,7 @@ import torch
 
 import strategy
 from cfr_networks import (
-    AdvantageNet, AdvantageNetConfig, _normalized_mean_abs_shap, clone, load, mean_shap_contributions, save,
+    AdvantageNet, AdvantageNetConfig, _normalized_mean_abs_shap, clone, load, mean_shap_contributions_for_samples, save,
 )
 from cfr_reservoir import ReservoirBuffer
 
@@ -141,21 +141,21 @@ class TestNormalizedMeanAbsShap:
         assert mean_abs[0] == pytest.approx(1.5)  # mean(|1|,|1|,|2|,|2|) unchanged by centering on a zero mean
 
 
-class TestMeanShapContributions:
-    def test_empty_reservoir_returns_empty_list(self):
+class TestMeanShapContributionsForSamples:
+    def test_empty_pool_returns_empty_list(self):
         rng = np.random.default_rng(0)
         net = AdvantageNet(input_dim=4, hidden_sizes=(8,))
-        buf = ReservoirBuffer(capacity=10, feature_dim=4, num_actions=strategy.NUM_ACTION_CATEGORIES, rng=rng)
+        empty = np.zeros((0, 4), dtype=np.float32)
         keys = ("a", "b", "c", "d")
-        assert mean_shap_contributions(net, buf, keys, rng, sample_size=5, background_size=2, nsamples=5) == []
+        assert mean_shap_contributions_for_samples(net, empty, empty, keys, rng, sample_size=5, background_size=2, nsamples=5) == []
 
     def test_returns_one_entry_per_feature_sorted_descending_and_nonnegative(self):
         rng = np.random.default_rng(0)
         net = AdvantageNet(input_dim=4, hidden_sizes=(8,))
-        buf = _filled_reservoir(capacity=30, feature_dim=4, rng=rng)
+        features = _filled_reservoir(capacity=30, feature_dim=4, rng=rng).features
         keys = ("a", "b", "c", "d")
 
-        result = mean_shap_contributions(net, buf, keys, rng, sample_size=10, background_size=5, nsamples=5)
+        result = mean_shap_contributions_for_samples(net, features, features, keys, rng, sample_size=10, background_size=5, nsamples=5)
 
         assert sorted(k for k, _ in result) == sorted(keys)
         values = [v for _, v in result]
@@ -168,10 +168,10 @@ class TestMeanShapContributions:
         with torch.no_grad():
             first_layer = net.model[0]
             first_layer.weight[:, 2] = 0.0  # feature index 2 can never affect any hidden unit
-        buf = _filled_reservoir(capacity=30, feature_dim=4, rng=rng)
+        features = _filled_reservoir(capacity=30, feature_dim=4, rng=rng).features
         keys = ("a", "b", "ignored", "d")
 
-        result = mean_shap_contributions(net, buf, keys, rng, sample_size=10, background_size=5, nsamples=5)
+        result = mean_shap_contributions_for_samples(net, features, features, keys, rng, sample_size=10, background_size=5, nsamples=5)
 
         by_key = dict(result)
         assert by_key["ignored"] == pytest.approx(0.0, abs=1e-6)

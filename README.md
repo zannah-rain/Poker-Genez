@@ -129,11 +129,6 @@ Key flags (see `python cfr_main.py --help` for all of them):
   non-improving check still reverts the net either way).
 - `--workers` -- worker processes for the benchmark check specifically
   (tree traversal itself is sequential). 0 or negative uses every core.
-- `--feature-importance` (on by default) -- every iteration, prints the
-  top/bottom features by mean |SHAP value| over a reservoir subsample
-  (`cfr_networks.mean_shap_contributions`); see
-  `--feature-importance-sample-size` / `-background-size` / `-nsamples` for
-  its cost/quality knobs, or pass `--no-feature-importance` to skip it.
 
 The training loop's checkpoint is saved to `<out-dir>/checkpoint_latest`
 (three files: `.pt` net weights, `.json` config, `.npz` reservoir, plus a

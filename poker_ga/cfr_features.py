@@ -104,7 +104,7 @@ def display_feature_keys(feature_keys: list[str] | tuple[str, ...]) -> list[str]
 
 def fold_child_contributions(contributions: list[tuple[str, float]]) -> list[tuple[str, float]]:
     """`contributions` (feature_key, value) pairs -- as cfr_networks.
-    mean_shap_contributions returns -- with every linked child's value
+    mean_shap_contributions_for_samples returns -- with every linked child's value
     summed into its parent's instead of listed separately (mirroring
     display_feature_keys' choice of which key represents a family), then
     re-sorted most-to-least. A child whose parent isn't present in
