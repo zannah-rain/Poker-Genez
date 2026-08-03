@@ -37,7 +37,7 @@ class TestSaveLoadRoundTrip:
     def test_reloaded_net_produces_identical_predictions(self):
         net = AdvantageNet(input_dim=6, hidden_sizes=(16, 16))
         config = AdvantageNetConfig(
-            feature_keys=("hand_category_norm", "street_norm", "facing_bet", "pot_type_norm", "call_amount_norm", "spr_norm"),
+            feature_keys=("hand_category_norm", "street_norm", "is_aggressor", "pot_type_norm", "call_amount_norm", "spr_norm"),
             hidden_sizes=(16, 16),
             table_size=6,
         )

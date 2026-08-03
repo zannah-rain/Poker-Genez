@@ -7,7 +7,7 @@ from cfr_main import _reload_checkpoint, main, parse_args
 from cfr_train import DeepCFRConfig, Trainer
 from game import GameConfig
 
-_FEATURE_KEYS = "hand_category_norm,street_norm,facing_bet,pot_type_norm"
+_FEATURE_KEYS = "hand_category_norm,street_norm,call_amount_norm,pot_type_norm"
 
 _TINY_TRAINING_ARGS = [
     "--traversals-per-iteration", "2",

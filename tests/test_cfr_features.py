@@ -32,13 +32,13 @@ def _make_situation(**overrides):
 
 class TestFeatureIndices:
     def test_maps_keys_to_correct_positions(self):
-        keys = ["hand_category_norm", "street_norm", "facing_bet"]
+        keys = ["hand_category_norm", "street_norm", "hole_suited"]
         indices = cfr_features.feature_indices(keys)
         expected = [FEATURE_NAMES.index(k) for k in keys]
         assert list(indices) == expected
 
     def test_preserves_requested_order_even_if_out_of_order(self):
-        keys = ["facing_bet", "hand_category_norm"]
+        keys = ["hole_suited", "hand_category_norm"]
         indices = cfr_features.feature_indices(keys)
         assert list(indices) == [FEATURE_NAMES.index(k) for k in keys]
 
@@ -67,8 +67,8 @@ class TestDefaultFeatureKeys:
 
 class TestBucketLabel:
     def test_boolean_feature_uses_spec_label_and_negation(self):
-        assert cfr_features.bucket_label("facing_bet", 1.0) == "Facing A Bet"
-        assert cfr_features.bucket_label("facing_bet", 0.0) == "Not Facing A Bet"
+        assert cfr_features.bucket_label("hole_suited", 1.0) == "Suited Hole Cards"
+        assert cfr_features.bucket_label("hole_suited", 0.0) == "Not Suited Hole Cards"
 
     def test_categorical_feature_matches_exact_value_table_points(self):
         assert cfr_features.bucket_label("street_norm", 0.0) == "Preflop"
@@ -80,9 +80,9 @@ class TestBucketLabel:
         # 0.3 is closer to 1/3 (Flop) than to 0.0 (Preflop).
         assert cfr_features.bucket_label("street_norm", 0.3) == "Flop"
 
-    def test_24_way_hand_category(self):
+    def test_26_way_hand_category(self):
         assert cfr_features.bucket_label("hand_category_norm", 0.0) == "High Card"
-        assert cfr_features.bucket_label("hand_category_norm", 10 / 23) == "Two Pair"
+        assert cfr_features.bucket_label("hand_category_norm", 12 / 25) == "Two Pair"
         assert cfr_features.bucket_label("hand_category_norm", 1.0) == "Straight Flush"
 
 
@@ -95,8 +95,8 @@ class TestBucketLabels:
 
     def test_boolean_vectorized(self):
         values = np.array([0.0, 1.0, 1.0, 0.0])
-        labels = cfr_features.bucket_labels("facing_bet", values)
-        assert list(labels) == ["Not Facing A Bet", "Facing A Bet", "Facing A Bet", "Not Facing A Bet"]
+        labels = cfr_features.bucket_labels("hole_suited", values)
+        assert list(labels) == ["Not Suited Hole Cards", "Suited Hole Cards", "Suited Hole Cards", "Not Suited Hole Cards"]
 
 
 class TestBucketCategories:
@@ -104,7 +104,7 @@ class TestBucketCategories:
         assert cfr_features.bucket_categories("street_norm") == ["Preflop", "Flop", "Turn", "River"]
 
     def test_boolean_order_is_false_then_true(self):
-        assert cfr_features.bucket_categories("facing_bet") == ["Not Facing A Bet", "Facing A Bet"]
+        assert cfr_features.bucket_categories("hole_suited") == ["Not Suited Hole Cards", "Suited Hole Cards"]
 
     def test_every_bucket_label_output_is_a_valid_category(self):
         values = np.array([0.0, 1 / 3, 2 / 3, 1.0, 0.1, 0.9])
@@ -123,7 +123,7 @@ class TestDisplayFeatureKeys:
         assert cfr_features.display_feature_keys(keys) == ["has_pair", "street_norm"]
 
     def test_keeps_standalone_features_untouched(self):
-        keys = ["street_norm", "facing_bet"]
+        keys = ["street_norm", "hole_suited"]
         assert cfr_features.display_feature_keys(keys) == keys
 
 
@@ -147,7 +147,7 @@ class TestFoldChildContributions:
 class TestExtractSubset:
     def test_matches_full_extraction_at_selected_positions(self):
         situation = _make_situation()
-        keys = ["hand_category_norm", "street_norm", "facing_bet"]
+        keys = ["hand_category_norm", "street_norm", "hole_suited"]
         indices = cfr_features.feature_indices(keys)
         subset = cfr_features.extract_subset(situation, indices)
         full = extract_features(situation)

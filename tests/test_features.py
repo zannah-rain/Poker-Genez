@@ -88,10 +88,11 @@ class TestHandCategoryFeatures:
             street=1,
         )
         values = values_by_key(situation)
-        assert values["hand_category_norm"] == pytest.approx(13 / 23)
+        assert values["hand_category_norm"] == pytest.approx(15 / 25)
         assert values["has_top_set"] == 1.0
-        for key in ["has_high_card", "has_pair", "has_two_pair", "has_bottom_set", "has_set",
-                    "has_straight", "has_flush", "has_full_house", "has_quads", "has_straight_flush"]:
+        for key in ["has_high_card", "has_king_high", "has_ace_high", "has_pair", "has_two_pair",
+                    "has_bottom_set", "has_set", "has_straight", "has_flush", "has_full_house",
+                    "has_quads", "has_straight_flush"]:
             assert values[key] == 0.0
 
     def test_preflop_pocket_pair_is_a_pair(self):
@@ -99,8 +100,35 @@ class TestHandCategoryFeatures:
         # against -- lands in the generic "Pair" catch-all bucket.
         situation = make_situation(hole=[Card.from_str("9h"), Card.from_str("9d")], board=[])
         values = values_by_key(situation)
-        assert values["hand_category_norm"] == pytest.approx(3 / 23)
+        assert values["hand_category_norm"] == pytest.approx(5 / 25)
         assert values["has_pair"] == 1.0
+
+    def test_ace_high_no_pair_is_the_ace_high_bucket(self):
+        hole = [Card.from_str("Ah"), Card.from_str("2d")]
+        board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("3h")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=1))
+        assert values["hand_category_norm"] == pytest.approx(2 / 25)
+        assert values["has_ace_high"] == 1.0
+        assert values["has_king_high"] == 0.0
+        assert values["has_high_card"] == 0.0
+
+    def test_king_high_no_pair_is_the_king_high_bucket(self):
+        hole = [Card.from_str("Kh"), Card.from_str("2d")]
+        board = [Card.from_str("Qc"), Card.from_str("7d"), Card.from_str("3h")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=1))
+        assert values["hand_category_norm"] == pytest.approx(1 / 25)
+        assert values["has_king_high"] == 1.0
+        assert values["has_ace_high"] == 0.0
+        assert values["has_high_card"] == 0.0
+
+    def test_queen_high_no_pair_is_the_generic_high_card_bucket(self):
+        hole = [Card.from_str("Qh"), Card.from_str("2d")]
+        board = [Card.from_str("Jc"), Card.from_str("7d"), Card.from_str("3h")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=1))
+        assert values["hand_category_norm"] == pytest.approx(0 / 25)
+        assert values["has_high_card"] == 1.0
+        assert values["has_king_high"] == 0.0
+        assert values["has_ace_high"] == 0.0
 
 
 class TestHoleCardFeatures:
@@ -236,10 +264,6 @@ class TestPositionAndStreet:
 
 
 class TestBettingAndPotFeatures:
-    def test_facing_bet_flag(self):
-        assert values_by_key(make_situation(call_amount=0.0))["facing_bet"] == 0.0
-        assert values_by_key(make_situation(call_amount=5.0))["facing_bet"] == 1.0
-
     def test_call_amount_norm_clips_above_pot(self):
         # Comfortably past even the Overbet ceiling (1.25x pot) -> clipped.
         values = values_by_key(make_situation(pot=100.0, call_amount=500.0))
@@ -283,17 +307,25 @@ class TestBettingAndPotFeatures:
 
 
 class TestStackAndSeatFeatures:
-    def test_stack_depth_norm_at_starting_stack_is_half(self):
-        values = values_by_key(make_situation(my_stack=200.0, starting_stack=200.0))
+    def test_stack_depth_norm_at_100bb_is_half(self):
+        values = values_by_key(make_situation(starting_stack=200.0, big_blind=2.0))
         assert values["stack_depth_norm"] == pytest.approx(0.5)
 
-    def test_stack_depth_norm_clips_at_double_stack(self):
-        values = values_by_key(make_situation(my_stack=1000.0, starting_stack=200.0))
+    def test_stack_depth_norm_clips_at_200bb(self):
+        values = values_by_key(make_situation(starting_stack=1000.0, big_blind=2.0))
         assert values["stack_depth_norm"] == 1.0
 
-    def test_stack_depth_norm_zero_when_busted(self):
-        values = values_by_key(make_situation(my_stack=0.0, starting_stack=200.0))
+    def test_stack_depth_norm_zero_at_zero_starting_stack(self):
+        values = values_by_key(make_situation(starting_stack=0.0, big_blind=2.0))
         assert values["stack_depth_norm"] == 0.0
+
+    def test_stack_depth_norm_unaffected_by_mid_hand_stack_changes(self):
+        # Fixed for the whole hand -- a player who's already committed chips
+        # this hand (my_stack < starting_stack) still reads the same Stack
+        # Depth as at the start of the hand.
+        at_start = values_by_key(make_situation(my_stack=200.0, starting_stack=200.0, big_blind=2.0))
+        mid_hand = values_by_key(make_situation(my_stack=50.0, starting_stack=200.0, big_blind=2.0))
+        assert at_start["stack_depth_norm"] == mid_hand["stack_depth_norm"] == pytest.approx(0.5)
 
     def test_num_active_norm(self):
         values = values_by_key(make_situation(num_active=3))
@@ -392,7 +424,7 @@ class TestFlopTexture:
         values = values_by_key(make_situation(hole=[Card.from_str("6s"), Card.from_str("2d")], board=board))
         assert values["connected_straight_draw_flop"] == 1.0
         assert values["connected_no_straight_draw_flop"] == 0.0
-        assert values["straight_draw"] == 1.0
+        assert values["straight_draw_norm"] > 0.0
 
     def test_disconnected_flop_has_no_straight_draw_bucket_active(self):
         board = [Card.from_str("2c"), Card.from_str("8d"), Card.from_str("Kh")]
@@ -624,18 +656,6 @@ class TestHandCategoryPairBuckets:
 
 
 class TestHandVsBoardHeuristics:
-    def test_ace_high_no_pair(self):
-        hole = [Card.from_str("Ah"), Card.from_str("2d")]
-        board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("3h")]
-        values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["ace_high_no_pair"] == 1.0
-
-    def test_king_high_no_pair(self):
-        hole = [Card.from_str("Kh"), Card.from_str("2d")]
-        board = [Card.from_str("Qc"), Card.from_str("7d"), Card.from_str("3h")]
-        values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["king_high_no_pair"] == 1.0
-
     def test_nuts_flush_draw(self):
         hole = [Card.from_str("Ah"), Card.from_str("9h")]
         board = [Card.from_str("7h"), Card.from_str("4h"), Card.from_str("2c")]
@@ -650,25 +670,36 @@ class TestHandVsBoardHeuristics:
         assert values["flush_draw"] == 1.0
         assert values["nuts_flush_draw"] == 0.0
 
-    def test_open_ended_straight_draw_and_gutshot(self):
-        oesd_hole = [Card.from_str("6h"), Card.from_str("7d")]
-        oesd_board = [Card.from_str("8c"), Card.from_str("9s"), Card.from_str("2h")]
-        values = values_by_key(make_situation(hole=oesd_hole, board=oesd_board, street=1))
-        assert values["open_ended_straight_draw"] == 1.0
-        assert values["gutshot"] == 0.0
+    def test_open_ended_straight_draw_is_the_top_bucket(self):
+        hole = [Card.from_str("6h"), Card.from_str("7d")]
+        board = [Card.from_str("8c"), Card.from_str("9s"), Card.from_str("2h")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=1))
+        assert values["straight_draw_norm"] == pytest.approx(1.0)
+        assert values["has_open_ended_straight_draw"] == 1.0
+        assert values["has_gutshot"] == 0.0
 
-        gutshot_hole = [Card.from_str("6h"), Card.from_str("7d")]
-        gutshot_board = [Card.from_str("8c"), Card.from_str("Ts"), Card.from_str("2h")]
-        values2 = values_by_key(make_situation(hole=gutshot_hole, board=gutshot_board, street=1))
-        assert values2["gutshot"] == 1.0
-        assert values2["open_ended_straight_draw"] == 0.0
+    def test_gutshot_is_the_middle_bucket(self):
+        hole = [Card.from_str("6h"), Card.from_str("7d")]
+        board = [Card.from_str("8c"), Card.from_str("Ts"), Card.from_str("2h")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=1))
+        assert values["straight_draw_norm"] == pytest.approx(0.5)
+        assert values["has_gutshot"] == 1.0
+        assert values["has_open_ended_straight_draw"] == 0.0
+
+    def test_no_straight_draw_is_the_bottom_bucket(self):
+        hole = [Card.from_str("2h"), Card.from_str("2d")]
+        board = [Card.from_str("9c"), Card.from_str("5s"), Card.from_str("Kh")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=1))
+        assert values["straight_draw_norm"] == 0.0
+        assert values["has_gutshot"] == 0.0
+        assert values["has_open_ended_straight_draw"] == 0.0
 
     def test_combo_draw(self):
         hole = [Card.from_str("6h"), Card.from_str("7h")]
         board = [Card.from_str("8h"), Card.from_str("9h"), Card.from_str("2c")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
         assert values["flush_draw"] == 1.0
-        assert values["straight_draw"] == 1.0
+        assert values["straight_draw_norm"] > 0.0
         assert values["combo_draw"] == 1.0
 
     def test_backdoor_flush_draw_two_hole_cards(self):

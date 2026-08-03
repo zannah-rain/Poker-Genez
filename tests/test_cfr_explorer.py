@@ -13,7 +13,7 @@ import cfr_reservoir
 import strategy
 
 _APP_PATH = os.path.join(os.path.dirname(__file__), "..", "poker_ga", "cfr_explorer.py")
-_FEATURE_KEYS = ("street_norm", "facing_bet", "hand_category_norm")
+_FEATURE_KEYS = ("street_norm", "hole_suited", "hand_category_norm")
 # Mirrors _COLLAPSED_LABELS -- not imported directly since
 # cfr_explorer.py calls main() at module scope (it's a script, driven only
 # via AppTest.from_file, not a plain importable module).
@@ -177,7 +177,7 @@ class TestInteraction:
     def test_a_third_table_split_shows_an_error_but_does_not_crash(self, synthetic_checkpoint):
         at = _run_app()
         at.sidebar.selectbox(key="role::street_norm").set_value("Table split")
-        at.sidebar.selectbox(key="role::facing_bet").set_value("Table split")
+        at.sidebar.selectbox(key="role::hole_suited").set_value("Table split")
         at.sidebar.selectbox(key="role::hand_category_norm").set_value("Table split")
         at.run(timeout=60)
         assert not at.exception
@@ -185,9 +185,9 @@ class TestInteraction:
 
     def test_deselecting_all_filter_values_shows_a_no_match_warning(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::facing_bet").set_value("Filter")
+        at.sidebar.selectbox(key="role::hole_suited").set_value("Filter")
         at.run(timeout=60)
-        at.sidebar.multiselect(key="filter::facing_bet").set_value([])
+        at.sidebar.multiselect(key="filter::hole_suited").set_value([])
         at.run(timeout=60)
         assert not at.exception
         assert len(at.warning) >= 1
@@ -218,9 +218,9 @@ class TestFilteredFeatureImportance:
 
     def test_zero_matching_rows_still_shows_every_role_selectbox(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::facing_bet").set_value("Filter")
+        at.sidebar.selectbox(key="role::hole_suited").set_value("Filter")
         at.run(timeout=60)
-        at.sidebar.multiselect(key="filter::facing_bet").set_value([])
+        at.sidebar.multiselect(key="filter::hole_suited").set_value([])
         at.run(timeout=60)
 
         role_boxes = [sb for sb in at.sidebar.selectbox if sb.key and sb.key.startswith("role::")]
@@ -260,23 +260,23 @@ class TestActiveFiltersWidget:
 
     def test_active_filter_shows_a_removable_tag_widget(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::facing_bet").set_value("Filter")
+        at.sidebar.selectbox(key="role::hole_suited").set_value("Filter")
         at.run(timeout=60)
 
         active_widgets = [ms for ms in at.multiselect if ms.key and ms.key.startswith("active_filters::")]
         assert len(active_widgets) == 1
-        assert active_widgets[0].value == ["facing_bet"]
+        assert active_widgets[0].value == ["hole_suited"]
 
     def test_removing_a_tag_turns_that_filter_back_to_unused(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::facing_bet").set_value("Filter")
+        at.sidebar.selectbox(key="role::hole_suited").set_value("Filter")
         at.run(timeout=60)
         active_widget = next(ms for ms in at.multiselect if ms.key and ms.key.startswith("active_filters::"))
         active_widget.set_value([])
         at.run(timeout=60)
 
         assert not at.exception
-        assert at.sidebar.selectbox(key="role::facing_bet").value == "Unused"
+        assert at.sidebar.selectbox(key="role::hole_suited").value == "Unused"
         assert len(at.multiselect) == 0
 
 
@@ -306,7 +306,7 @@ class TestHierarchicalGroupSplit:
     def test_one_divider_per_group_heading_not_between_table_and_graphs(self, synthetic_checkpoint):
         at = _run_app()
         at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
-        at.sidebar.selectbox(key="role::facing_bet").set_value("Graph")
+        at.sidebar.selectbox(key="role::hole_suited").set_value("Graph")
         at.run(timeout=60)
 
         assert not at.exception
@@ -318,7 +318,7 @@ class TestHierarchicalGroupSplit:
 
     def test_no_divider_at_all_without_any_group_split(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::facing_bet").set_value("Graph")
+        at.sidebar.selectbox(key="role::hole_suited").set_value("Graph")
         at.run(timeout=60)
 
         assert not at.exception
@@ -361,7 +361,7 @@ class TestGraphs:
 
         cross = at.multiselect(key="graph_cross::street_norm")
         assert "Betting Street" not in cross.options  # street_norm's own label -- can't cross a feature with itself
-        assert set(cross.options) == {"Facing A Bet", "Hand Strength Tier"}
+        assert set(cross.options) == {"Suited Hole Cards", "Hand Strength Tier"}
 
     def test_line_chart_has_one_trace_per_action_and_a_percent_y_axis(self, synthetic_checkpoint):
         at = _run_app()
@@ -403,7 +403,7 @@ class TestGraphs:
 
     def test_ungrouped_graphs_section_uses_the_prominent_header(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::facing_bet").set_value("Graph")
+        at.sidebar.selectbox(key="role::hole_suited").set_value("Graph")
         at.run(timeout=60)
 
         assert not at.exception
@@ -413,7 +413,7 @@ class TestGraphs:
     def test_grouped_graphs_heading_is_one_level_below_its_group_heading(self, synthetic_checkpoint):
         at = _run_app()
         at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
-        at.sidebar.selectbox(key="role::facing_bet").set_value("Graph")
+        at.sidebar.selectbox(key="role::hole_suited").set_value("Graph")
         at.run(timeout=60)
 
         assert not at.exception
@@ -429,7 +429,7 @@ class TestGraphs:
     def test_group_split_gives_each_group_its_own_graph(self, synthetic_checkpoint):
         at = _run_app()
         at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
-        at.sidebar.selectbox(key="role::facing_bet").set_value("Graph")
+        at.sidebar.selectbox(key="role::hole_suited").set_value("Graph")
         at.run(timeout=60)
 
         assert not at.exception
@@ -440,7 +440,7 @@ class TestGraphs:
     def test_group_split_graph_only_reflects_that_groups_own_rows(self, synthetic_checkpoint):
         at = _run_app()
         at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
-        at.sidebar.selectbox(key="role::facing_bet").set_value("Graph")
+        at.sidebar.selectbox(key="role::hole_suited").set_value("Graph")
         at.run(timeout=60)
 
         assert not at.exception
@@ -458,7 +458,7 @@ class TestGraphs:
     def test_group_splits_cross_dropdown_is_independent_per_group(self, synthetic_checkpoint):
         at = _run_app()
         at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
-        at.sidebar.selectbox(key="role::facing_bet").set_value("Graph")
+        at.sidebar.selectbox(key="role::hole_suited").set_value("Graph")
         at.run(timeout=60)
 
         cross_widgets = [ms for ms in at.multiselect if ms.key and "graph_cross::" in ms.key]
@@ -494,7 +494,7 @@ class TestPerGroupControls:
         local_widgets = [ms for ms in at.multiselect if ms.key and ms.key.startswith("street_norm=")]
         assert local_widgets
         assert all("Betting Street" not in ms.options for ms in local_widgets)
-        assert all(set(ms.options) == {"Facing A Bet", "Hand Strength Tier"} for ms in local_widgets)
+        assert all(set(ms.options) == {"Suited Hole Cards", "Hand Strength Tier"} for ms in local_widgets)
 
     def test_add_graph_for_one_group_only_renders_a_chart_there(self, synthetic_checkpoint):
         at = _run_app()
@@ -502,13 +502,13 @@ class TestPerGroupControls:
         at.run(timeout=60)
 
         add_graph_widgets = [ms for ms in at.multiselect if ms.key and ms.key.endswith("::local_graph")]
-        add_graph_widgets[0].set_value(["facing_bet"])
+        add_graph_widgets[0].set_value(["hole_suited"])
         at.run(timeout=60)
 
         assert not at.exception
         charts = at.get("plotly_chart")
         assert len(charts) == 1
-        assert "local::graph_chart::facing_bet" in charts[0].id
+        assert "local::graph_chart::hole_suited" in charts[0].id
         assert add_graph_widgets[0].key.removesuffix("local_graph") in charts[0].id
 
     def test_add_table_for_one_group_renders_a_labeled_extra_table(self, synthetic_checkpoint):
@@ -532,11 +532,11 @@ class TestPerGroupControls:
 
         add_filter_widgets = [ms for ms in at.multiselect if ms.key and ms.key.endswith("::local_filter")]
         group_prefix = add_filter_widgets[0].key.removesuffix("local_filter")
-        add_filter_widgets[0].set_value(["facing_bet"])
+        add_filter_widgets[0].set_value(["hole_suited"])
         at.run(timeout=60)
 
-        values_widget = at.multiselect(key=f"{group_prefix}local_filter_values::facing_bet")
-        assert set(values_widget.value) == {"Not Facing A Bet", "Facing A Bet"}  # defaults to every observed value
+        values_widget = at.multiselect(key=f"{group_prefix}local_filter_values::hole_suited")
+        assert set(values_widget.value) == {"Not Suited Hole Cards", "Suited Hole Cards"}  # defaults to every observed value
 
         values_widget.set_value([])  # narrow to nothing, matching the app's existing "no rows" handling
         at.run(timeout=60)
@@ -577,4 +577,4 @@ class TestPerGroupControls:
         ]
         assert nested_widgets
         assert all("Hand Strength Tier" not in ms.options for ms in nested_widgets)
-        assert all(ms.options == ["Facing A Bet"] for ms in nested_widgets)
+        assert all(ms.options == ["Suited Hole Cards"] for ms in nested_widgets)
