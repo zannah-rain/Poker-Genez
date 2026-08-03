@@ -8,7 +8,7 @@ from benchmark import (
     run_benchmark_until_resolved,
 )
 from game import GameConfig
-from genome import BET_RAISE, CHECK_CALL, FOLD, Genome
+from genome import BET_RAISE, CHECK_CALL, FOLD
 from player import Player
 
 
@@ -22,9 +22,19 @@ class FixedGenome:
         return action, self.bet_size
 
 
+class RandomPolicy:
+    """Picks a uniformly random legal action each decision -- a generic
+    stand-in for "some real strategy" in tests that don't care which one."""
+
+    def decide(self, situation, legal_actions, rng=None):
+        rng = rng if rng is not None else np.random.default_rng()
+        action = legal_actions[int(rng.integers(0, len(legal_actions)))]
+        bet_size = float(rng.uniform(0.25, 1.5)) * max(situation.pot, 1.0) if action == BET_RAISE else 0.0
+        return action, bet_size
+
+
 def make_random_players(n, seed=0):
-    rng = np.random.default_rng(seed)
-    return [Player(player_id=i, genome=Genome.random(rng)) for i in range(n)]
+    return [Player(player_id=i, genome=RandomPolicy()) for i in range(n)]
 
 
 def make_fixed_players(n, action, id_offset=0, bet_size=0.0):

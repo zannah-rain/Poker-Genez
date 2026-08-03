@@ -1,25 +1,15 @@
 """CLI: train a Single Deep CFR advantage network over 6-max NLHE.
 
-Mirrors main.py's (the GA's) training-loop conveniences: resumes from the
-previous run's checkpoint if one exists, and, every --benchmark-interval
-iterations, plays the current net head-to-head against a snapshot
-(cfr_networks.clone) taken --benchmark-interval iterations ago in a
-statistically-resolved 3-vs-3 match (benchmark.py) -- a direct "did the
-last --benchmark-interval iterations actually help" check. That snapshot
-is an anchor, not a rolling one iteration behind: it only advances to the
-current net when a check shows improvement, so a run of non-improving
-checks keeps comparing against the last net that was actually beaten (the
-same way main.py's GA benchmark checkpoint only advances on improvement).
-If a check doesn't show a resolved improvement, the update is undone
-(Trainer.revert_to the anchor snapshot) and it counts toward early
-stopping, the same way main.py reverts to (and stops retrying past) a
-non-improving GA checkpoint.
-
-Optionally (--eval-interval), it can *also* be checked against real GA
-genomes -- loaded from a saved population (--eval-genome-path, e.g. a
-main.py run's latest_population.json) rather than freshly random ones --
-as a secondary "is this any good against a real strategy, not just against
-itself" sense check; see --eval-interval's help text.
+Every --benchmark-interval iterations, plays the current net head-to-head
+against a snapshot (cfr_networks.clone) taken --benchmark-interval
+iterations ago in a statistically-resolved 3-vs-3 match (benchmark.py) -- a
+direct "did the last --benchmark-interval iterations actually help" check.
+That snapshot is an anchor, not a rolling one iteration behind: it only
+advances to the current net when a check shows improvement, so a run of
+non-improving checks keeps comparing against the last net that was
+actually beaten. If a check doesn't show a resolved improvement, the
+update is undone (Trainer.revert_to the anchor snapshot) and it counts
+toward early stopping.
 
 Example:
     python -m poker_ga.cfr_main --iterations 200 --traversals-per-iteration 200 --table-size 6
@@ -43,15 +33,10 @@ import cfr_tree
 from benchmark import run_benchmark_until_resolved
 from cfr_train import DeepCFRConfig, Trainer, run_iteration
 from game import GameConfig
-from genome import Genome, load_population
 from player import Player
-from simulate import SimConfig
-from tournament import run_final_tournament
 
 # benchmark.run_benchmark_until_resolved always plays 3-vs-3 tables
-# (benchmark.SEATS_PER_SIDE), independent of --table-size -- matching
-# main.py, which benchmarks the GA the same fixed way regardless of its own
-# --population/table configuration.
+# (benchmark.SEATS_PER_SIDE), independent of --table-size.
 BENCHMARK_SEATS_PER_SIDE = 3
 
 
@@ -100,26 +85,8 @@ def parse_args() -> argparse.Namespace:
         "always start from a fresh random net).",
     )
     p.add_argument(
-        "--eval-interval", type=int, default=0,
-        help="Optional, secondary check (see --benchmark-interval for the primary one): every "
-        "this many iterations, benchmark the current net (bb/100) against a table of GA genomes "
-        "via tournament.run_final_tournament -- an absolute 'is this any good against a real "
-        "strategy' sense check, since --benchmark-interval only measures improvement relative to "
-        "this same run's own past self. Opponents are loaded from --eval-genome-path if that file "
-        "exists, else freshly random genomes (genome.Genome.random). 0 disables it.",
-    )
-    p.add_argument("--eval-rounds", type=int, default=20, help="Rounds of re-seating for each --eval-interval check.")
-    p.add_argument(
-        "--eval-genome-path", type=str, default=os.path.join("runs", "latest_population.json"),
-        help="Population file (genome.save_population format) to draw --eval-interval's opponents "
-        "from -- e.g. main.py's --out-dir's latest_population.json (the default here matches "
-        "main.py's own default --out-dir, so a GA run's latest population is used automatically if "
-        "one exists). Re-read fresh on every eval check, so a concurrently-running GA's progress is "
-        "picked up. Falls back to freshly random genomes (with a warning) if the file doesn't exist.",
-    )
-    p.add_argument(
-        "--benchmark-interval", type=int, default=100,
-        help="The primary progress check: every this many iterations, play the current net "
+        "--benchmark-interval", type=int, default=10,
+        help="The progress check: every this many iterations, play the current net "
         "head-to-head (3-vs-3 tables, benchmark.py) against a snapshot taken this many iterations "
         "ago -- e.g. at 100, the first check is iteration 100 vs the net as it stood when this run "
         "started (iteration 0 for a fresh run, or wherever a reloaded checkpoint's own iteration "
@@ -165,9 +132,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--workers", type=int, default=0,
         help="Worker processes for the --benchmark-interval check specifically (CFR traversal "
-        "itself is sequential in this version, unlike main.py's fully parallel GA evaluation, so "
-        "this only speeds up benchmarking). 1 is fully sequential (the default). 0 or negative "
-        "means 'use every available CPU core'.",
+        "itself is sequential in this version, so this only speeds up benchmarking). 1 is fully "
+        "sequential (the default). 0 or negative means 'use every available CPU core'.",
     )
     p.add_argument(
         "--feature-importance", action=argparse.BooleanOptionalAction, default=True,
@@ -195,47 +161,6 @@ def parse_args() -> argparse.Namespace:
         "see --feature-importance-sample-size for the combined cost.",
     )
     return p.parse_args()
-
-
-def _load_eval_opponents(genome_population_path: str, count: int, rng: np.random.Generator) -> tuple[list[Player], str]:
-    """`count` opponent Players for an --eval-interval check, drawn from
-    `genome_population_path` if it exists (re-read fresh every call, so a
-    concurrently-running GA's progress gets picked up), else freshly random
-    genomes. Returns (players, source_label) -- the label just distinguishes
-    the two cases in the printed eval line."""
-    if genome_population_path and os.path.exists(genome_population_path):
-        try:
-            genomes = load_population(genome_population_path, rng)
-            if genomes:
-                chosen_idx = rng.choice(len(genomes), size=count, replace=len(genomes) < count)
-                players = [
-                    Player(player_id=i + 1, genome=genomes[j], label=f"ga_{i + 1}")
-                    for i, j in enumerate(chosen_idx)
-                ]
-                return players, f"GA genomes from {genome_population_path}"
-        except Exception as exc:
-            print(f"Warning: could not load genome population from {genome_population_path} ({exc}); using random GA genomes instead.")
-    return (
-        [Player(player_id=i + 1, genome=Genome.random(rng), label=f"random_ga_{i + 1}") for i in range(count)],
-        "freshly random GA genomes",
-    )
-
-
-def _make_eval_fn(
-    game_config: GameConfig, table_size: int, feature_keys: tuple[str, ...], eval_rounds: int,
-    eval_genome_path: str, rng: np.random.Generator,
-):
-    def eval_fn(net, iteration: int) -> None:
-        cfr_player = Player(player_id=0, genome=cfr_policy.DeepCFRPolicy(net, feature_keys), label="DeepCFR")
-        opponents, source = _load_eval_opponents(eval_genome_path, table_size - 1, rng)
-        sim_config = SimConfig(rounds_per_generation=eval_rounds, table_size=table_size)
-        stats = run_final_tournament(
-            [cfr_player, *opponents], game_config, sim_config, rng, show_progress=False,
-        )
-        bb_per_100 = stats[cfr_player.player_id].bb_per_100(game_config.big_blind)
-        print(f"         | eval @ iter {iteration}: DeepCFR vs {source} = {bb_per_100:+.2f} bb/100")
-
-    return eval_fn
 
 
 def _print_feature_importance(
@@ -412,12 +337,6 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
     # shows improvement -- see --benchmark-interval's help text.
     benchmark_net = cfr_networks.clone(trainer.net) if args.benchmark_interval > 0 else None
 
-    eval_fn = None
-    if args.eval_interval > 0:
-        eval_fn = _make_eval_fn(
-            game_config, config.table_size, config.feature_keys, args.eval_rounds, args.eval_genome_path, rng,
-        )
-
     consecutive_non_improvements = 0
 
     # --iterations is "how many more iterations to run", not a total --
@@ -481,9 +400,6 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
                         "consecutive benchmark checks."
                     )
                     break
-
-        if eval_fn is not None and args.eval_interval > 0 and iteration % args.eval_interval == 0:
-            eval_fn(trainer.net, iteration)
 
     trainer.save(checkpoint_path)
     print(f"Done. Checkpoint saved to {checkpoint_path}.{{pt,json,npz}}")

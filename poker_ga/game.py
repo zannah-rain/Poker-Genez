@@ -1,6 +1,7 @@
 """A 6-max No-Limit Hold'em engine: blinds, betting rounds, all-ins with
 correct side pots, and showdown. Player decisions are delegated entirely to
-each seat's Genome via features.Situation.
+each seat's Player.genome (any duck-typed .decide(situation, legal_actions,
+rng) -- e.g. cfr_policy.DeepCFRPolicy) via features.Situation.
 """
 
 from __future__ import annotations

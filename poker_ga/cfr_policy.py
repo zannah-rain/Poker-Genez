@@ -1,10 +1,9 @@
 """Wraps a trained AdvantageNet as a drop-in decision-maker for the real
-game engine: `.decide(situation, legal_actions, rng) -> (action, bet_size)`,
-the exact same duck-typed signature genome.Genome.decide() has (Player.genome
-isn't type-checked anywhere -- see tests/test_game.py's FixedGenome), so a
-trained Deep CFR strategy can be handed straight to
-tournament.run_final_tournament / simulate.run_session alongside GA
-Players, with zero changes to that tooling.
+game engine: `.decide(situation, legal_actions, rng) -> (action, bet_size)`
+-- the duck-typed signature Player.genome expects (never type-checked --
+see tests/test_game.py's FixedGenome), so a trained Deep CFR strategy can be
+handed straight to simulate.run_session / benchmark.py, with zero changes
+to that tooling.
 """
 
 from __future__ import annotations

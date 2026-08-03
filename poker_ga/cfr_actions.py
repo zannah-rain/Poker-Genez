@@ -7,8 +7,7 @@ mechanics, shared by both training (cfr_tree.py) and inference
 Reuses rules._standard_decision and genome._apply_decision as-is: those
 already implement exactly "ACTION_CATEGORIES index -> Decision" and
 "Decision -> (game_action, bet_size), with illegal-action fallback"
-respectively -- the same functions a StandardRule's chosen action goes
-through in genome.Genome.decide().
+respectively.
 """
 
 from __future__ import annotations

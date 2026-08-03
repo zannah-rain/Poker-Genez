@@ -1,13 +1,12 @@
 """Maps a configurable subset of features.py's feature vocabulary to the
 positions Single Deep CFR reads out of extract_features()'s output vector.
 
-Unlike strategy.py's CONDITION_FEATURES (the ~49 "generalized" features the
-GA's rule conditions may reference), a Deep CFR advantage network can be
-pointed at *any* of features.py's ~200 keys, including the one-hot indicator
-children -- there's no rule-bucketing machinery here that would make the
-children redundant with their parent, just a plain feature vector fed
-straight into a neural net. The default subset (see DEFAULT_FEATURE_KEYS
-below) takes advantage of that and reads the full vocabulary.
+A Deep CFR advantage network can be pointed at *any* of features.py's ~200
+keys, including the one-hot indicator children -- there's no rule-bucketing
+machinery here that would make the children redundant with their parent,
+just a plain feature vector fed straight into a neural net. The default
+subset (see DEFAULT_FEATURE_KEYS below) takes advantage of that and reads
+the full vocabulary.
 """
 
 from __future__ import annotations
@@ -51,9 +50,8 @@ def extract_subset(situation, indices: np.ndarray) -> np.ndarray:
 
 
 def feature_label(key: str) -> str:
-    """Short human-readable name for `key` (features.FeatureSpec.label) --
-    the name a strategy.md export would use, for display in place of the
-    raw internal key."""
+    """Short human-readable name for `key` (features.FeatureSpec.label),
+    for display in place of the raw internal key."""
     return _SPEC_BY_KEY[key].label
 
 
@@ -65,8 +63,7 @@ def feature_description(key: str) -> str:
 
 def bucket_label(key: str, value: float) -> str:
     """Human-readable label for one raw normalized feature value -- for a
-    boolean feature, `spec.label`/f"Not {spec.label}" (mirrors
-    strategy.describe_bucket's own boolean-labeling convention); otherwise
+    boolean feature, `spec.label`/f"Not {spec.label}"; otherwise
     the label of the nearest point in the feature's own
     features.FeatureSpec.value_table (e.g. 0.33 -> "Flop" for street_norm).
     Reuses features.py's existing human-facing names for each value rather

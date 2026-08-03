@@ -1,9 +1,10 @@
 """Turns a poker decision point into a fixed-length feature vector.
 
-This is the bridge between the game engine and a genome: every feature here
-is a "basic characteristic of the current situation" (hand strength, board
-texture, betting context, position, stack depth...) that the genome's
-weights turn into action scores.
+This is the bridge between the game engine and a decision-maker: every
+feature here is a "basic characteristic of the current situation" (hand
+strength, board texture, betting context, position, stack depth...). A
+Single Deep CFR advantage network (see cfr_features.py) reads a configured
+subset of these directly.
 
 Each "multi-value" characteristic (e.g. hand strength, high card rank) is
 represented twice: once as a single generalized 0-1 feature (so the genome
@@ -1267,12 +1268,10 @@ class Situation:
     # (e.g. "am I continuation betting").
     is_aggressor: bool
     starting_stack: float
-    big_blind: float = 2.0  # lets stack depth be expressed in actual BB (see gto.py's SpotMatcher)
+    big_blind: float = 2.0  # lets stack depth be expressed in actual BB
     # Starting positions (seating.SEAT_ROLES) of every *other* seat that has
     # bet/raised this street so far, e.g. frozenset({"UTG"}) for "folds to me
-    # in the BB after UTG opens" -- lets gto.py's SpotMatcher express spots
-    # like "bb_vs_utg_open" that need to know *who* raised, not just whether
-    # someone did.
+    # in the BB after UTG opens".
     raised_positions: frozenset[str] = field(default_factory=frozenset)
 
     # Opponent-tendency reads (see opponent_model.py), already 0-1 rates --
@@ -1365,12 +1364,17 @@ def _pair_bucket_offset(hole: list[Card], board: list[Card]) -> int:
             return 0  # Low Pair
         return 1  # Underpair (below the top card, but beats at least one board card)
 
-    # Not a pocket pair, so this pair is exactly one hole card rank-matching
-    # one board rank (cat == PAIR already guarantees this match exists and
-    # is unique -- the same invariant _hand_vs_board_heuristics used to
-    # rely on for its own top/second/third_pair checks).
+    # Not a pocket pair. Usually this pair is exactly one hole card
+    # rank-matching one board rank -- but the board can also already be
+    # paired on its own (e.g. board 5-5-K, hole A-2), in which case neither
+    # hole card matches and the pair is entirely the board's; that's not a
+    # top/second/third pair relative to either hole card, so it falls
+    # through to the generic Pair bucket below.
     distinct_board_desc = sorted(set(board_ranks), reverse=True)
-    matched_rank = next(r for r in hole_ranks if r in board_ranks)
+    matches = [r for r in hole_ranks if r in board_ranks]
+    if not matches:
+        return 2  # board itself is paired; neither hole card contributes
+    matched_rank = matches[0]
     if matched_rank == distinct_board_desc[0]:
         kicker = hole_ranks[1] if hole_ranks[0] == matched_rank else hole_ranks[0]
         if kicker == 14:

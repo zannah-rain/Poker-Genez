@@ -8,21 +8,17 @@ the *final* net's regret-matching strategy already approximates the
 average strategy, the same way Linear CFR's running average strategy is
 dominated by its later iterations.
 
-Split into two layers, mirroring how main.py's CLI owns the outer GA loop
-(reload, per-generation checkpointing, benchmark-vs-checkpoint, early
-stopping) while delegating individual pieces to ga.py/simulate.py/
-benchmark.py:
+Split into two layers:
 
   - `Trainer` + `run_iteration`: the low-level, one-iteration-at-a-time
     building blocks. `Trainer` bundles the net/optimizer/reservoir a run
-    advances (the CFR analog of ga.py's IslandModel); `run_iteration` runs
-    exactly one outer iteration's traversals + gradient steps.
+    advances; `run_iteration` runs exactly one outer iteration's
+    traversals + gradient steps.
   - `train`: a simple convenience loop built on top of those two, for
     straightforward scripted/test use. cfr_main.py's CLI does *not* use
     this -- it drives `Trainer`/`run_iteration` directly so it can
     interleave reload-from-checkpoint and benchmark-vs-checkpoint/
-    early-stopping between iterations, the same way main.py's own training
-    loop does for the GA.
+    early-stopping between iterations.
 """
 
 from __future__ import annotations
@@ -156,9 +152,7 @@ class Trainer:
         cfr_main.py) shows recent training hasn't actually improved play.
         The reservoir is deliberately left untouched: the regret samples in
         it are still valid observations regardless of whether the net later
-        *fit* to them turned out to help, the same way ga.py's checkpoint
-        revert doesn't try to undo already-recorded fitness history, only
-        which population breeds onward from here. The optimizer is rebuilt
+        *fit* to them turned out to help. The optimizer is rebuilt
         from scratch (not just the net's weights) since Adam's momentum/
         variance estimates were built up chasing the trajectory that's now
         being discarded -- keeping them would just push back in roughly the

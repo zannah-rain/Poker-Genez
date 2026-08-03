@@ -1,12 +1,17 @@
-import numpy as np
-
-from genome import Genome
 from player import Player
 
 
+class _StubPolicy:
+    """A minimal duck-typed decision-maker -- Player.genome only ever needs
+    .decide(situation, legal_actions, rng), never a concrete type (see
+    player.py, or tests/test_game.py's FixedGenome for a fuller example)."""
+
+    def decide(self, situation, legal_actions, rng=None):
+        return legal_actions[0], 0.0
+
+
 def make_genome():
-    rng = np.random.default_rng(0)
-    return Genome.random(rng)
+    return _StubPolicy()
 
 
 class TestPlayer:
