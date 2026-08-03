@@ -93,6 +93,35 @@ def bucket_categories(key: str) -> list[str]:
     return [label for _, label in spec.value_table]
 
 
+def display_feature_keys(feature_keys: list[str] | tuple[str, ...]) -> list[str]:
+    """`feature_keys` with every linked child dropped in favor of its parent
+    -- e.g. has_pair/has_two_pair/... collapse down to just
+    hand_category_norm -- since a child is just an alternate view of the
+    same concept its parent already represents (see features.py's module
+    docstring). A child is kept standalone if its parent isn't itself in
+    `feature_keys` (nothing to fold into). Used by cfr_explorer.py so the
+    sidebar only ever offers one control per underlying concept."""
+    present = set(feature_keys)
+    return [key for key in feature_keys if not (_SPEC_BY_KEY[key].linked_to in present)]
+
+
+def fold_child_contributions(contributions: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """`contributions` (feature_key, value) pairs -- as cfr_networks.
+    mean_shap_contributions returns -- with every linked child's value
+    summed into its parent's instead of listed separately (mirroring
+    display_feature_keys' choice of which key represents a family), then
+    re-sorted most-to-least. A child whose parent isn't present in
+    `contributions` keeps its own entry, since there's nothing to fold it
+    into."""
+    present = {key for key, _ in contributions}
+    totals: dict[str, float] = {}
+    for key, value in contributions:
+        parent = _SPEC_BY_KEY[key].linked_to
+        target = parent if parent in present else key
+        totals[target] = totals.get(target, 0.0) + value
+    return sorted(totals.items(), key=lambda kv: -kv[1])
+
+
 def bucket_labels(key: str, values: np.ndarray) -> np.ndarray:
     """Vectorized bucket_label over a whole array of one feature's raw
     values -- the same nearest-point/boolean logic, without a Python loop

@@ -93,16 +93,79 @@ def save(net: AdvantageNet, config: AdvantageNetConfig, path: str) -> None:
         )
 
 
+def _normalized_mean_abs_shap(shap_values: list[np.ndarray]) -> np.ndarray:
+    """`shap_values` as shap.Explainer.shap_values returns it -- one
+    (n_samples, n_features) array per action category -- reduced to one
+    mean-|SHAP| score per feature.
+
+    Each (action, feature) pair is re-centered on its own mean across
+    `n_samples` before taking the mean absolute value: a feature that
+    contributes the same constant amount (e.g. +20) to every one of those
+    samples isn't distinguishing between any of them, so it should score
+    ~0 despite a large raw |SHAP| -- exactly the case where a feature
+    looks important over a whole reservoir but turns out to be constant
+    (and so, in this reduced view, uninformative) within one particular
+    filtered subset of it (see cfr_explorer.py). Applied unconditionally,
+    not just for a caller that happens to be filtering, since a constant
+    contribution is uninformative regardless of how the samples were
+    chosen -- pulled out of mean_shap_contributions_for_samples as a pure
+    function so this normalization step can be unit-tested against
+    synthetic arrays, independent of shap's own sampling noise."""
+    raw = np.stack(shap_values, axis=0)  # (NUM_ACTIONS, n_samples, n_features)
+    centered = raw - raw.mean(axis=1, keepdims=True)  # zero out each (action, feature)'s constant offset across samples
+    return np.mean(np.abs(centered), axis=(0, 1))
+
+
+def mean_shap_contributions_for_samples(
+    net: AdvantageNet, explain_features: np.ndarray, background_features: np.ndarray,
+    feature_keys: tuple[str, ...], rng: np.random.Generator,
+    sample_size: int = 200, background_size: int = 20, nsamples: int = 20,
+) -> list[tuple[str, float]]:
+    """Shared core behind mean_shap_contributions: normalized mean |SHAP
+    value| per feature (see _normalized_mean_abs_shap;
+    shap.GradientExplainer's Expected Gradients approximation -- exact
+    Shapley values are NP-hard, this is what SHAP itself uses for neural
+    nets too) over a random subsample of `explain_features`, using a
+    random subsample of `background_features` as the explainer's reference
+    distribution, averaged over every one of the net's
+    NUM_ACTION_CATEGORIES outputs.
+
+    Split out from mean_shap_contributions so a caller that has already
+    picked its own pool of rows to explain -- e.g. cfr_explorer.py
+    restricting to just the reservoir rows that pass the sidebar's current
+    filters -- can reuse the exact same SHAP machinery instead of being
+    forced through a whole-reservoir sample. `sample_size`/`background_size`
+    bound the cost to roughly constant regardless of pool size; see
+    mean_shap_contributions for the measured cost of the defaults.
+
+    Returns (feature_key, mean_abs_shap) pairs sorted most-to-least
+    important. Empty list if `explain_features` is empty."""
+    if len(explain_features) == 0:
+        return []
+
+    explain_n = min(sample_size, len(explain_features))
+    explain_idx = rng.choice(len(explain_features), size=explain_n, replace=False)
+    x = torch.from_numpy(explain_features[explain_idx])
+
+    background_n = min(background_size, len(background_features))
+    background_idx = rng.choice(len(background_features), size=background_n, replace=False)
+    background = torch.from_numpy(background_features[background_idx])
+
+    net.eval()
+    explainer = shap.GradientExplainer(net, background)
+    shap_values = explainer.shap_values(x, nsamples=nsamples)  # list of NUM_ACTIONS arrays, each (explain_n, num_features)
+    mean_abs = _normalized_mean_abs_shap(shap_values)
+
+    order = np.argsort(-mean_abs)
+    return [(feature_keys[i], float(mean_abs[i])) for i in order]
+
+
 def mean_shap_contributions(
     net: AdvantageNet, reservoir: cfr_reservoir.ReservoirBuffer, feature_keys: tuple[str, ...],
     rng: np.random.Generator, sample_size: int = 200, background_size: int = 20, nsamples: int = 20,
 ) -> list[tuple[str, float]]:
-    """Mean |SHAP value| per feature (shap.GradientExplainer's Expected
-    Gradients approximation -- exact Shapley values are NP-hard, this is
-    what SHAP itself uses for neural nets too), averaged over a random
-    subsample of the reservoir's current contents and over every one of the
-    net's NUM_ACTION_CATEGORIES outputs -- a feature-importance signal for
-    what the advantage net's predictions currently lean on.
+    """mean_shap_contributions_for_samples over the reservoir's own current
+    contents, used as both the explained pool and the background reference.
 
     Drawn fresh from the reservoir every call rather than cached, so it's
     cheap enough to call once per training iteration (see cfr_main.py)
@@ -118,24 +181,11 @@ def mean_shap_contributions(
 
     Returns (feature_key, mean_abs_shap) pairs sorted most-to-least
     important. Empty list if the reservoir has nothing in it yet."""
-    if len(reservoir) == 0:
-        return []
-
-    explain_n = min(sample_size, len(reservoir))
-    explain_idx = rng.choice(len(reservoir), size=explain_n, replace=False)
-    x = torch.from_numpy(reservoir.features[explain_idx])
-
-    background_n = min(background_size, len(reservoir))
-    background_idx = rng.choice(len(reservoir), size=background_n, replace=False)
-    background = torch.from_numpy(reservoir.features[background_idx])
-
-    net.eval()
-    explainer = shap.GradientExplainer(net, background)
-    shap_values = explainer.shap_values(x, nsamples=nsamples)  # list of NUM_ACTIONS arrays, each (explain_n, num_features)
-    mean_abs = np.mean(np.abs(np.stack(shap_values, axis=0)), axis=(0, 1))
-
-    order = np.argsort(-mean_abs)
-    return [(feature_keys[i], float(mean_abs[i])) for i in order]
+    valid_features = reservoir.features[: len(reservoir)]
+    return mean_shap_contributions_for_samples(
+        net, valid_features, valid_features, feature_keys, rng,
+        sample_size=sample_size, background_size=background_size, nsamples=nsamples,
+    )
 
 
 def load(path: str) -> tuple[AdvantageNet, AdvantageNetConfig]:

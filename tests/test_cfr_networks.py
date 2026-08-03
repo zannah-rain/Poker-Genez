@@ -6,7 +6,9 @@ import pytest
 import torch
 
 import strategy
-from cfr_networks import AdvantageNet, AdvantageNetConfig, clone, load, mean_shap_contributions, save
+from cfr_networks import (
+    AdvantageNet, AdvantageNetConfig, _normalized_mean_abs_shap, clone, load, mean_shap_contributions, save,
+)
 from cfr_reservoir import ReservoirBuffer
 
 
@@ -102,6 +104,41 @@ def _filled_reservoir(capacity, feature_dim, rng):
             float(rng.integers(1, 10)),
         )
     return buf
+
+
+class TestNormalizedMeanAbsShap:
+    def test_feature_constant_across_samples_scores_zero_despite_large_raw_value(self):
+        # 2 actions, 5 samples, 3 features -- feature 1 contributes a
+        # constant +20 to every sample/action, exactly the "looks important
+        # but is actually uninformative for this pool" case.
+        shap_values = [
+            np.array([[1.0, 20.0, -3.0], [2.0, 20.0, 3.0], [-1.0, 20.0, 0.5], [0.5, 20.0, -2.0], [-2.0, 20.0, 1.0]]),
+            np.array([[0.2, 20.0, 1.0], [-0.3, 20.0, -1.0], [0.1, 20.0, 2.0], [-0.2, 20.0, 0.0], [0.4, 20.0, -0.5]]),
+        ]
+
+        mean_abs = _normalized_mean_abs_shap(shap_values)
+
+        assert mean_abs[1] == pytest.approx(0.0, abs=1e-9)
+        assert mean_abs[0] > 0.0
+        assert mean_abs[2] > 0.0
+
+    def test_unnormalized_would_have_ranked_the_constant_feature_highest(self):
+        # Same data as above: sanity-check that this scenario really would
+        # fool a plain mean(|raw shap|) metric, motivating the normalization.
+        shap_values = [
+            np.array([[1.0, 20.0, -3.0], [2.0, 20.0, 3.0], [-1.0, 20.0, 0.5], [0.5, 20.0, -2.0], [-2.0, 20.0, 1.0]]),
+            np.array([[0.2, 20.0, 1.0], [-0.3, 20.0, -1.0], [0.1, 20.0, 2.0], [-0.2, 20.0, 0.0], [0.4, 20.0, -0.5]]),
+        ]
+        raw_mean_abs = np.mean(np.abs(np.stack(shap_values, axis=0)), axis=(0, 1))
+        assert np.argmax(raw_mean_abs) == 1
+
+        mean_abs = _normalized_mean_abs_shap(shap_values)
+        assert np.argmax(mean_abs) != 1
+
+    def test_varying_feature_unaffected_when_its_own_mean_is_zero(self):
+        shap_values = [np.array([[1.0], [-1.0], [2.0], [-2.0]])]
+        mean_abs = _normalized_mean_abs_shap(shap_values)
+        assert mean_abs[0] == pytest.approx(1.5)  # mean(|1|,|1|,|2|,|2|) unchanged by centering on a zero mean
 
 
 class TestMeanShapContributions:

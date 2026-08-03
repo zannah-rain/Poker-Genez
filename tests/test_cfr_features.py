@@ -113,6 +113,37 @@ class TestBucketCategories:
             assert label in categories
 
 
+class TestDisplayFeatureKeys:
+    def test_drops_child_when_parent_present(self):
+        keys = ["hand_category_norm", "has_pair", "street_norm"]
+        assert cfr_features.display_feature_keys(keys) == ["hand_category_norm", "street_norm"]
+
+    def test_keeps_child_when_parent_absent(self):
+        keys = ["has_pair", "street_norm"]
+        assert cfr_features.display_feature_keys(keys) == ["has_pair", "street_norm"]
+
+    def test_keeps_standalone_features_untouched(self):
+        keys = ["street_norm", "facing_bet"]
+        assert cfr_features.display_feature_keys(keys) == keys
+
+
+class TestFoldChildContributions:
+    def test_child_contribution_folds_into_present_parent(self):
+        contributions = [("hand_category_norm", 0.5), ("has_pair", 0.2), ("street_norm", 0.1)]
+        folded = dict(cfr_features.fold_child_contributions(contributions))
+        assert folded == {"hand_category_norm": pytest.approx(0.7), "street_norm": pytest.approx(0.1)}
+
+    def test_child_kept_standalone_when_parent_absent(self):
+        contributions = [("has_pair", 0.2), ("street_norm", 0.1)]
+        folded = dict(cfr_features.fold_child_contributions(contributions))
+        assert folded == {"has_pair": pytest.approx(0.2), "street_norm": pytest.approx(0.1)}
+
+    def test_sorted_most_to_least_after_folding(self):
+        contributions = [("street_norm", 0.3), ("hand_category_norm", 0.1), ("has_pair", 0.5)]
+        folded = cfr_features.fold_child_contributions(contributions)
+        assert [key for key, _ in folded] == ["hand_category_norm", "street_norm"]
+
+
 class TestExtractSubset:
     def test_matches_full_extraction_at_selected_positions(self):
         situation = _make_situation()
