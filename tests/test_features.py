@@ -301,9 +301,6 @@ class TestFlopTexture:
     def test_preflop_defaults_are_all_zero(self):
         values = values_by_key(make_situation(board=[]))
         for key in ["flop_suit_texture_norm", "rainbow_flop", "flush_draw_flop", "monotone_flop",
-                    "rainbow_no_match", "rainbow_one_match", "rainbow_two_match",
-                    "flush_draw_flop_miss", "flush_draw_flop_one_match", "flush_draw_flop_two_match",
-                    "monotone_flop_miss", "monotone_flop_two_hits",
                     "flop_pairing_texture_norm", "unpaired_flop", "paired_flop", "tripled_flop",
                     "flop_connectivity_norm", "disconnected_flop", "connected_flop",
                     "connected_no_straight_draw_flop", "connected_straight_draw_flop", "oesd_possible_flop",
@@ -352,38 +349,19 @@ class TestFlopTexture:
         values = values_by_key(make_situation(board=board, street=1))
         assert values["oesd_possible_flop"] == 1.0
 
-    def test_rainbow_hole_card_match_count(self):
+    def test_suit_family_true_regardless_of_hole_card_connection(self):
+        # rainbow_flop/flush_draw_flop/monotone_flop are now purely the
+        # flop's own 3-card suit shape -- no hole-card awareness at all
+        # (see TestSuitConnectionIndex for that dimension).
         board = [Card.from_str("2c"), Card.from_str("7d"), Card.from_str("Kh")]
         no_match = values_by_key(make_situation(hole=[Card.from_str("9s"), Card.from_str("2s")], board=board))
-        one_match = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("2s")], board=board))
         two_match = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("9d")], board=board))
-        assert no_match["rainbow_no_match"] == 1.0
-        assert one_match["rainbow_one_match"] == 1.0
-        assert two_match["rainbow_two_match"] == 1.0
-        # Family aggregate stays true regardless of hole-card connection.
-        for values in (no_match, one_match, two_match):
-            assert values["rainbow_flop"] == 1.0
+        assert no_match["rainbow_flop"] == two_match["rainbow_flop"] == 1.0
 
-    def test_two_tone_hole_card_match_count(self):
-        board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kh")]
-        miss = values_by_key(make_situation(hole=[Card.from_str("9d"), Card.from_str("2s")], board=board))
-        one_match = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("2s")], board=board))
-        two_match = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("4c")], board=board))
-        assert miss["flush_draw_flop_miss"] == 1.0
-        assert one_match["flush_draw_flop_one_match"] == 1.0
-        assert two_match["flush_draw_flop_two_match"] == 1.0
-        assert two_match["flush_draw"] == 1.0  # 2 matches on a two-tone flop is a live flush draw
-
-    def test_monotone_hole_card_hit_count(self):
+    def test_monotone_hole_card_hit_still_reads_a_made_flush_elsewhere(self):
         board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kc")]
-        zero = values_by_key(make_situation(hole=[Card.from_str("9d"), Card.from_str("2s")], board=board))
         one = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("2s")], board=board))
         two = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("4c")], board=board))
-        # Only 0 and 2 matches get their own bucket -- a single match is still
-        # a "Miss" here, distinguished elsewhere by the general flush_draw feature.
-        assert zero["monotone_flop_miss"] == 1.0
-        assert one["monotone_flop_miss"] == 1.0
-        assert two["monotone_flop_two_hits"] == 1.0
         assert one["flush_draw"] == 1.0
         assert two["has_flush"] == 1.0  # both hole cards + all 3 board cards = a made flush
 
@@ -409,14 +387,10 @@ class TestFlopTexture:
 
     def test_only_one_suit_texture_bucket_active(self):
         board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kh")]
-        values = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("2s")], board=board))
-        bucket_keys = [
-            "rainbow_no_match", "rainbow_one_match", "rainbow_two_match",
-            "flush_draw_flop_miss", "flush_draw_flop_one_match", "flush_draw_flop_two_match",
-            "monotone_flop_miss", "monotone_flop_two_hits",
-        ]
+        values = values_by_key(make_situation(board=board, street=1))
+        bucket_keys = ["rainbow_flop", "flush_draw_flop", "monotone_flop"]
         active = [k for k in bucket_keys if values[k] == 1.0]
-        assert active == ["flush_draw_flop_one_match"]
+        assert active == ["flush_draw_flop"]
 
     def test_only_one_connectivity_bucket_active(self):
         board = [Card.from_str("5c"), Card.from_str("7d"), Card.from_str("9h")]
@@ -509,6 +483,60 @@ class TestFlopTexture:
         board4 = board3 + [Card.from_str("9d")]  # turn card breaks the monotone look
         turn_values = values_by_key(make_situation(board=board4, street=2))
         assert turn_values["monotone_flop"] == flop_values["monotone_flop"] == 1.0
+
+
+class TestSuitConnectionIndex:
+    def test_preflop_unsuited_hole_cards(self):
+        values = values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("Kd")], board=[]))
+        assert values["suit_connection_index"] == pytest.approx(1 / 5)
+        assert values["suit_connection_is_1"] == 1.0
+
+    def test_preflop_suited_hole_cards(self):
+        values = values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("Kh")], board=[]))
+        assert values["suit_connection_index"] == pytest.approx(2 / 5)
+        assert values["suit_connection_is_2"] == 1.0
+
+    def test_monotone_flop_alone_reaches_3_even_with_unrelated_hole_cards(self):
+        # Pigeonhole: 5 cards (2 hole + 3 board) split across 4 suits always
+        # gives some suit a count of at least 2 -- here the board's own 3
+        # matching clubs already put it at 3, before the hole cards even
+        # enter into it.
+        board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kc")]
+        values = values_by_key(make_situation(hole=[Card.from_str("9d"), Card.from_str("2s")], board=board))
+        assert values["suit_connection_index"] == pytest.approx(3 / 5)
+        assert values["suit_connection_is_3"] == 1.0
+
+    def test_one_hole_card_matching_the_flops_suit_reaches_4(self):
+        board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kc")]
+        values = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("2s")], board=board))
+        assert values["suit_connection_index"] == pytest.approx(4 / 5)
+        assert values["suit_connection_is_4"] == 1.0
+
+    def test_both_hole_cards_matching_a_monotone_flop_is_capped_at_5(self):
+        board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kc")]
+        values = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("4c")], board=board))
+        assert values["suit_connection_index"] == 1.0
+        assert values["suit_connection_is_5"] == 1.0
+
+    def test_only_one_bucket_active(self):
+        board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kh")]
+        values = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("2s")], board=board))
+        bucket_keys = [f"suit_connection_is_{n}" for n in range(1, 6)]
+        active = [k for k in bucket_keys if values[k] == 1.0]
+        assert len(active) == 1
+
+    def test_varies_through_streets_unlike_flop_suit_texture_norm(self):
+        hole = [Card.from_str("Ah"), Card.from_str("Kd")]
+        board3 = [Card.from_str("2h"), Card.from_str("7h"), Card.from_str("Qc")]  # two-tone: 2 hearts + Ah = 3
+        flop_values = values_by_key(make_situation(hole=hole, board=board3, street=1))
+        board4 = board3 + [Card.from_str("9h")]  # a 3rd board heart pushes the count to 4
+        turn_values = values_by_key(make_situation(hole=hole, board=board4, street=2))
+
+        assert flop_values["suit_connection_index"] == pytest.approx(3 / 5)
+        assert turn_values["suit_connection_index"] == pytest.approx(4 / 5)
+        # flop_suit_texture_norm stays frozen at the flop's own shape
+        # (two-tone), unaffected by the turn card adding a 3rd heart.
+        assert flop_values["flop_suit_texture_norm"] == turn_values["flop_suit_texture_norm"] == 0.5
 
 
 class TestHandVsBoardHeuristics:
