@@ -332,12 +332,20 @@ def _heatmap_figures(filtered: pd.DataFrame, x_key: str, y_key: str) -> list[go.
     return figures
 
 
-def _render_graphs(filtered: pd.DataFrame, graph_keys: list[str], display_keys: list[str], collapsed: bool) -> None:
+def _render_graphs(
+    filtered: pd.DataFrame, graph_keys: list[str], display_keys: list[str], collapsed: bool, key_prefix: str = "",
+) -> None:
     """One line chart per feature marked Graph, each paired with a
     multiselect of other features to "cross" it with -- every feature
     picked there adds its own row of 4 heatmaps (this graphed feature as
     the x axis, the picked feature as the y axis, one heatmap per
-    simplified action rate)."""
+    simplified action rate).
+
+    `key_prefix` disambiguates one call from another when _render_grouped
+    calls this once per group split leaf (so every group gets its own,
+    independently-computed set of graphs over just its own rows) --
+    without it, two groups' widgets for the same graphed feature would
+    collide on the same Streamlit widget key."""
     if not graph_keys:
         return
     st.divider()
@@ -350,10 +358,10 @@ def _render_graphs(filtered: pd.DataFrame, graph_keys: list[str], display_keys: 
             st.markdown(f"**{cfr_features.feature_label(key)}**")
             cross_keys = st.multiselect(
                 "Cross with other features (adds heatmaps below)",
-                options=other_keys, format_func=cfr_features.feature_label, key=f"graph_cross::{key}",
+                options=other_keys, format_func=cfr_features.feature_label, key=f"{key_prefix}graph_cross::{key}",
             )
         with col_chart:
-            st.plotly_chart(_line_chart_figure(filtered, key, collapsed), key=f"graph_chart::{key}")
+            st.plotly_chart(_line_chart_figure(filtered, key, collapsed), key=f"{key_prefix}graph_chart::{key}")
 
         for cross_key in cross_keys:
             st.caption(f"{cfr_features.feature_label(key)} × {cfr_features.feature_label(cross_key)}")
@@ -363,7 +371,7 @@ def _render_graphs(filtered: pd.DataFrame, graph_keys: list[str], display_keys: 
             heat_cols = st.columns(2)
             for i, heatmap_fig in enumerate(_heatmap_figures(filtered, key, cross_key)):
                 with heat_cols[i % 2]:
-                    st.plotly_chart(heatmap_fig, key=f"graph_heat::{key}::{cross_key}::{i}")
+                    st.plotly_chart(heatmap_fig, key=f"{key_prefix}graph_heat::{key}::{cross_key}::{i}")
 
 
 def _render_sidebar(
@@ -500,7 +508,8 @@ def _render_group_heading(text: str, level: int) -> None:
 
 
 def _render_grouped(
-    df: pd.DataFrame, group_split_keys: list[str], table_split_keys: list[str], collapsed: bool, level: int = 0,
+    df: pd.DataFrame, group_split_keys: list[str], table_split_keys: list[str], graph_keys: list[str],
+    display_keys: list[str], collapsed: bool, level: int = 0, key_prefix: str = "",
 ) -> None:
     """One heading per observed value of group_split_keys[0], each nested
     under the previous one (see _render_group_heading) and recursed into
@@ -508,9 +517,16 @@ def _render_grouped(
     selected, a table sits under a chain of headings each naming just its
     own feature/value (e.g. Street = Flop, then nested under it Position =
     Late), rather than one flat heading repeating every key/value pair
-    above every leaf table."""
+    above every leaf table.
+
+    Once group_split_keys is exhausted, every Graph-role feature also gets
+    its own set of graphs here (see _render_graphs), computed over just
+    this leaf group's own rows -- so a "Graph" feature's chart/heatmaps
+    reflect each group split individually rather than one chart pooling
+    across every group."""
     if not group_split_keys:
         _render_table(df, table_split_keys, collapsed)
+        _render_graphs(df, graph_keys, display_keys, collapsed, key_prefix)
         return
 
     key, *rest = group_split_keys
@@ -520,7 +536,10 @@ def _render_grouped(
         if len(group_df) == 0:
             continue
         _render_group_heading(f"{label} = {value}  (n={len(group_df):,})", level)
-        _render_grouped(group_df, rest, table_split_keys, collapsed, level + 1)
+        _render_grouped(
+            group_df, rest, table_split_keys, graph_keys, display_keys, collapsed,
+            level + 1, f"{key_prefix}{key}={value}::",
+        )
 
 
 def main() -> None:
@@ -562,8 +581,7 @@ def main() -> None:
         st.warning("No reservoir samples match the current filters.")
         st.stop()
 
-    _render_grouped(filtered, group_split_keys, table_split_keys, collapsed)
-    _render_graphs(filtered, graph_keys, display_keys, collapsed)
+    _render_grouped(filtered, group_split_keys, table_split_keys, graph_keys, display_keys, collapsed)
 
 
 main()

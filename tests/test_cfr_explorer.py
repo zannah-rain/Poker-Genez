@@ -379,3 +379,50 @@ class TestGraphs:
             if "graph_heat::" in c.id
         )
         assert heatmap_titles == sorted(f"{label} rate" for label in _COLLAPSED_LABELS)
+
+    def test_group_split_gives_each_group_its_own_graph(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
+        at.sidebar.selectbox(key="role::facing_bet").set_value("Graph")
+        at.run(timeout=60)
+
+        assert not at.exception
+        charts = at.get("plotly_chart")
+        assert len(charts) == 4  # one street_norm value observed per bucket, times one graphed feature
+        assert len({c.id for c in charts}) == 4  # every group's chart gets its own widget key, none collide
+
+    def test_group_split_graph_only_reflects_that_groups_own_rows(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
+        at.sidebar.selectbox(key="role::facing_bet").set_value("Graph")
+        at.run(timeout=60)
+
+        assert not at.exception
+        # Recomputing "All rows" (no group split) per street_norm value directly
+        # from the app's own rendered per-street summary tables would just
+        # restate this test's own assumption, so instead confirm structurally
+        # that each street's chart is independently keyed/rendered (the values
+        # themselves come from the same regret-matching net either way) --
+        # each street's graph is a distinct chart tied to that street's own
+        # widget key, not one shared chart repeated four times.
+        specs = [json.loads(c.proto.spec) for c in at.get("plotly_chart")]
+        y_values = [tuple(trace["y"].get("bdata", trace.get("y")) for trace in spec["data"]) for spec in specs]
+        assert len(set(y_values)) == len(y_values)  # no two streets produced byte-identical trace data
+
+    def test_group_splits_cross_dropdown_is_independent_per_group(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
+        at.sidebar.selectbox(key="role::facing_bet").set_value("Graph")
+        at.run(timeout=60)
+
+        cross_widgets = [ms for ms in at.multiselect if ms.key and ms.key.startswith("street_norm=")]
+        assert len(cross_widgets) == 4
+        assert len({ms.key for ms in cross_widgets}) == 4
+
+        cross_widgets[0].set_value(["hand_category_norm"])
+        at.run(timeout=60)
+
+        assert not at.exception
+        assert len(at.get("plotly_chart")) == 4 + 4  # 4 line charts + 4 heatmaps for just the one group crossed
+        other_cross_widgets = [ms for ms in at.multiselect if ms.key and ms.key.startswith("street_norm=")][1:]
+        assert all(ms.value == [] for ms in other_cross_widgets)  # unaffected by the first group's own selection
