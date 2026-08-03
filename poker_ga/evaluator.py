@@ -24,7 +24,7 @@ HIGH_CARD, PAIR, TWO_PAIR, TRIPS, STRAIGHT, FLUSH, FULL_HOUSE, QUADS, STRAIGHT_F
 NUM_CATEGORIES = 9
 
 
-def _straight_high(distinct_ranks_desc: list[int]) -> int | None:
+def straight_high(distinct_ranks_desc: list[int]) -> int | None:
     """Given distinct ranks sorted descending, return the high card of the best
     straight found, or None. Handles the wheel (A-2-3-4-5) as high card 5."""
     ranks = set(distinct_ranks_desc)
@@ -50,7 +50,7 @@ def evaluate_5(cards: list[Card]) -> tuple:
     assert len(cards) == 5
     ranks = sorted((c.rank for c in cards), reverse=True)
     is_flush = len({c.suit for c in cards}) == 1
-    straight_high = _straight_high(ranks)
+    made_straight_high = straight_high(ranks)
 
     counts = Counter(ranks)
     # (count, rank) sorted by count desc then rank desc -> gives kicker
@@ -63,16 +63,16 @@ def evaluate_5(cards: list[Card]) -> tuple:
     count_pattern = [c for _, c in by_count]
     ordered_ranks = [r for r, _ in by_count]
 
-    if is_flush and straight_high:
-        return (STRAIGHT_FLUSH, straight_high)
+    if is_flush and made_straight_high:
+        return (STRAIGHT_FLUSH, made_straight_high)
     if count_pattern == [4, 1]:
         return (QUADS, *ordered_ranks)
     if count_pattern == [3, 2]:
         return (FULL_HOUSE, *ordered_ranks)
     if is_flush:
         return (FLUSH, *ranks)
-    if straight_high:
-        return (STRAIGHT, straight_high)
+    if made_straight_high:
+        return (STRAIGHT, made_straight_high)
     if count_pattern == [3, 1, 1]:
         return (TRIPS, *ordered_ranks)
     if count_pattern == [2, 2, 1]:
@@ -122,16 +122,16 @@ def count_straight_draw_outs(cards: list[Card]) -> int:
     """Number of distinct ranks that would complete a straight if added to
     these cards. Returns 0 if a straight is already made (that's not a draw).
     Only real ranks (2-14) are tried as candidates -- 14 (Ace) already covers
-    the wheel via _straight_high's own low-ace handling, so trying a
+    the wheel via straight_high's own low-ace handling, so trying a
     standalone "1" as well would double-count the same missing card."""
     ranks = {c.rank for c in cards}
-    if _straight_high(sorted(ranks, reverse=True)):
+    if straight_high(sorted(ranks, reverse=True)):
         return 0
     outs = 0
     for candidate in range(2, 15):
         if candidate in ranks:
             continue
-        if _straight_high(sorted(ranks | {candidate}, reverse=True)):
+        if straight_high(sorted(ranks | {candidate}, reverse=True)):
             outs += 1
     return outs
 

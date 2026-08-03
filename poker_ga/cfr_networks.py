@@ -20,7 +20,7 @@ import cfr_features
 import cfr_reservoir
 import strategy
 
-DEFAULT_HIDDEN_SIZES = (128, 128)
+DEFAULT_HIDDEN_SIZES = (512, 512, 512)
 
 
 class AdvantageNet(nn.Module):

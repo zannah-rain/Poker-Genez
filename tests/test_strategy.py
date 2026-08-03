@@ -147,7 +147,7 @@ class TestEligibleConditionIndicesByStreet:
 
     def test_preflop_excludes_the_specific_keys_named_in_the_request(self):
         excluded_keys = {strategy.CONDITION_FEATURES[i].key for i in strategy._PREFLOP_EXCLUDED_INDICES}
-        for key in ("num_overcards_norm", "top_pair", "third_pair", "overpair", "underpair", "nuts_flush_draw", "gutshot"):
+        for key in ("num_overcards_norm", "nuts_flush_draw", "gutshot"):
             assert key in excluded_keys
 
     def test_hand_category_and_high_card_features_stay_eligible_preflop(self):

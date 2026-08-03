@@ -26,7 +26,7 @@ import numpy as np
 from cards import Card
 from evaluator import (
     FULL_HOUSE, FLUSH, HIGH_CARD, PAIR, QUADS, STRAIGHT, STRAIGHT_FLUSH,
-    TRIPS, TWO_PAIR, best_hand_from_available, count_straight_draw_outs,
+    TRIPS, TWO_PAIR, best_hand_from_available, count_straight_draw_outs, straight_high,
 )
 from seating import SEAT_ROLES, seat_role
 
@@ -172,13 +172,16 @@ _BUCKET_POINTS = (0.0, 0.25, 0.5, 0.75, 1.0)
 
 
 _NUM_BUCKETS = len(_BUCKET_POINTS)  # 5
-_LAST_BUCKET_INDEX = _NUM_BUCKETS - 1
 
 
-def _nearest_bucket_index(value: float) -> int:
-    """Index into _BUCKET_POINTS closest to `value`. Since _BUCKET_POINTS is
-    evenly spaced (0, 0.25, 0.5, ..., 1.0), the nearest point can be found
-    with direct arithmetic instead of scanning+comparing all 5 candidates --
+def _nearest_bucket_index(value: float, num_buckets: int = _NUM_BUCKETS) -> int:
+    """Index into an evenly-spaced `num_buckets`-point grid over 0-1 (by
+    default _BUCKET_POINTS, the shared 5-point grid most continuous
+    features use) closest to `value`. call_amount_norm and num_raises_norm
+    each use their own different bucket count (see _CALL_SIZE_VALUES /
+    _RAISES_VALUES), hence the parameter instead of always assuming 5.
+    Since the grid is evenly spaced, the nearest point can be found with
+    direct arithmetic instead of scanning+comparing every candidate --
     this is called from extract_features' hottest inner loop (once per
     continuous feature per decision), so the constant-factor savings add up.
     `ceil(x - 0.5)` (rather than the more common `round`) is deliberate: it
@@ -187,9 +190,10 @@ def _nearest_bucket_index(value: float) -> int:
     (the first-encountered minimum wins ties, and range() visits indices
     ascending) -- plain `round()` would instead break ties to the nearest
     *even* index (banker's rounding) and silently disagree at the exact
-    midpoints (0.125, 0.375, 0.625, 0.875)."""
-    idx = math.ceil(value * _LAST_BUCKET_INDEX - 0.5)
-    return 0 if idx < 0 else (_LAST_BUCKET_INDEX if idx > _LAST_BUCKET_INDEX else idx)
+    midpoints."""
+    last = num_buckets - 1
+    idx = math.ceil(value * last - 0.5)
+    return 0 if idx < 0 else (last if idx > last else idx)
 
 
 def _continuous_children(parent_key: str, value_table: tuple) -> list[FeatureSpec]:
@@ -197,17 +201,59 @@ def _continuous_children(parent_key: str, value_table: tuple) -> list[FeatureSpe
         _linked_bool(
             f"{parent_key}_bucket_{i}", label,
             f"1 if {parent_key}'s value falls closest to {point:.2f} on a 0-1 scale "
-            f"(\"{label}\"), else 0. One of these 5 is always 1.",
+            f"(\"{label}\"), else 0. One of these {len(value_table)} is always 1.",
             parent_key, i,
         )
         for i, (point, label) in enumerate(value_table)
     ]
 
 
+# Every made-hand category, in strength order -- but Pair, Three of a Kind,
+# Straight, and Flush are each split into several sub-buckets (still ordered
+# weakest-to-strongest within that category) instead of one flat value, so
+# distinctions that used to live in a dozen-plus separate standalone
+# booleans (top_pair, overpair, ..., "is this a set/nuts straight/ace-high
+# flush") now read as *where on the made-hand strength spectrum* a hand
+# sits, which a NN can generalize across the way it can't across unrelated
+# flags. See _hand_category_bucket for exactly how each index is chosen.
+#
+# Pair (indices 1-9), weakest to strongest:
+#   Low Pair    -- pocket pair below the whole board
+#   Underpair   -- pocket pair below the board's top card, but not Low Pair
+#   Pair        -- catch-all: a preflop pocket pair (no board yet), or a
+#                  postflop pair matching a board rank outside the top 3
+#   Third Pair, Second Pair, Top Pair -- a non-pocket hole card matching
+#                  the board's 3rd/2nd/1st highest distinct rank
+#   Top Pair + Good Kicker  -- Top Pair, kicker Jack/Queen/King
+#   Top Pair + Top Kicker   -- Top Pair, kicker Ace
+#   Overpair    -- pocket pair above the whole board (the strongest
+#                  single-pair hand, hence placed right before Two Pair)
+#
+# Three of a Kind (indices 11-13): Bottom Set < Set < Top Set, by whether
+# the tripped rank is the board's lowest/other/highest distinct rank (a
+# non-pocket-pair "trips" via a paired board is treated as the plain
+# middle "Set" bucket).
+#
+# Straight (indices 14-17): Bottom Straight < Straight < Top Straight <
+# Nuts Straight, by comparing this straight's high card against every
+# straight_high any 2 hole cards could make on this board -- Nuts requires
+# also being the *top* straight AND no flush being possible for anyone
+# (fewer than 3 board cards sharing a suit), since a possible flush would
+# mean a straight -- even the best one -- isn't provably the best hand.
+#
+# Flush (indices 18-20): Flush < King High Flush < Ace High Flush, by the
+# flush's own high card (not this player's overall hole+board high card,
+# which can differ if the highest card isn't of the flush suit).
 _HAND_CATEGORY_VALUES = (
-    (0 / 8, "High Card"), (1 / 8, "Pair"), (2 / 8, "Two Pair"), (3 / 8, "Three of a Kind"),
-    (4 / 8, "Straight"), (5 / 8, "Flush"), (6 / 8, "Full House"), (7 / 8, "Four of a Kind"),
-    (8 / 8, "Straight Flush"),
+    (0 / 23, "High Card"),
+    (1 / 23, "Low Pair"), (2 / 23, "Underpair"), (3 / 23, "Pair"),
+    (4 / 23, "Third Pair"), (5 / 23, "Second Pair"), (6 / 23, "Top Pair"),
+    (7 / 23, "Top Pair + Good Kicker"), (8 / 23, "Top Pair + Top Kicker"), (9 / 23, "Overpair"),
+    (10 / 23, "Two Pair"),
+    (11 / 23, "Bottom Set"), (12 / 23, "Set"), (13 / 23, "Top Set"),
+    (14 / 23, "Bottom Straight"), (15 / 23, "Straight"), (16 / 23, "Top Straight"), (17 / 23, "Nuts Straight"),
+    (18 / 23, "Flush"), (19 / 23, "King High Flush"), (20 / 23, "Ace High Flush"),
+    (21 / 23, "Full House"), (22 / 23, "Four of a Kind"), (23 / 23, "Straight Flush"),
 )
 _HOLE_CATEGORY_VALUES = tuple((i / 11, label) for i, label in enumerate(_HOLE_CATEGORY_LABELS))
 _HOLE_HIGH_CARD_VALUES = tuple(((r - 2) / 12, _rank_label(r)) for r in range(2, 15))
@@ -216,12 +262,19 @@ _CONNECTIVITY_VALUES = tuple(
     (1.0 - gap / CONNECTIVITY_GAP_CAP, _connectivity_label(gap)) for gap in range(0, CONNECTIVITY_GAP_CAP + 1)
 )
 _STREET_VALUES = ((0.0, "Preflop"), (1 / 3, "Flop"), (2 / 3, "Turn"), (1.0, "River"))
+# 6 evenly-spaced points (0, 0.2, ..., 1.0) map to call/pot ratios 0, 0.25,
+# 0.5, 0.75, 1.0, 1.25 once divided by _CALL_SIZE_CEILING below -- chosen so
+# the first 5 points land exactly on the classic pot-fraction labels, with
+# room left over for a genuine Overbet bucket instead of lumping "exactly
+# pot-sized" and "way more than pot" into one clipped top bucket.
+_CALL_SIZE_CEILING = 1.25
 _CALL_SIZE_VALUES = (
     (0.0, "No bet to call"),
-    (0.25, "Call is 1/4 pot"),
-    (0.5, "Call is 1/2 pot"),
-    (0.75, "Call is 3/4 pot"),
-    (1.0, "Call is a full pot-sized bet or larger (clipped)"),
+    (0.2, "Call is 1/4 pot"),
+    (0.4, "Call is 1/2 pot"),
+    (0.6, "Call is 3/4 pot"),
+    (0.8, "Call is a full pot-sized bet"),
+    (1.0, "Overbet (more than a full pot, clipped)"),
 )
 _SPR_VALUES = (
     (0.0, "SPR ≈ 0 (effectively all-in already)"),
@@ -248,10 +301,9 @@ _OVERCARDS_VALUES = tuple(
 )
 _RAISES_VALUES = (
     (0.0, "No raises yet this street"),
-    (0.25, "1 raise so far"),
-    (0.5, "2 raises so far"),
-    (0.75, "3 raises so far"),
-    (1.0, "4 or more raises so far (clipped)"),
+    (1 / 3, "1 raise so far"),
+    (2 / 3, "2 raises so far"),
+    (1.0, "3 or more raises so far (clipped) -- by this point it's mostly a shove-or-not decision"),
 )
 _POT_TYPE_VALUES = (
     (0.0, "Unraised Pot"),
@@ -329,34 +381,145 @@ _HAND_CATEGORY_CHILDREN = [
         "1 if the best available hand's category is exactly High Card (no pair or better), else 0.",
         "hand_category_norm", 0,
     ),
-    _linked_bool("has_pair", "Pair", "1 if the best available hand is exactly a pair, else 0.", "hand_category_norm", 1),
     _linked_bool(
-        "has_two_pair", "Two Pair", "1 if the best available hand is exactly two pair, else 0.",
+        "has_low_pair", "Low Pair",
+        "1 if the hole cards are a pocket pair ranked lower than every board card, else 0.",
+        "hand_category_norm", 1,
+    ),
+    _linked_bool(
+        "has_underpair", "Underpair",
+        "1 if the hole cards are a pocket pair ranked lower than the board's highest card, "
+        "but not Low Pair (it still beats at least one board card), else 0.",
         "hand_category_norm", 2,
     ),
     _linked_bool(
-        "has_trips", "Three of a Kind", "1 if the best available hand is exactly three of a kind, else 0.",
+        "has_pair", "Pair",
+        "1 if the best available hand is exactly a pair that doesn't fit any of the more "
+        "specific pair buckets around it -- a preflop pocket pair with no board yet to "
+        "compare against, or a postflop pair matching a board rank below the top 3 "
+        "distinct ranks -- else 0.",
         "hand_category_norm", 3,
     ),
     _linked_bool(
-        "has_straight", "Straight", "1 if the best available hand is exactly a straight, else 0.",
+        "has_third_pair", "Third Pair",
+        "1 if exactly one hole card rank-matches the third-highest distinct board rank "
+        "(and the best overall hand is exactly a pair), else 0. Needs a board with at "
+        "least 3 distinct ranks.",
         "hand_category_norm", 4,
     ),
     _linked_bool(
-        "has_flush", "Flush", "1 if the best available hand is exactly a flush, else 0.",
+        "has_second_pair", "Second Pair",
+        "1 if exactly one hole card rank-matches the second-highest distinct board rank "
+        "(and the best overall hand is exactly a pair), else 0. Needs a board with at "
+        "least 2 distinct ranks.",
         "hand_category_norm", 5,
     ),
     _linked_bool(
-        "has_full_house", "Full House", "1 if the best available hand is exactly a full house, else 0.",
+        "has_top_pair", "Top Pair",
+        "1 if exactly one hole card rank-matches the single highest board card, the best "
+        "overall hand is exactly a pair, and the other hole card (the kicker) is a Ten or "
+        "below -- a Jack, Queen, King, or Ace kicker gets its own Good/Top Kicker bucket "
+        "instead -- else 0.",
         "hand_category_norm", 6,
     ),
     _linked_bool(
-        "has_quads", "Four of a Kind", "1 if the best available hand is exactly four of a kind, else 0.",
+        "has_top_pair_good_kicker", "Top Pair + Good Kicker",
+        "1 if this is Top Pair (see has_top_pair) and the kicker is a Jack, Queen, or "
+        "King, else 0.",
         "hand_category_norm", 7,
     ),
     _linked_bool(
-        "has_straight_flush", "Straight Flush", "1 if the best available hand is a straight flush, else 0.",
+        "has_top_pair_top_kicker", "Top Pair + Top Kicker",
+        "1 if this is Top Pair (see has_top_pair) and the kicker is an Ace, else 0.",
         "hand_category_norm", 8,
+    ),
+    _linked_bool(
+        "has_overpair", "Overpair",
+        "1 if the hole cards are a pocket pair ranked higher than every board card, else 0.",
+        "hand_category_norm", 9,
+    ),
+    _linked_bool(
+        "has_two_pair", "Two Pair", "1 if the best available hand is exactly two pair, else 0.",
+        "hand_category_norm", 10,
+    ),
+    _linked_bool(
+        "has_bottom_set", "Bottom Set",
+        "1 if the hole cards are a pocket pair matching the board's single lowest distinct "
+        "rank (the worst possible three of a kind on this board), else 0.",
+        "hand_category_norm", 11,
+    ),
+    _linked_bool(
+        "has_set", "Set",
+        "1 if the best available hand is exactly three of a kind and it's neither Bottom "
+        "Set nor Top Set -- either a middle set (a pocket pair matching a board rank "
+        "that's neither the board's highest nor lowest) or the classic board-paired "
+        "'trips' case (a non-pocket hole card matching a pair already on the board) -- "
+        "else 0.",
+        "hand_category_norm", 12,
+    ),
+    _linked_bool(
+        "has_top_set", "Top Set",
+        "1 if the hole cards are a pocket pair matching the board's single highest "
+        "distinct rank (the best possible three of a kind on this board), else 0.",
+        "hand_category_norm", 13,
+    ),
+    _linked_bool(
+        "has_bottom_straight", "Bottom Straight",
+        "1 if the best available hand is exactly a straight, and its high card is the "
+        "lowest straight_high any 2 hole cards could make on this board, else 0.",
+        "hand_category_norm", 14,
+    ),
+    _linked_bool(
+        "has_straight", "Straight",
+        "1 if the best available hand is exactly a straight that's neither the highest "
+        "nor lowest one possible on this board, else 0.",
+        "hand_category_norm", 15,
+    ),
+    _linked_bool(
+        "has_top_straight", "Top Straight",
+        "1 if the best available hand is exactly a straight, its high card is the highest "
+        "straight_high any 2 hole cards could make on this board, and a flush is still "
+        "possible for someone (3+ board cards share a suit) -- so it's the best straight "
+        "here but not provably the best hand overall, else 0.",
+        "hand_category_norm", 16,
+    ),
+    _linked_bool(
+        "has_nuts_straight", "Nuts Straight",
+        "1 if the best available hand is exactly a straight, its high card is the highest "
+        "straight_high any 2 hole cards could make on this board, and no flush is "
+        "possible for anyone (fewer than 3 board cards share any one suit) -- so no "
+        "better hand is possible given the shared cards, else 0.",
+        "hand_category_norm", 17,
+    ),
+    _linked_bool(
+        "has_flush", "Flush",
+        "1 if the best available hand is exactly a flush and its own highest card isn't "
+        "an Ace or King, else 0.",
+        "hand_category_norm", 18,
+    ),
+    _linked_bool(
+        "has_king_high_flush", "King High Flush",
+        "1 if the best available hand is exactly a flush and its own highest card is a "
+        "King, else 0.",
+        "hand_category_norm", 19,
+    ),
+    _linked_bool(
+        "has_ace_high_flush", "Ace High Flush",
+        "1 if the best available hand is exactly a flush and its own highest card is an "
+        "Ace (the best possible flush of that suit), else 0.",
+        "hand_category_norm", 20,
+    ),
+    _linked_bool(
+        "has_full_house", "Full House", "1 if the best available hand is exactly a full house, else 0.",
+        "hand_category_norm", 21,
+    ),
+    _linked_bool(
+        "has_quads", "Four of a Kind", "1 if the best available hand is exactly four of a kind, else 0.",
+        "hand_category_norm", 22,
+    ),
+    _linked_bool(
+        "has_straight_flush", "Straight Flush", "1 if the best available hand is a straight flush, else 0.",
+        "hand_category_norm", 23,
     ),
 ]
 
@@ -467,12 +630,12 @@ _RAISES_CHILDREN = [
         f"1 if exactly {r} raises have occurred so far this street, else 0.",
         "num_raises_norm", r,
     )
-    for r in range(0, 4)
+    for r in range(0, 3)
 ] + [
     _linked_bool(
-        "raises_is_4plus", "4+ raises",
-        "1 if 4 or more raises have occurred so far this street, else 0.",
-        "num_raises_norm", 4,
+        "raises_is_3plus", "3+ raises",
+        "1 if 3 or more raises have occurred so far this street, else 0.",
+        "num_raises_norm", 3,
     )
 ]
 
@@ -651,10 +814,16 @@ _FLOP_DYNAMISM_CHILDREN = [
 FEATURE_SPECS: list[FeatureSpec] = [
     FeatureSpec(
         "hand_category_norm", "Hand Strength Tier",
-        "Made-hand category of the best hand available from hole cards plus the "
-        "current board, normalized to 0-1 as category_index / 8 (0.0 = high card, "
-        "0.125 = pair, 0.25 = two pair, 0.375 = trips, 0.5 = straight, 0.625 = flush, "
-        "0.75 = full house, 0.875 = quads, 1.0 = straight flush).",
+        "Made-hand category of the best hand available from hole cards plus the current "
+        "board, normalized to 0-1 as bucket_index / 23. Standard High Card < Pair < Two "
+        "Pair < Three of a Kind < Straight < Flush < Full House < Four of a Kind < "
+        "Straight Flush ordering, but Pair/Three of a Kind/Straight/Flush are each split "
+        "into several ordered sub-buckets instead of one flat value -- e.g. Pair spans "
+        "Low Pair, Underpair, Pair, Third Pair, Second Pair, Top Pair, Top Pair + Good "
+        "Kicker, Top Pair + Top Kicker, and Overpair, weakest to strongest -- folding in "
+        "what used to be a dozen-plus separate standalone booleans (top_pair, overpair, "
+        "...) directly into this ordinal scale. See _HAND_CATEGORY_VALUES for every "
+        "bucket and _hand_category_bucket for exactly how each one is computed.",
         kind="categorical", value_table=_HAND_CATEGORY_VALUES, group="Made Hand Features",
     ),
     *_HAND_CATEGORY_CHILDREN,
@@ -713,8 +882,11 @@ FEATURE_SPECS: list[FeatureSpec] = [
 
     FeatureSpec(
         "call_amount_norm", "Call Size Vs Pot",
-        "Amount required to call, as a fraction of the current pot "
-        "(call_amount / pot), clipped to 0-1.",
+        "Amount required to call, as a fraction of the current pot (call_amount / pot), "
+        "divided by 1.25 and clipped to 0-1 -- so a call up to a full pot-sized bet maps "
+        "onto the first 5 evenly-spaced points (0, 1/4, 1/2, 3/4, full pot) and anything "
+        "noticeably bigger than that (an overbet) clips into its own top bucket instead "
+        "of being lumped in with an exactly-pot-sized bet.",
         kind="continuous", value_table=_CALL_SIZE_VALUES, group="Betting Behaviour Features",
     ),
     *_CALL_SIZE_CHILDREN,
@@ -756,7 +928,10 @@ FEATURE_SPECS: list[FeatureSpec] = [
 
     FeatureSpec(
         "num_raises_norm", "Raises This Street",
-        "Number of bets/raises made so far on the current street, divided by 4 and clipped to 0-1.",
+        "Number of bets/raises made so far on the current street, divided by 3 and clipped "
+        "to 0-1 -- capped at 3 rather than higher, since by the time a street has seen 3 "
+        "raises the remaining decision is essentially just shove-or-not regardless of "
+        "exactly how many more re-raises it's technically been.",
         kind="categorical", value_table=_RAISES_VALUES, group="Betting Behaviour Features",
     ),
     *_RAISES_CHILDREN,
@@ -923,49 +1098,11 @@ FEATURE_SPECS: list[FeatureSpec] = [
     ),
     *_OVERCARDS_CHILDREN,
 
-    # Hand-vs-board heuristics: not mutually exclusive as a group (e.g. Low
-    # Pair is a subset of Underpair), so unlike the categorical features
-    # above these aren't organized as a one-hot family with a linear parent.
-    FeatureSpec(
-        "top_pair", "Top Pair",
-        "1 if exactly one hole card ranks-matches the single highest board card (and "
-        "the best overall hand is exactly a pair, i.e. this isn't also two pair/trips), "
-        "else 0.",
-        group="Made Hand Features",
-    ),
-    FeatureSpec(
-        "second_pair", "Second Pair",
-        "1 if exactly one hole card rank-matches the second-highest distinct board "
-        "rank (and the best overall hand is exactly a pair), else 0. Needs a board "
-        "with at least 2 distinct ranks.",
-        group="Made Hand Features",
-    ),
-    FeatureSpec(
-        "third_pair", "Third Pair",
-        "1 if exactly one hole card rank-matches the third-highest distinct board rank "
-        "(and the best overall hand is exactly a pair), else 0. Needs a board with at "
-        "least 3 distinct ranks.",
-        group="Made Hand Features",
-    ),
-    FeatureSpec(
-        "overpair", "Overpair",
-        "1 if the hole cards are a pocket pair ranked higher than every board card, "
-        "else 0.",
-        group="Made Hand Features",
-    ),
-    FeatureSpec(
-        "underpair", "Underpair",
-        "1 if the hole cards are a pocket pair ranked lower than the highest board "
-        "card, else 0.",
-        group="Made Hand Features",
-    ),
-    FeatureSpec(
-        "low_pair", "Low Pair",
-        "1 if the hole cards are a pocket pair ranked lower than every board card (a "
-        "stricter version of Underpair -- below the whole board, not just the top "
-        "card), else 0.",
-        group="Made Hand Features",
-    ),
+    # Hand-vs-board heuristics: not mutually exclusive as a group, so unlike
+    # the categorical features above these aren't organized as a one-hot
+    # family with a linear parent. (Pair-strength heuristics like Top Pair/
+    # Overpair used to live here too, but are now sub-buckets of
+    # hand_category_norm instead -- see _HAND_CATEGORY_VALUES.)
     FeatureSpec(
         "ace_high_no_pair", "Ace High (No Made Hand)",
         "1 if the best overall hand is exactly High Card (no pair or better) and the "
@@ -1154,37 +1291,11 @@ def _clip01(x: float) -> float:
 
 
 def _hand_vs_board_heuristics(hole: list[Card], board: list[Card], cat: int, hand: dict) -> dict:
-    """Pair-strength / high-card / draw-shape heuristics relative to the
-    board. Not mutually exclusive as a group (e.g. Low Pair is a subset of
-    Underpair), so these are standalone booleans rather than a one-hot
-    family like the categorical features in FEATURE_SPECS."""
-    hole_ranks = (hole[0].rank, hole[1].rank)
-    is_pocket_pair = hole_ranks[0] == hole_ranks[1]
-    board_ranks = [c.rank for c in board]
-    distinct_board_desc = sorted(set(board_ranks), reverse=True)
-
-    matched_board_rank = None
-    if cat == PAIR and not is_pocket_pair:
-        matches = [r for r in hole_ranks if r in board_ranks]
-        if len(matches) == 1:
-            matched_board_rank = matches[0]
-
-    top_pair = matched_board_rank is not None and matched_board_rank == distinct_board_desc[0]
-    second_pair = (
-        matched_board_rank is not None
-        and len(distinct_board_desc) >= 2
-        and matched_board_rank == distinct_board_desc[1]
-    )
-    third_pair = (
-        matched_board_rank is not None
-        and len(distinct_board_desc) >= 3
-        and matched_board_rank == distinct_board_desc[2]
-    )
-
-    overpair = is_pocket_pair and bool(board_ranks) and hole_ranks[0] > max(board_ranks)
-    underpair = is_pocket_pair and bool(board_ranks) and hole_ranks[0] < max(board_ranks)
-    low_pair = is_pocket_pair and bool(board_ranks) and hole_ranks[0] < min(board_ranks)
-
+    """High-card / draw-shape heuristics relative to the board that don't
+    fit hand_category_norm's ordinal scale (pair/set/straight/flush
+    strength relative to the board is folded in there instead -- see
+    _hand_category_bucket). Not mutually exclusive as a group, so these
+    are standalone booleans rather than a one-hot family."""
     overall_high_card = hand["high_card"]
     ace_high_no_pair = cat == HIGH_CARD and overall_high_card == 14
     king_high_no_pair = cat == HIGH_CARD and overall_high_card == 13
@@ -1209,12 +1320,6 @@ def _hand_vs_board_heuristics(hole: list[Card], board: list[Card], cat: int, han
             backdoor_flush_draw_1 = hole_suited_count == 1
 
     return {
-        "top_pair": float(top_pair),
-        "second_pair": float(second_pair),
-        "third_pair": float(third_pair),
-        "overpair": float(overpair),
-        "underpair": float(underpair),
-        "low_pair": float(low_pair),
         "ace_high_no_pair": float(ace_high_no_pair),
         "king_high_no_pair": float(king_high_no_pair),
         "nuts_flush_draw": float(nuts_flush_draw),
@@ -1224,6 +1329,159 @@ def _hand_vs_board_heuristics(hole: list[Card], board: list[Card], cat: int, han
         "backdoor_flush_draw_2": float(backdoor_flush_draw_2),
         "backdoor_flush_draw_1": float(backdoor_flush_draw_1),
     }
+
+
+# Base index (within hand_category_norm's 24-value table -- see
+# _HAND_CATEGORY_VALUES) where each made-hand category's sub-buckets begin.
+_HIGH_CARD_INDEX = 0
+_PAIR_BASE_INDEX = 1
+_TWO_PAIR_INDEX = 10
+_SET_BASE_INDEX = 11
+_STRAIGHT_BASE_INDEX = 14
+_FLUSH_BASE_INDEX = 18
+_FULL_HOUSE_INDEX = 21
+_QUADS_INDEX = 22
+_STRAIGHT_FLUSH_INDEX = 23
+
+# A "good" (but not the very best -- see the Top Kicker bucket) Top Pair
+# kicker: Jack, Queen, or King. Ace is handled separately (Top Kicker).
+_GOOD_KICKER_RANKS = frozenset({11, 12, 13})
+
+
+def _pair_bucket_offset(hole: list[Card], board: list[Card]) -> int:
+    """0-8 offset within hand_category_norm's Pair range (see
+    _HAND_CATEGORY_VALUES, added to _PAIR_BASE_INDEX by the caller) --
+    assumes cat == PAIR."""
+    hole_ranks = (hole[0].rank, hole[1].rank)
+    is_pocket_pair = hole_ranks[0] == hole_ranks[1]
+    board_ranks = [c.rank for c in board]
+
+    if is_pocket_pair:
+        if not board_ranks:
+            return 2  # preflop pocket pair -- no board yet to compare against
+        if hole_ranks[0] > max(board_ranks):
+            return 8  # Overpair
+        if hole_ranks[0] < min(board_ranks):
+            return 0  # Low Pair
+        return 1  # Underpair (below the top card, but beats at least one board card)
+
+    # Not a pocket pair, so this pair is exactly one hole card rank-matching
+    # one board rank (cat == PAIR already guarantees this match exists and
+    # is unique -- the same invariant _hand_vs_board_heuristics used to
+    # rely on for its own top/second/third_pair checks).
+    distinct_board_desc = sorted(set(board_ranks), reverse=True)
+    matched_rank = next(r for r in hole_ranks if r in board_ranks)
+    if matched_rank == distinct_board_desc[0]:
+        kicker = hole_ranks[1] if hole_ranks[0] == matched_rank else hole_ranks[0]
+        if kicker == 14:
+            return 7  # Top Pair + Top Kicker
+        if kicker in _GOOD_KICKER_RANKS:
+            return 6  # Top Pair + Good Kicker
+        return 5  # Top Pair
+    if len(distinct_board_desc) >= 2 and matched_rank == distinct_board_desc[1]:
+        return 4  # Second Pair
+    if len(distinct_board_desc) >= 3 and matched_rank == distinct_board_desc[2]:
+        return 3  # Third Pair
+    return 2  # generic Pair (4th+ pair on a wide board)
+
+
+def _set_bucket_offset(hole: list[Card], board: list[Card]) -> int:
+    """0-2 offset within hand_category_norm's Three of a Kind range (see
+    _HAND_CATEGORY_VALUES) -- assumes cat == TRIPS."""
+    hole_ranks = (hole[0].rank, hole[1].rank)
+    if hole_ranks[0] != hole_ranks[1]:
+        return 1  # classic "trips" via a paired board -- treated as the plain middle bucket
+    distinct_board_desc = sorted({c.rank for c in board}, reverse=True)
+    tripped_rank = hole_ranks[0]
+    if tripped_rank == distinct_board_desc[0]:
+        return 2  # Top Set
+    if tripped_rank == distinct_board_desc[-1]:
+        return 0  # Bottom Set
+    return 1  # Set (middle)
+
+
+def _achievable_straight_highs(board: list[Card]) -> set[int]:
+    """Every straight_high value obtainable by adding up to 2 arbitrary
+    ranks to the board's own ranks -- i.e. every straight some hypothetical
+    2 hole cards could complete on this board, not just the ones this
+    specific player holds. Used to classify a made straight as the
+    Bottom/Top one available here (see hand_category_norm's Straight
+    sub-buckets). O(13*13) straight checks -- only run when this player's
+    own hand is actually a straight, not on every decision, so the cost
+    doesn't matter the way it would in extract_features' main path."""
+    board_ranks = {c.rank for c in board}
+    highs = set()
+    for r1 in range(2, 15):
+        for r2 in range(2, 15):
+            sh = straight_high(sorted(board_ranks | {r1, r2}, reverse=True))
+            if sh is not None:
+                highs.add(sh)
+    return highs
+
+
+def _board_flush_possible(board: list[Card]) -> bool:
+    """True if the board alone already has 3+ cards of one suit -- enough
+    that some opponent's 2 hole cards could complete a flush, independent
+    of what this player holds. Used for the Nuts Straight bucket: a
+    possible flush means even the best straight here isn't provably the
+    best hand."""
+    if not board:
+        return False
+    return max(Counter(c.suit for c in board).values()) >= 3
+
+
+def _straight_bucket_offset(board: list[Card], straight_high_value: int) -> int:
+    """0-3 offset within hand_category_norm's Straight range (see
+    _HAND_CATEGORY_VALUES) -- assumes cat == STRAIGHT. `straight_high_value`
+    must be a member of _achievable_straight_highs(board) -- guaranteed
+    since this player's own hole cards are themselves one way to reach it."""
+    achievable = _achievable_straight_highs(board)
+    if straight_high_value == max(achievable):
+        return 3 if not _board_flush_possible(board) else 2  # Nuts vs Top
+    if straight_high_value == min(achievable):
+        return 0  # Bottom Straight
+    return 1  # Straight (middle)
+
+
+def _flush_bucket_offset(hand: dict) -> int:
+    """0-2 offset within hand_category_norm's Flush range (see
+    _HAND_CATEGORY_VALUES) -- assumes cat == FLUSH. hand["tiebreak"][0] is
+    the flush's own high card, not hand["high_card"] (the highest card
+    among *all* hole+board cards regardless of suit) -- the two differ
+    whenever the overall highest card isn't of the flush suit."""
+    flush_high_card = hand["tiebreak"][0]
+    if flush_high_card == 14:
+        return 2  # Ace High Flush
+    if flush_high_card == 13:
+        return 1  # King High Flush
+    return 0  # Flush
+
+
+def _hand_category_bucket(hole: list[Card], board: list[Card], cat: int, hand: dict) -> int:
+    """Index into hand_category_norm's 24-value table (see
+    _HAND_CATEGORY_VALUES) -- folds what used to be a dozen-plus standalone
+    booleans (top_pair, overpair, low_pair, ...) directly into the
+    made-hand-strength ordinal scale, plus new Set/Straight/Flush/kicker
+    splits, so a NN can read them as *where on the strength spectrum* a
+    hand sits rather than as unrelated flags."""
+    if cat == HIGH_CARD:
+        return _HIGH_CARD_INDEX
+    if cat == PAIR:
+        return _PAIR_BASE_INDEX + _pair_bucket_offset(hole, board)
+    if cat == TWO_PAIR:
+        return _TWO_PAIR_INDEX
+    if cat == TRIPS:
+        return _SET_BASE_INDEX + _set_bucket_offset(hole, board)
+    if cat == STRAIGHT:
+        return _STRAIGHT_BASE_INDEX + _straight_bucket_offset(board, hand["tiebreak"][0])
+    if cat == FLUSH:
+        return _FLUSH_BASE_INDEX + _flush_bucket_offset(hand)
+    if cat == FULL_HOUSE:
+        return _FULL_HOUSE_INDEX
+    if cat == QUADS:
+        return _QUADS_INDEX
+    assert cat == STRAIGHT_FLUSH
+    return _STRAIGHT_FLUSH_INDEX
 
 
 _NO_FLOP_TEXTURE = {
@@ -1336,13 +1594,14 @@ def _suit_connection_features(hole: list[Card], board: list[Card]) -> dict:
 # ones, a `_rank_key` dict lookup) on every single extract_features call.
 # extract_features runs once per in-game decision, so this recomputation was
 # previously one of the hottest code paths in the whole simulation.
+_HAND_CATEGORY_KEYS = tuple(spec.key for spec in _HAND_CATEGORY_CHILDREN)  # index 0..23, see _hand_category_bucket
 _HOLE_HIGH_CARD_KEYS = tuple(spec.key for spec in _HOLE_HIGH_CARD_CHILDREN)  # rank 2..14
 _SHARED_HIGH_CARD_KEYS = tuple(spec.key for spec in _SHARED_HIGH_CARD_CHILDREN)  # rank 2..14
 _CONNECTIVITY_GAP_KEYS = tuple(spec.key for spec in _CONNECTIVITY_CHILDREN[1:-1])  # gap 1..CAP-1
 _CONNECTIVITY_GAP_PLUS_KEY = _CONNECTIVITY_CHILDREN[-1].key
 _HOLE_CATEGORY_KEYS = tuple(spec.key for spec in _HOLE_CATEGORY_CHILDREN)  # index 0..11, see _hole_hand_category
 _ACTIVE_PLAYERS_KEYS = tuple(spec.key for spec in _ACTIVE_PLAYERS_CHILDREN)  # n=2..6
-_RAISES_KEYS = tuple(spec.key for spec in _RAISES_CHILDREN[:4])  # r=0..3 ("raises_is_4plus" is already a literal)
+_RAISES_KEYS = tuple(spec.key for spec in _RAISES_CHILDREN[:3])  # r=0..2 ("raises_is_3plus" is already a literal)
 _OVERCARDS_KEYS = tuple(spec.key for spec in _OVERCARDS_CHILDREN)  # n=0..5
 
 _BUCKET_KEY_FAMILIES = {
@@ -1365,20 +1624,21 @@ _BUCKET_KEYS_BY_FEATURE = {
 def extract_features(sit: Situation) -> np.ndarray:
     hand = best_hand_from_available(sit.hole, sit.board)
     cat = hand["category"]
+    hand_category_bucket = _hand_category_bucket(sit.hole, sit.board, cat, hand)
 
     hole_suited = float(sit.hole[0].suit == sit.hole[1].suit)
     gap = _rank_gap(sit.hole[0].rank, sit.hole[1].rank)
     hole_connectivity = _clip01(1.0 - gap / CONNECTIVITY_GAP_CAP)
     hole_category = _hole_hand_category(sit.hole)
 
-    call_amount_norm = _clip01(sit.call_amount / max(sit.pot, 1.0))
+    call_amount_norm = _clip01(sit.call_amount / max(sit.pot, 1.0) / _CALL_SIZE_CEILING)
     spr = sit.effective_stack / max(sit.pot, 1.0)
     spr_norm = _clip01(spr / 20.0)
     position_norm = 0.0
     if sit.num_seats_this_street > 1:
         position_norm = sit.position / (sit.num_seats_this_street - 1)
     num_active_norm = _clip01(sit.num_active / 6.0)
-    num_raises_norm = _clip01(sit.num_raises_this_street / 4.0)
+    num_raises_norm = _clip01(sit.num_raises_this_street / 3.0)
     pot_type_raises = min(sit.num_preflop_raises, 3)
     stack_depth_norm = _clip01(sit.my_stack / max(sit.starting_stack, 1.0) / 2.0)
     hole_high_card_rank = max(sit.hole[0].rank, sit.hole[1].rank)
@@ -1388,7 +1648,7 @@ def extract_features(sit: Situation) -> np.ndarray:
     role_index = SEAT_ROLES.index(role)
 
     values = {
-        "hand_category_norm": cat / 8.0,
+        "hand_category_norm": hand_category_bucket / (len(_HAND_CATEGORY_VALUES) - 1),
         "hole_high_card_norm": (hole_high_card_rank - 2) / 12.0,
         "shared_high_card_norm": ((shared_high_card_rank - 2) / 12.0) if shared_high_card_rank else 0.0,
         "num_overcards_norm": num_overcards / 5.0,
@@ -1418,13 +1678,9 @@ def extract_features(sit: Situation) -> np.ndarray:
     for i, seat_role_name in enumerate(SEAT_ROLES):
         values[_SEAT_ROLE_KEYS[seat_role_name]] = float(role_index == i)
 
-    # Exact one-hot indicators for enumerable categorical features.
-    for category_value, key in (
-        (HIGH_CARD, "has_high_card"), (PAIR, "has_pair"), (TWO_PAIR, "has_two_pair"),
-        (TRIPS, "has_trips"), (STRAIGHT, "has_straight"), (FLUSH, "has_flush"),
-        (FULL_HOUSE, "has_full_house"), (QUADS, "has_quads"), (STRAIGHT_FLUSH, "has_straight_flush"),
-    ):
-        values[key] = float(cat == category_value)
+    # Exact one-hot indicators for hand_category_norm's 24 sub-buckets.
+    for i, key in enumerate(_HAND_CATEGORY_KEYS):
+        values[key] = float(hand_category_bucket == i)
 
     for i, r in enumerate(range(2, 15)):
         values[_HOLE_HIGH_CARD_KEYS[i]] = float(hole_high_card_rank == r)
@@ -1447,9 +1703,9 @@ def extract_features(sit: Situation) -> np.ndarray:
     for i, n in enumerate(range(6)):
         values[_OVERCARDS_KEYS[i]] = float(num_overcards == n)
 
-    for i, r in enumerate(range(0, 4)):
+    for i, r in enumerate(range(0, 3)):
         values[_RAISES_KEYS[i]] = float(sit.num_raises_this_street == r)
-    values["raises_is_4plus"] = float(sit.num_raises_this_street >= 4)
+    values["raises_is_3plus"] = float(sit.num_raises_this_street >= 3)
 
     for i, key in enumerate(("is_unraised_pot", "is_single_raised_pot", "is_3bet_pot", "is_4bet_plus_pot")):
         values[key] = float(pot_type_raises == i)
@@ -1464,10 +1720,10 @@ def extract_features(sit: Situation) -> np.ndarray:
         ("opp_aggression_freq_norm", values["opp_aggression_freq_norm"]),
         ("opp_fold_vs_bet_norm", values["opp_fold_vs_bet_norm"]),
     ):
-        nearest = _nearest_bucket_index(raw_value)
         bucket_keys = _BUCKET_KEYS_BY_FEATURE[feature_key]
-        for i in range(_NUM_BUCKETS):
-            values[bucket_keys[i]] = float(i == nearest)
+        nearest = _nearest_bucket_index(raw_value, len(bucket_keys))
+        for i, key in enumerate(bucket_keys):
+            values[key] = float(i == nearest)
 
     values.update(_hand_vs_board_heuristics(sit.hole, sit.board, cat, hand))
     values.update(_flop_texture(sit.board, sit.hole))

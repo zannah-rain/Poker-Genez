@@ -114,21 +114,28 @@ A genetic algorithm framework that evolves 6-max No-Limit Hold'em strategies.
   charts, not linear weights). Exported strategy reports include a "GTO
   Chart Overrides" section listing every active spot's full chart (see
   Final tournament output below).
-- **Features** (`poker_ga/features.py`): 16 basic situation characteristics
+- **Features** (`poker_ga/features.py`): 17 basic situation characteristics
   (made-hand category, hole/shared-cards high card, hole card connectivity,
   street, call size vs pot, SPR, action-order position, starting seat
-  position, stack depth, players in hand, raises this street, pot type, and
-  3 flop-texture dimensions) each get *two* representations: one generalized
-  0-1 feature so the genome can learn a linear trend across its values, and
-  one exact indicator feature per specific value (e.g. one boolean each for
-  Preflop/Flop/Turn/River, one for every card rank 2-Ace, one for each of
-  UTG/HJ/CO/BTN/SB/BB, one for Rainbow/Flush-Draw-Flop/Monotone, one for
-  Unraised/Single-Raised/3-Bet/4-Bet+ pots) so the genome can also learn a
-  non-linear, value-specific override. Plus ~20 standalone 0/1 heuristic
-  flags that don't reduce to a clean one-hot family (top pair, overpair,
-  combo draw, backdoor flush draws, connected flop, etc — some, like Low
-  Pair, are subsets of others, like Underpair, so forcing them into a
-  single mutually-exclusive category would be wrong). That's 130 features
+  position, stack depth, players in hand, raises this street, pot type,
+  suit connection, and 3 flop-texture dimensions) each get *two*
+  representations: one generalized 0-1 feature so the genome can learn a
+  linear trend across its values, and one exact indicator feature per
+  specific value (e.g. one boolean each for Preflop/Flop/Turn/River, one
+  for every card rank 2-Ace, one for each of UTG/HJ/CO/BTN/SB/BB, one for
+  Rainbow/Flush-Draw-Flop/Monotone, one for Unraised/Single-Raised/3-Bet/
+  4-Bet+ pots) so the genome can also learn a non-linear, value-specific
+  override. Made-hand category is the deepest of these: Pair, Three of a
+  Kind, Straight, and Flush are each further split into several
+  board-relative-strength sub-buckets (e.g. Pair spans Low Pair < Underpair
+  < Pair < Third Pair < Second Pair < Top Pair < Top Pair + Good Kicker <
+  Top Pair + Top Kicker < Overpair) — 24 ordinal values in total, folding
+  what used to be a dozen-plus separate standalone booleans (top pair,
+  overpair, ...) directly into that one strength scale instead, so the
+  genome reads them as *where on the spectrum* a hand sits rather than as
+  unrelated flags. Plus ~14 standalone 0/1 heuristic flags that don't
+  reduce to a clean one-hot family (ace/king high with no pair, combo
+  draw, backdoor flush draws, connected flop, etc). That's 209 features
   total, each with a human-readable label, a precise definition, and a
   high-level group (e.g. "Made Hand Features", "Draw Features" — see
   `FEATURE_GROUPS`) used to organize the strategy exports below (see
@@ -365,11 +372,11 @@ After the last generation, `<out-dir>/final/` contains:
   broken into Preflop/Flop/Turn/River, each row showing its V and L
   weight). Each breakdown row combines that value's general (linear) weight
   with its own exact indicator feature's weight into one raw (pre-clip) number
-  per axis, so the ~90 underlying indicator features never clutter the
+  per axis, so the ~165 underlying indicator features never clutter the
   report as separate entries — these weights are on the raw pre-clip scale
   (and quantized, per WEIGHT_ALPHABET), not literal V/L percentage points. A
   reference section defines each generalized/standalone feature precisely,
-  grouped the same way (36 entries, not 130).
+  grouped the same way (42 entries, not 209).
 - `rankNN_playerID_genome.json` — the named-dictionary weights, loadable via `Genome.load`.
 - `population.json` — the entire final generation, ranked best-first, saved
   via `genome.save_population`. This is what `--reload-previous` picks up

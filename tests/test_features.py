@@ -2,7 +2,6 @@ import numpy as np
 import pytest
 
 from cards import Card
-from evaluator import PAIR, TRIPS
 from features import (
     FEATURE_GROUPS, FEATURE_NAMES, FEATURE_SPECS, NUM_FEATURES, Situation,
     _ace_aware_span, _connectivity_label, _nearest_bucket_index, _rank_gap,
@@ -81,22 +80,26 @@ class TestExtractFeaturesShape:
 
 class TestHandCategoryFeatures:
     def test_trips_hand_sets_category_and_indicator(self):
+        # Pocket 9s matching the board's single highest card (9c) -- the
+        # best possible three of a kind on this board -- is Top Set.
         situation = make_situation(
             hole=[Card.from_str("9h"), Card.from_str("9d")],
             board=[Card.from_str("9c"), Card.from_str("2s"), Card.from_str("4h")],
             street=1,
         )
         values = values_by_key(situation)
-        assert values["hand_category_norm"] == pytest.approx(TRIPS / 8.0)
-        assert values["has_trips"] == 1.0
-        for key in ["has_high_card", "has_pair", "has_two_pair", "has_straight", "has_flush",
-                    "has_full_house", "has_quads", "has_straight_flush"]:
+        assert values["hand_category_norm"] == pytest.approx(13 / 23)
+        assert values["has_top_set"] == 1.0
+        for key in ["has_high_card", "has_pair", "has_two_pair", "has_bottom_set", "has_set",
+                    "has_straight", "has_flush", "has_full_house", "has_quads", "has_straight_flush"]:
             assert values[key] == 0.0
 
     def test_preflop_pocket_pair_is_a_pair(self):
+        # No board yet to classify the pocket pair as over/under/low
+        # against -- lands in the generic "Pair" catch-all bucket.
         situation = make_situation(hole=[Card.from_str("9h"), Card.from_str("9d")], board=[])
         values = values_by_key(situation)
-        assert values["hand_category_norm"] == pytest.approx(PAIR / 8.0)
+        assert values["hand_category_norm"] == pytest.approx(3 / 23)
         assert values["has_pair"] == 1.0
 
 
@@ -238,21 +241,31 @@ class TestBettingAndPotFeatures:
         assert values_by_key(make_situation(call_amount=5.0))["facing_bet"] == 1.0
 
     def test_call_amount_norm_clips_above_pot(self):
+        # Comfortably past even the Overbet ceiling (1.25x pot) -> clipped.
         values = values_by_key(make_situation(pot=100.0, call_amount=500.0))
         assert values["call_amount_norm"] == 1.0
 
     def test_call_amount_norm_fraction_of_pot(self):
+        # 0.25x pot / 1.25 (the Overbet ceiling) == 0.2.
         values = values_by_key(make_situation(pot=100.0, call_amount=25.0))
-        assert values["call_amount_norm"] == pytest.approx(0.25)
+        assert values["call_amount_norm"] == pytest.approx(0.2)
+
+    def test_call_amount_norm_full_pot_bet(self):
+        values = values_by_key(make_situation(pot=100.0, call_amount=100.0))
+        assert values["call_amount_norm"] == pytest.approx(0.8)
+
+    def test_call_amount_norm_overbet(self):
+        values = values_by_key(make_situation(pot=100.0, call_amount=150.0))
+        assert values["call_amount_norm"] == 1.0
 
     def test_spr_norm_clips_at_20x_pot(self):
         values = values_by_key(make_situation(pot=10.0, effective_stack=1000.0))
         assert values["spr_norm"] == 1.0
 
-    def test_num_raises_norm_clips_at_4(self):
+    def test_num_raises_norm_clips_at_3(self):
         values = values_by_key(make_situation(num_raises_this_street=10))
         assert values["num_raises_norm"] == 1.0
-        assert values["raises_is_4plus"] == 1.0
+        assert values["raises_is_3plus"] == 1.0
 
     def test_pot_type_norm_freezes_preflop_raise_count(self):
         values = values_by_key(make_situation(num_preflop_raises=2, num_raises_this_street=0, street=1))
@@ -363,7 +376,9 @@ class TestFlopTexture:
         one = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("2s")], board=board))
         two = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("4c")], board=board))
         assert one["flush_draw"] == 1.0
-        assert two["has_flush"] == 1.0  # both hole cards + all 3 board cards = a made flush
+        # Both hole cards + all 3 board cards = a made flush -- King high
+        # (the board's own Kc), since that's the flush's own highest card.
+        assert two["has_king_high_flush"] == 1.0
 
     def test_connected_flop_without_a_straight_draw(self):
         board = [Card.from_str("5c"), Card.from_str("7d"), Card.from_str("9h")]
@@ -539,49 +554,76 @@ class TestSuitConnectionIndex:
         assert flop_values["flop_suit_texture_norm"] == turn_values["flop_suit_texture_norm"] == 0.5
 
 
-class TestHandVsBoardHeuristics:
-    def test_top_pair(self):
+class TestHandCategoryPairBuckets:
+    """Pair-strength-vs-board classification is now a set of mutually
+    exclusive hand_category_norm sub-buckets (see _HAND_CATEGORY_VALUES)
+    rather than independent, sometimes-overlapping standalone booleans --
+    e.g. Low Pair and Underpair used to both read true for a pocket pair
+    below the whole board; now a hand is exactly one or the other."""
+
+    def test_top_pair_weak_kicker(self):
         hole = [Card.from_str("Kh"), Card.from_str("2d")]
         board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("3h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["top_pair"] == 1.0
-        assert values["second_pair"] == 0.0
+        assert values["has_top_pair"] == 1.0
+        assert values["has_second_pair"] == 0.0
+
+    def test_top_pair_good_kicker(self):
+        hole = [Card.from_str("Kh"), Card.from_str("Jd")]  # Jack kicker
+        board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("3h")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=1))
+        assert values["has_top_pair_good_kicker"] == 1.0
+        assert values["has_top_pair"] == 0.0
+
+    def test_top_pair_top_kicker(self):
+        hole = [Card.from_str("Kh"), Card.from_str("Ad")]  # Ace kicker
+        board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("3h")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=1))
+        assert values["has_top_pair_top_kicker"] == 1.0
+        assert values["has_top_pair_good_kicker"] == 0.0
 
     def test_second_pair(self):
         hole = [Card.from_str("7h"), Card.from_str("2d")]
         board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("3h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["second_pair"] == 1.0
-        assert values["top_pair"] == 0.0
+        assert values["has_second_pair"] == 1.0
+        assert values["has_top_pair"] == 0.0
 
     def test_third_pair(self):
         hole = [Card.from_str("3h"), Card.from_str("2d")]
         board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("3c")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["third_pair"] == 1.0
+        assert values["has_third_pair"] == 1.0
 
     def test_overpair(self):
         hole = [Card.from_str("Kh"), Card.from_str("Kd")]
         board = [Card.from_str("7c"), Card.from_str("4d"), Card.from_str("3h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["overpair"] == 1.0
-        assert values["underpair"] == 0.0
+        assert values["has_overpair"] == 1.0
+        assert values["has_underpair"] == 0.0
 
-    def test_underpair_and_low_pair(self):
+    def test_low_pair(self):
+        # 4 is below every board card -- Low Pair, not Underpair.
         hole = [Card.from_str("4h"), Card.from_str("4d")]
         board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("5h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["underpair"] == 1.0
-        assert values["low_pair"] == 1.0  # 4 is below every board card
+        assert values["has_low_pair"] == 1.0
+        assert values["has_underpair"] == 0.0
 
-    def test_underpair_but_not_low_pair(self):
-        # pair (7) is below the top card (K) but above the bottom card (3).
+    def test_underpair_not_low_pair(self):
+        # pair (6) is below the top card (K) but above the bottom card (3).
         hole = [Card.from_str("6h"), Card.from_str("6d")]
         board = [Card.from_str("Kc"), Card.from_str("5d"), Card.from_str("3h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["underpair"] == 1.0
-        assert values["low_pair"] == 0.0
+        assert values["has_underpair"] == 1.0
+        assert values["has_low_pair"] == 0.0
 
+    def test_preflop_pocket_pair_is_the_generic_pair_bucket(self):
+        values = values_by_key(make_situation(hole=[Card.from_str("6h"), Card.from_str("6d")], board=[]))
+        assert values["has_pair"] == 1.0
+
+
+class TestHandVsBoardHeuristics:
     def test_ace_high_no_pair(self):
         hole = [Card.from_str("Ah"), Card.from_str("2d")]
         board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("3h")]
@@ -743,8 +785,16 @@ class TestOpponentTendencyFeatures:
 
 class TestBucketIndicators:
     def test_exactly_one_bucket_active_per_continuous_family(self):
+        # call_amount_norm has 6 buckets (the extra Overbet bucket -- see
+        # _CALL_SIZE_VALUES), unlike most continuous features' 5.
         values = values_by_key(make_situation(pot=100.0, call_amount=25.0))
-        bucket_keys = [f"call_amount_norm_bucket_{i}" for i in range(5)]
+        bucket_keys = [f"call_amount_norm_bucket_{i}" for i in range(6)]
+        active = [values[k] for k in bucket_keys]
+        assert sum(active) == 1.0
+
+    def test_exactly_one_bucket_active_for_a_default_five_bucket_family(self):
+        values = values_by_key(make_situation(pot=10.0, effective_stack=50.0))
+        bucket_keys = [f"spr_norm_bucket_{i}" for i in range(5)]
         active = [values[k] for k in bucket_keys]
         assert sum(active) == 1.0
 
