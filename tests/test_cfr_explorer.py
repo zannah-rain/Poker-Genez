@@ -1,3 +1,4 @@
+import json
 import os
 import re
 
@@ -13,6 +14,10 @@ import strategy
 
 _APP_PATH = os.path.join(os.path.dirname(__file__), "..", "poker_ga", "cfr_explorer.py")
 _FEATURE_KEYS = ("street_norm", "facing_bet", "hand_category_norm")
+# Mirrors _COLLAPSED_LABELS -- not imported directly since
+# cfr_explorer.py calls main() at module scope (it's a script, driven only
+# via AppTest.from_file, not a plain importable module).
+_COLLAPSED_LABELS = ("Fold", "Call", "Raise", "All-In")
 
 
 def _shap_values_by_key(at: AppTest) -> dict[str, float]:
@@ -297,3 +302,80 @@ class TestHierarchicalGroupSplit:
         # hierarchical nesting means no single heading repeats both keys.
         headings = [el.value for el in list(at.subheader) + list(at.markdown)]
         assert not any("Street" in h and "Hand Strength Tier" in h for h in headings)
+
+
+class TestGraphs:
+    def test_marking_a_feature_as_graph_renders_one_line_chart(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Graph")
+        at.run(timeout=60)
+
+        assert not at.exception
+        charts = at.get("plotly_chart")
+        assert len(charts) == 1
+        assert charts[0].id.endswith("graph_chart::street_norm")
+
+    def test_no_graphs_section_when_nothing_is_marked_graph(self, synthetic_checkpoint):
+        at = _run_app()
+        assert not at.get("plotly_chart")
+        assert not any("Graphs" == h.value for h in at.header)
+
+    def test_crossing_with_another_feature_adds_four_heatmaps(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Graph")
+        at.run(timeout=60)
+        at.multiselect(key="graph_cross::street_norm").set_value(["hand_category_norm"])
+        at.run(timeout=60)
+
+        assert not at.exception
+        charts = at.get("plotly_chart")
+        assert len(charts) == 5  # 1 line chart + 4 simplified-action heatmaps
+        heat_ids = [c.id for c in charts if "graph_heat::street_norm::hand_category_norm::" in c.id]
+        assert len(heat_ids) == 4
+
+    def test_cross_dropdown_excludes_the_graphed_feature_itself(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Graph")
+        at.run(timeout=60)
+
+        cross = at.multiselect(key="graph_cross::street_norm")
+        assert "Betting Street" not in cross.options  # street_norm's own label -- can't cross a feature with itself
+        assert set(cross.options) == {"Facing A Bet", "Hand Strength Tier"}
+
+    def test_line_chart_has_one_trace_per_action_and_a_percent_y_axis(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Graph")
+        at.run(timeout=60)
+
+        spec = json.loads(at.get("plotly_chart")[0].proto.spec)
+        assert len(spec["data"]) == strategy.NUM_ACTION_CATEGORIES
+        assert spec["layout"]["yaxis"]["range"] == [0, 1]
+        assert spec["layout"]["yaxis"]["tickformat"] == ".0%"
+
+    def test_collapsing_actions_also_collapses_the_line_chart_to_four_traces(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Graph")
+        at.run(timeout=60)
+        at.sidebar.toggle[0].set_value(True)
+        at.run(timeout=60)
+
+        spec = json.loads(at.get("plotly_chart")[0].proto.spec)
+        assert len(spec["data"]) == 4
+        assert [trace["name"] for trace in spec["data"]] == list(_COLLAPSED_LABELS)
+
+    def test_heatmaps_always_use_the_four_simplified_actions_regardless_of_toggle(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Graph")
+        at.run(timeout=60)
+        at.multiselect(key="graph_cross::street_norm").set_value(["hand_category_norm"])
+        at.run(timeout=60)
+        at.sidebar.toggle[0].set_value(True)  # collapse toggle should only affect the line chart, not the heatmaps
+        at.run(timeout=60)
+
+        assert not at.exception
+        heatmap_titles = sorted(
+            json.loads(c.proto.spec)["layout"]["title"]["text"]
+            for c in at.get("plotly_chart")
+            if "graph_heat::" in c.id
+        )
+        assert heatmap_titles == sorted(f"{label} rate" for label in _COLLAPSED_LABELS)

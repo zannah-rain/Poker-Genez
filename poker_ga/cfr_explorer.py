@@ -26,6 +26,7 @@ import os
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 import torch
 
@@ -45,7 +46,8 @@ ROLE_UNUSED = "Unused"
 ROLE_FILTER = "Filter"
 ROLE_GROUP_SPLIT = "Group split"
 ROLE_TABLE_SPLIT = "Table split"
-ROLES = (ROLE_UNUSED, ROLE_FILTER, ROLE_GROUP_SPLIT, ROLE_TABLE_SPLIT)
+ROLE_GRAPH = "Graph"
+ROLES = (ROLE_UNUSED, ROLE_FILTER, ROLE_GROUP_SPLIT, ROLE_TABLE_SPLIT, ROLE_GRAPH)
 MAX_TABLE_SPLIT_FEATURES = 2
 
 _COLLAPSED_LABELS = ("Fold", "Call", "Raise", "All-In")
@@ -55,6 +57,35 @@ _COLLAPSED_GROUP_OF_ACTION = {
     **{a: "Raise" for a in strategy.RAISE_ACTIONS},
     strategy.ACTION_ALLIN: "All-In",
 }
+
+# A fixed-order categorical palette (identity, never re-cycled/re-ranked by
+# whatever's currently on screen) for the 4 collapsed action groups -- kept
+# to just these first 4 slots since they're the ones validated for every
+# adjacent pair in both light and dark modes.
+_CATEGORICAL_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100")
+# The 9 native action categories are really one ordered "aggression" scale
+# (Fold -> Call -> Raise 25% -> ... -> All-In), so they read better as a
+# single-hue ordinal ramp (light = passive, dark = aggressive) than as 9
+# arbitrary categorical hues -- also sidesteps the palette only having 8
+# categorical slots defined. Steps 250-650 off the validated sequential blue
+# ramp (light mode's ordinal floor is step 250).
+_ORDINAL_BLUE_9 = (
+    "#86b6ef", "#6da7ec", "#5598e7", "#3987e5", "#2a78d6",
+    "#256abf", "#1c5cab", "#184f95", "#104281",
+)
+# The full sequential ramp (magnitude: 0% -> 100%), used for every heatmap's
+# colorscale -- each heatmap is its own independent panel (never two
+# sequential fields overlaid at once), so reusing one hue across all of
+# them is fine; the title text carries which action it is, not the color.
+_SEQUENTIAL_BLUE_SCALE = [
+    (0 / 12, "#cde2fb"), (1 / 12, "#b7d3f6"), (2 / 12, "#9ec5f4"), (3 / 12, "#86b6ef"),
+    (4 / 12, "#6da7ec"), (5 / 12, "#5598e7"), (6 / 12, "#3987e5"), (7 / 12, "#2a78d6"),
+    (8 / 12, "#256abf"), (9 / 12, "#1c5cab"), (10 / 12, "#184f95"), (11 / 12, "#104281"), (12 / 12, "#0d366b"),
+]
+_CHART_GRIDLINE_COLOR = "#e1e0d9"
+_CHART_AXIS_COLOR = "#c3c2b7"
+_CHART_MUTED_TEXT_COLOR = "#898781"
+_CHART_PRIMARY_TEXT_COLOR = "#0b0b0b"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -212,11 +243,135 @@ def _with_action_view(df: pd.DataFrame, collapsed: bool) -> pd.DataFrame:
     return out
 
 
+def _chart_layout_kwargs(**extra) -> dict:
+    """Layout options shared by every plotly figure this app draws: recessive
+    hairline gridlines/axis, muted tick text, primary-ink title, transparent
+    surface (so it sits on Streamlit's own background rather than fighting it
+    with a second white card), and enough margin to avoid clipping labels."""
+    return dict(
+        font=dict(color=_CHART_MUTED_TEXT_COLOR),
+        title_font=dict(color=_CHART_PRIMARY_TEXT_COLOR),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(t=48, b=40, l=10, r=10),
+        **extra,
+    )
+
+
+def _line_chart_figure(filtered: pd.DataFrame, x_key: str, collapsed: bool) -> go.Figure:
+    """A line per action category (the native 9-way aggression scale, or the
+    4 collapsed groups if `collapsed`), mean action probability against every
+    observed bucket of `x_key`, y axis pinned to the full 0-100% range so
+    different features' charts stay visually comparable."""
+    view = _with_action_view(filtered, collapsed)
+    action_cols = _action_columns(collapsed)
+    action_labels = _COLLAPSED_LABELS if collapsed else strategy.ACTION_CATEGORIES
+    colors = _CATEGORICAL_COLORS if collapsed else _ORDINAL_BLUE_9
+    x_col = _feature_col(x_key)
+    order = _observed_categories(filtered, x_key)
+    summary = view.groupby(x_col, observed=True)[action_cols].mean().reindex(order)
+
+    fig = go.Figure()
+    for label, col, color in zip(action_labels, action_cols, colors):
+        fig.add_trace(go.Scatter(
+            x=order, y=summary[col], name=label, mode="lines+markers",
+            line=dict(width=2, color=color), marker=dict(size=8, color=color),
+            hovertemplate=f"{label}: " + "%{y:.1%}<extra></extra>",
+        ))
+    fig.update_layout(
+        **_chart_layout_kwargs(),
+        title=f"{cfr_features.feature_label(x_key)} vs. action probability",
+        xaxis=dict(
+            title=cfr_features.feature_label(x_key), type="category",
+            categoryorder="array", categoryarray=order,
+            gridcolor=_CHART_GRIDLINE_COLOR, linecolor=_CHART_AXIS_COLOR,
+        ),
+        yaxis=dict(
+            title="Action probability", range=[0, 1], tickformat=".0%",
+            gridcolor=_CHART_GRIDLINE_COLOR, linecolor=_CHART_AXIS_COLOR,
+        ),
+        legend=dict(title="Action"), hovermode="x unified", height=420,
+    )
+    return fig
+
+
+def _heatmap_figures(filtered: pd.DataFrame, x_key: str, y_key: str) -> list[go.Figure]:
+    """One heatmap per collapsed action group (always the 4 simplified
+    groups, regardless of the sidebar's collapse toggle -- a 9-way split
+    wouldn't fit sensibly on a 2D grid meant to be read at a glance): mean
+    action rate for every observed (x_key, y_key) bucket combination."""
+    view = _with_action_view(filtered, collapsed=True)
+    x_col, y_col = _feature_col(x_key), _feature_col(y_key)
+    x_order = _observed_categories(filtered, x_key)
+    y_order = _observed_categories(filtered, y_key)
+    x_label, y_label = cfr_features.feature_label(x_key), cfr_features.feature_label(y_key)
+
+    figures = []
+    for action_label in _COLLAPSED_LABELS:
+        action_col = _ACTION_COL_PREFIX + action_label
+        pivot = view.pivot_table(values=action_col, index=y_col, columns=x_col, aggfunc="mean", observed=True)
+        pivot = pivot.reindex(index=y_order, columns=x_order)
+        z = pivot.to_numpy(dtype=float)
+        text = np.full(z.shape, "", dtype=object)
+        text[~np.isnan(z)] = [f"{v:.0%}" for v in z[~np.isnan(z)]]
+
+        fig = go.Figure(data=go.Heatmap(
+            z=z, x=x_order, y=y_order, text=text, texttemplate="%{text}",
+            zmin=0, zmax=1, colorscale=_SEQUENTIAL_BLUE_SCALE,
+            colorbar=dict(title="Rate", tickformat=".0%"),
+            hovertemplate=f"{x_label}: %{{x}}<br>{y_label}: %{{y}}<br>{action_label}: %{{z:.1%}}<extra></extra>",
+        ))
+        fig.update_layout(
+            **_chart_layout_kwargs(),
+            title=f"{action_label} rate",
+            xaxis=dict(title=x_label, type="category", categoryorder="array", categoryarray=x_order),
+            yaxis=dict(title=y_label, type="category", categoryorder="array", categoryarray=y_order),
+            height=380,
+        )
+        figures.append(fig)
+    return figures
+
+
+def _render_graphs(filtered: pd.DataFrame, graph_keys: list[str], display_keys: list[str], collapsed: bool) -> None:
+    """One line chart per feature marked Graph, each paired with a
+    multiselect of other features to "cross" it with -- every feature
+    picked there adds its own row of 4 heatmaps (this graphed feature as
+    the x axis, the picked feature as the y axis, one heatmap per
+    simplified action rate)."""
+    if not graph_keys:
+        return
+    st.divider()
+    st.header("Graphs")
+
+    for key in graph_keys:
+        other_keys = [k for k in display_keys if k != key]
+        col_controls, col_chart = st.columns([1, 3])
+        with col_controls:
+            st.markdown(f"**{cfr_features.feature_label(key)}**")
+            cross_keys = st.multiselect(
+                "Cross with other features (adds heatmaps below)",
+                options=other_keys, format_func=cfr_features.feature_label, key=f"graph_cross::{key}",
+            )
+        with col_chart:
+            st.plotly_chart(_line_chart_figure(filtered, key, collapsed), key=f"graph_chart::{key}")
+
+        for cross_key in cross_keys:
+            st.caption(f"{cfr_features.feature_label(key)} × {cfr_features.feature_label(cross_key)}")
+            # 2 per row rather than a cramped 4-across: each heatmap's own
+            # per-cell % labels need real width to stay legible instead of
+            # overlapping their neighbors.
+            heat_cols = st.columns(2)
+            for i, heatmap_fig in enumerate(_heatmap_figures(filtered, key, cross_key)):
+                with heat_cols[i % 2]:
+                    st.plotly_chart(heatmap_fig, key=f"graph_heat::{key}::{cross_key}::{i}")
+
+
 def _render_sidebar(
     feature_order: list[tuple[str, float]], df: pd.DataFrame,
-) -> tuple[dict[str, list[str]], list[str], list[str], bool]:
-    """Returns (filters, group_split_keys, table_split_keys, collapsed).
-    `filters` maps feature_key -> the bucket labels to keep for it."""
+) -> tuple[dict[str, list[str]], list[str], list[str], list[str], bool]:
+    """Returns (filters, group_split_keys, table_split_keys, graph_keys,
+    collapsed). `filters` maps feature_key -> the bucket labels to keep for
+    it."""
     st.sidebar.header("Features")
     st.sidebar.caption(
         "Ordered by mean |SHAP| contribution to the net's predictions, over whichever rows "
@@ -226,6 +381,7 @@ def _render_sidebar(
     filters: dict[str, list[str]] = {}
     group_split_keys: list[str] = []
     table_split_keys: list[str] = []
+    graph_keys: list[str] = []
 
     for key, importance in feature_order:
         label = f"{cfr_features.feature_label(key)}  (SHAP {importance:.4f})"
@@ -239,6 +395,8 @@ def _render_sidebar(
             group_split_keys.append(key)
         elif role == ROLE_TABLE_SPLIT:
             table_split_keys.append(key)
+        elif role == ROLE_GRAPH:
+            graph_keys.append(key)
 
     if len(table_split_keys) > MAX_TABLE_SPLIT_FEATURES:
         kept, dropped = table_split_keys[:MAX_TABLE_SPLIT_FEATURES], table_split_keys[MAX_TABLE_SPLIT_FEATURES:]
@@ -254,7 +412,7 @@ def _render_sidebar(
     st.sidebar.divider()
     collapsed = st.sidebar.toggle("Collapse actions to Fold / Call / Raise / All-In", value=False)
 
-    return filters, group_split_keys, table_split_keys, collapsed
+    return filters, group_split_keys, table_split_keys, graph_keys, collapsed
 
 
 def _filter_mask(df: pd.DataFrame, filters: dict[str, list[str]]) -> pd.Series:
@@ -397,7 +555,7 @@ def main() -> None:
     filters_key = tuple(sorted((key, tuple(values)) for key, values in current_filters.items()))
     feature_importance = _filtered_feature_importance(checkpoint_path, int(max_samples), filters_key)
 
-    filters, group_split_keys, table_split_keys, collapsed = _render_sidebar(feature_importance, df)
+    filters, group_split_keys, table_split_keys, graph_keys, collapsed = _render_sidebar(feature_importance, df)
     filtered = _apply_filters(df, filters)
 
     if filtered.empty:
@@ -405,6 +563,7 @@ def main() -> None:
         st.stop()
 
     _render_grouped(filtered, group_split_keys, table_split_keys, collapsed)
+    _render_graphs(filtered, graph_keys, display_keys, collapsed)
 
 
 main()

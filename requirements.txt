@@ -10,8 +10,10 @@ torch>=2.2
 shap==0.44.1
 scipy<1.13
 numba<0.60
-# Powers cfr_explorer.py (the CFR strategy-explorer web app) and pandas
-# (its pivot tables) -- verified via `pip install --dry-run` that both
-# resolve against the numpy<2 pin above without wanting to upgrade it.
+# Powers cfr_explorer.py (the CFR strategy-explorer web app), pandas (its
+# pivot tables), and plotly (its interactive line/heatmap graphs) --
+# verified via `pip install --dry-run` that all three resolve against the
+# numpy<2 pin above without wanting to upgrade it.
 streamlit
 pandas
+plotly
