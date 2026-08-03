@@ -222,7 +222,7 @@ def _terminal_showdown(state: _HandState, ctx: _TraversalContext) -> float:
 
 def _build_situation(
     state: _HandState, street: int, order: list[int], i: int, pot: float, call_amount: float,
-    num_raises: int, preflop_raise_count: int, last_aggressor: int | None, raiser_seats: frozenset,
+    num_raises: int, preflop_raise_count: int, previous_street_aggressor: int | None, raiser_seats: frozenset,
 ) -> Situation:
     seats = state.seats
     non_folded = [s for s in order if not seats[s].folded]
@@ -242,7 +242,7 @@ def _build_situation(
         num_active=len(non_folded),
         num_raises_this_street=num_raises,
         num_preflop_raises=(num_raises if street == PREFLOP else preflop_raise_count),
-        is_aggressor=(last_aggressor == i),
+        is_aggressor=(previous_street_aggressor == i),
         starting_stack=state.config.starting_stack,
         big_blind=state.config.big_blind,
         raised_positions=frozenset(seat_role(j, state.button_idx, len(seats)) for j in raiser_seats if j != i),
@@ -251,9 +251,21 @@ def _build_situation(
 
 def _decision_node(
     state: _HandState, street: int, to_act: list[int], order: list[int], pot: float,
-    current_bet: float, last_raise_increment: float, num_raises: int, last_aggressor: int | None,
-    raiser_seats: frozenset, preflop_raise_count: int, ctx: _TraversalContext,
+    current_bet: float, last_raise_increment: float, num_raises: int, street_aggressor: int | None,
+    previous_street_aggressor: int | None, raiser_seats: frozenset, preflop_raise_count: int,
+    ctx: _TraversalContext,
 ) -> float:
+    """`street_aggressor` is who (if anyone) has raised so far on *this*
+    street -- live-updated as the recursion proceeds, and hand off to
+    _start_street as the *next* street's previous_street_aggressor once
+    this one ends. `previous_street_aggressor` is constant for this whole
+    street: who raised last on the *prior* one, feeding
+    Situation.is_aggressor -- deliberately not street_aggressor, since
+    whoever raised most recently this street is skipped over in the to-act
+    order until either the street ends or someone else re-raises
+    (immediately replacing them as street_aggressor), so a player can never
+    be making a decision while also being this street's own last
+    aggressor -- see features.Situation.is_aggressor."""
     seats = state.seats
     non_folded = [s for s in order if not seats[s].folded]
     if len(non_folded) <= 1:
@@ -261,13 +273,13 @@ def _decision_node(
 
     if not to_act:
         new_preflop_raise_count = num_raises if street == PREFLOP else preflop_raise_count
-        return _start_street(state, street + 1, pot, new_preflop_raise_count, ctx)
+        return _start_street(state, street + 1, pot, new_preflop_raise_count, street_aggressor, ctx)
 
     i, rest = to_act[0], to_act[1:]
     if seats[i].folded or seats[i].all_in:
         return _decision_node(
             state, street, rest, order, pot, current_bet, last_raise_increment, num_raises,
-            last_aggressor, raiser_seats, preflop_raise_count, ctx,
+            street_aggressor, previous_street_aggressor, raiser_seats, preflop_raise_count, ctx,
         )
 
     call_amount = current_bet - seats[i].street_committed
@@ -279,7 +291,7 @@ def _decision_node(
 
     situation = _build_situation(
         state, street, order, i, pot, call_amount, num_raises, preflop_raise_count,
-        last_aggressor, raiser_seats,
+        previous_street_aggressor, raiser_seats,
     )
     legal_mask = cfr_actions.legal_action_categories(legal_actions)
     feats = cfr_features.extract_subset(situation, ctx.feature_indices)
@@ -293,13 +305,13 @@ def _decision_node(
             _apply_fold(child_state, i)
             return _decision_node(
                 child_state, street, rest, order, pot, current_bet, last_raise_increment, num_raises,
-                last_aggressor, raiser_seats, preflop_raise_count, ctx,
+                street_aggressor, previous_street_aggressor, raiser_seats, preflop_raise_count, ctx,
             )
         if game_action == CHECK_CALL:
             new_pot = _apply_call(child_state, i, current_bet, pot)
             return _decision_node(
                 child_state, street, rest, order, new_pot, current_bet, last_raise_increment, num_raises,
-                last_aggressor, raiser_seats, preflop_raise_count, ctx,
+                street_aggressor, previous_street_aggressor, raiser_seats, preflop_raise_count, ctx,
             )
         # BET_RAISE
         new_pot, new_current_bet, new_last_raise_increment = _apply_raise(
@@ -310,7 +322,7 @@ def _decision_node(
         new_raiser_seats = raiser_seats | {i}
         return _decision_node(
             child_state, street, new_to_act, order, new_pot, new_current_bet, new_last_raise_increment,
-            num_raises + 1, i, new_raiser_seats, preflop_raise_count, ctx,
+            num_raises + 1, i, previous_street_aggressor, new_raiser_seats, preflop_raise_count, ctx,
         )
 
     if i == ctx.traverser:
@@ -333,7 +345,14 @@ def _decision_node(
     return _apply_and_recurse(state, chosen)
 
 
-def _start_street(state: _HandState, street: int, pot: float, preflop_raise_count: int, ctx: _TraversalContext) -> float:
+def _start_street(
+    state: _HandState, street: int, pot: float, preflop_raise_count: int,
+    previous_street_aggressor: int | None, ctx: _TraversalContext,
+) -> float:
+    """`previous_street_aggressor` is who (if anyone) raised last on the
+    street just completed -- None to start the hand (there's no street
+    before preflop), or whatever the prior _decision_node's own
+    street_aggressor ended up being."""
     if street > RIVER:
         return _terminal_showdown(state, ctx)
 
@@ -351,13 +370,16 @@ def _start_street(state: _HandState, street: int, pot: float, preflop_raise_coun
 
     not_all_in = [i for i in non_folded if not seats[i].all_in]
     if len(not_all_in) < 2:
-        return _start_street(state, street + 1, pot, preflop_raise_count, ctx)
+        # No further decisions will ever be made this hand (everyone left is
+        # either all-in or about to be dealt straight to showdown), so what
+        # we pass forward here is moot -- carried through unchanged regardless.
+        return _start_street(state, street + 1, pot, preflop_raise_count, previous_street_aggressor, ctx)
 
     to_act = [i for i in order if not seats[i].all_in]
     starting_bet = max((seats[i].street_committed for i in non_folded), default=0.0)
     return _decision_node(
         state, street, to_act, order, pot, starting_bet, state.config.big_blind, 0, None,
-        frozenset(), preflop_raise_count, ctx,
+        previous_street_aggressor, frozenset(), preflop_raise_count, ctx,
     )
 
 
@@ -402,4 +424,4 @@ def traverse_hand(
         traverser=traverser, net=net, reservoir=reservoir, rng=rng, t=t,
         feature_indices=feature_indices, num_equity_rollouts=num_equity_rollouts,
     )
-    return _start_street(state, PREFLOP, pot, 0, ctx)
+    return _start_street(state, PREFLOP, pot, 0, None, ctx)

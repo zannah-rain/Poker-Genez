@@ -844,7 +844,12 @@ FEATURE_SPECS: list[FeatureSpec] = [
     ),
     FeatureSpec(
         "is_aggressor", "Last Aggressor",
-        "1 if this player made the most recent bet/raise on the current street, else 0.",
+        "1 if this player made the most recent bet/raise on the *previous* street, else 0 "
+        "(always 0 preflop, since there's no previous street). Not the current street: a "
+        "player who just raised is skipped over until either the street ends or someone "
+        "else re-raises, at which point they're no longer that street's own aggressor -- "
+        "so at the moment any decision is actually made, 'I raised this street' is always "
+        "false, making the previous street the only version of this that's ever useful.",
         group="Betting Behaviour Features",
     ),
 
@@ -1142,7 +1147,17 @@ class Situation:
     num_active: int  # players still in the hand (not folded)
     num_raises_this_street: int
     num_preflop_raises: int  # frozen once preflop ends, unlike num_raises_this_street
-    is_aggressor: bool  # did I make the last bet/raise this street?
+    # Did I make the last bet/raise on the *previous* street? (always False
+    # preflop -- there's no previous street to have raised on). Deliberately
+    # not "this street": whoever's still deciding on the current street can
+    # never themselves be this street's own last aggressor -- raising takes
+    # you out of the to-act order until either the street ends or someone
+    # else re-raises (see game.betting_round), and a re-raise immediately
+    # replaces you as the current street's aggressor -- so that reading
+    # would be a structurally-always-False feature. The previous street's
+    # aggressor has no such conflict, so it's the one worth conditioning on
+    # (e.g. "am I continuation betting").
+    is_aggressor: bool
     starting_stack: float
     big_blind: float = 2.0  # lets stack depth be expressed in actual BB (see gto.py's SpotMatcher)
     # Starting positions (seating.SEAT_ROLES) of every *other* seat that has

@@ -50,7 +50,7 @@ class SpotMatcher:
     street: int | None = None  # 0=preflop, 1=flop, 2=turn, 3=river
     pot_type: int | None = None  # 0=unraised, 1=single raised, 2=3-bet, 3=4-bet+ (num_preflop_raises, capped at 3)
     position: str | None = None  # one of seating.SEAT_ROLES, or None for "any position"
-    is_aggressor: bool | None = None  # did I make the last bet/raise this street?
+    is_aggressor: bool | None = None  # did I make the last bet/raise on the *previous* street? (e.g. continuation betting)
     facing_bet: bool | None = None  # is there a nonzero amount required to call?
     raised_positions: frozenset[str] | None = None  # exact set of other seats' positions that have raised this street
     min_effective_bb: float | None = None  # inclusive, in actual big blinds
@@ -104,9 +104,9 @@ class SpotMatcher:
         elif self.facing_bet is False:
             parts.append("not facing a bet")
         if self.is_aggressor is True:
-            parts.append("I'm the last aggressor")
+            parts.append("I raised last street")
         elif self.is_aggressor is False:
-            parts.append("I'm not the last aggressor")
+            parts.append("I didn't raise last street")
         if self.raised_positions is not None:
             if self.raised_positions:
                 parts.append(f"vs {'+'.join(sorted(self.raised_positions))} raise")

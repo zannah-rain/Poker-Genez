@@ -40,7 +40,7 @@ import cfr_actions
 import cfr_features
 import cfr_tree
 import strategy
-from cards import Deck
+from cards import Card, Deck
 from game import PREFLOP, GameConfig, SeatState, _np_rng_to_random, play_hand
 from player import Player
 from seating import blind_indices
@@ -122,7 +122,7 @@ def _run_cfr(stacks, button_idx, config, seed, target_category, traverser, num_e
         traverser=traverser, net=_DominantRegretNet(target_category), reservoir=_DiscardingReservoir(),
         rng=rng, t=1.0, feature_indices=_FEATURE_INDICES, num_equity_rollouts=num_equity_rollouts,
     )
-    return cfr_tree._start_street(state, PREFLOP, pot, 0, ctx)
+    return cfr_tree._start_street(state, PREFLOP, pot, 0, None, ctx)
 
 
 def _assert_matches_reference(stacks, button_idx, config, seed, target_category):
@@ -181,3 +181,56 @@ class TestCfrTreeConservesChipsThroughEquityAveraging:
         config = GameConfig(small_blind=1.0, big_blind=2.0, starting_stack=200.0, max_raises_per_street=3)
         for seed in range(2):
             _assert_conserves_chips([200.0, 200.0], button_idx=0, config=config, seed=seed, target_category=strategy.ACTION_RAISE_100)
+
+
+class TestIsAggressorReflectsThePreviousStreet:
+    def _make_state(self):
+        seats = [SeatState(player=Player(player_id=i, genome=None), stack=200.0) for i in range(2)]
+        for s in seats:
+            s.hole = [Card.from_str("Ah"), Card.from_str("Kh")]
+        deck = Deck(rng=_np_rng_to_random(np.random.default_rng(0)))
+        return cfr_tree._HandState(seats=seats, board=[], deck=deck, button_idx=0, config=GameConfig())
+
+    def test_build_situation_uses_previous_street_aggressor_not_this_streets(self):
+        state = self._make_state()
+        aggressors_situation = cfr_tree._build_situation(
+            state, street=1, order=[0, 1], i=0, pot=10.0, call_amount=0.0,
+            num_raises=0, preflop_raise_count=1, previous_street_aggressor=0, raiser_seats=frozenset(),
+        )
+        other_seats_situation = cfr_tree._build_situation(
+            state, street=1, order=[0, 1], i=1, pot=10.0, call_amount=0.0,
+            num_raises=0, preflop_raise_count=1, previous_street_aggressor=0, raiser_seats=frozenset(),
+        )
+        assert aggressors_situation.is_aggressor is True
+        assert other_seats_situation.is_aggressor is False
+
+    def test_decision_node_hands_off_its_own_street_aggressor_as_the_next_streets_previous(self, monkeypatch):
+        # Seat 1 raised at some point this (fictional) street and nobody
+        # re-raised since (street_aggressor=1) -- once to_act empties out,
+        # _decision_node should hand that off as the *next* street's
+        # previous_street_aggressor, not whatever was true before this one
+        # started (previous_street_aggressor=None here, deliberately
+        # different from street_aggressor, so the test would fail if the
+        # two ever got mixed up).
+        captured = {}
+
+        def fake_start_street(state, street, pot, preflop_raise_count, previous_street_aggressor, ctx):
+            captured["previous_street_aggressor"] = previous_street_aggressor
+            captured["street"] = street
+            return 0.0
+
+        monkeypatch.setattr(cfr_tree, "_start_street", fake_start_street)
+        state = self._make_state()
+        ctx = cfr_tree._TraversalContext(
+            traverser=0, net=_DominantRegretNet(strategy.ACTION_CALL), reservoir=_DiscardingReservoir(),
+            rng=np.random.default_rng(0), t=1.0, feature_indices=_FEATURE_INDICES, num_equity_rollouts=1,
+        )
+
+        cfr_tree._decision_node(
+            state, street=0, to_act=[], order=[0, 1], pot=10.0, current_bet=0.0, last_raise_increment=2.0,
+            num_raises=1, street_aggressor=1, previous_street_aggressor=None, raiser_seats=frozenset({1}),
+            preflop_raise_count=0, ctx=ctx,
+        )
+
+        assert captured["previous_street_aggressor"] == 1
+        assert captured["street"] == 1

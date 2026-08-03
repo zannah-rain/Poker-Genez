@@ -114,21 +114,31 @@ def betting_round(
     max_raises_per_street: int,
     min_raise_fraction_of_pot: float,
     rng: np.random.Generator,
+    previous_street_aggressor: int | None = None,
     stats: HandStats | None = None,
     log: list | None = None,
     opp_model: OpponentModel | None = None,
-) -> tuple[float, int]:
+) -> tuple[float, int, int | None]:
     """Runs one betting round in-place on `seats`. Returns (updated pot,
-    number of raises made this street). `preflop_raise_count` is the
+    number of raises made this street, this street's own last aggressor --
+    None if nobody raised -- for the caller to pass into the *next*
+    street's `previous_street_aggressor`). `preflop_raise_count` is the
     already-final preflop raise count on postflop streets (where this
     street's own raise count resets to 0 but Pot Type shouldn't) -- on the
     preflop street itself, it's unused since the live count IS the pot type.
-    `opp_model`, if given, both supplies each decision's opponent-tendency
-    features and gets updated with the outcome of that decision -- see
-    opponent_model.py."""
+    `previous_street_aggressor` is who (if anyone) raised last on the
+    *previous* street, feeding Situation.is_aggressor -- deliberately not
+    this street's own live-tracked aggressor: whoever raised most recently
+    *this* street is skipped over in the to-act order until either the
+    street ends or someone else re-raises (immediately replacing them as
+    this street's aggressor), so a player can never be making a decision
+    while also being this street's own last aggressor -- see
+    features.Situation.is_aggressor. `opp_model`, if given, both supplies
+    each decision's opponent-tendency features and gets updated with the
+    outcome of that decision -- see opponent_model.py."""
     current_bet = starting_bet
     last_raise_increment = min_bet
-    last_aggressor: int | None = None
+    last_aggressor: int | None = None  # this street's own aggressor -- see previous_street_aggressor above
     num_raises = 0
     raiser_seats: set[int] = set()
 
@@ -168,7 +178,7 @@ def betting_round(
             num_active=len(non_folded),
             num_raises_this_street=num_raises,
             num_preflop_raises=(num_raises if street == PREFLOP else preflop_raise_count),
-            is_aggressor=(last_aggressor == i),
+            is_aggressor=(previous_street_aggressor == i),
             starting_stack=starting_stack,
             big_blind=min_bet,
             raised_positions=frozenset(
@@ -238,7 +248,7 @@ def betting_round(
     if stats is not None:
         stats.raises_per_street.append(num_raises)
 
-    return pot, num_raises
+    return pot, num_raises, last_aggressor
 
 
 def compute_payouts(
@@ -321,6 +331,7 @@ def play_hand(
     board: list[Card] = []
     contributor_indices = list(range(n))
     preflop_raise_count = 0
+    previous_street_aggressor: int | None = None  # who raised last on the *prior* street, if anyone
 
     for street in range(4):
         if street > 0:
@@ -336,10 +347,11 @@ def play_hand(
         not_all_in = [i for i in non_folded if not seats[i].all_in]
         if len(not_all_in) >= 2:
             starting_bet = max((seats[i].street_committed for i in non_folded), default=0.0)
-            pot, street_num_raises = betting_round(
+            pot, street_num_raises, previous_street_aggressor = betting_round(
                 seats, order, pot, config.big_blind, starting_bet, board, street,
                 config.starting_stack, button_idx, preflop_raise_count,
                 config.max_raises_per_street, config.min_raise_fraction_of_pot, rng,
+                previous_street_aggressor=previous_street_aggressor,
                 stats=stats, opp_model=opp_model,
             )
             if street == PREFLOP:
