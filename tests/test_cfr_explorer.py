@@ -415,7 +415,7 @@ class TestGraphs:
         at.sidebar.selectbox(key="role::facing_bet").set_value("Graph")
         at.run(timeout=60)
 
-        cross_widgets = [ms for ms in at.multiselect if ms.key and ms.key.startswith("street_norm=")]
+        cross_widgets = [ms for ms in at.multiselect if ms.key and "graph_cross::" in ms.key]
         assert len(cross_widgets) == 4
         assert len({ms.key for ms in cross_widgets}) == 4
 
@@ -424,5 +424,111 @@ class TestGraphs:
 
         assert not at.exception
         assert len(at.get("plotly_chart")) == 4 + 4  # 4 line charts + 4 heatmaps for just the one group crossed
-        other_cross_widgets = [ms for ms in at.multiselect if ms.key and ms.key.startswith("street_norm=")][1:]
+        other_cross_widgets = [ms for ms in at.multiselect if ms.key and "graph_cross::" in ms.key][1:]
         assert all(ms.value == [] for ms in other_cross_widgets)  # unaffected by the first group's own selection
+
+
+class TestPerGroupControls:
+    def test_four_add_dropdowns_appear_under_every_group_heading(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
+        at.run(timeout=60)
+
+        assert not at.exception
+        for suffix in ("local_graph", "local_table", "local_filter", "local_subgroup"):
+            widgets = [ms for ms in at.multiselect if ms.key and ms.key.endswith(f"::{suffix}")]
+            assert len(widgets) == 4  # one street_norm value observed per bucket
+            assert len({ms.key for ms in widgets}) == 4  # every group's own widget, none collide
+
+    def test_dropdown_options_exclude_the_group_split_feature(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
+        at.run(timeout=60)
+
+        local_widgets = [ms for ms in at.multiselect if ms.key and ms.key.startswith("street_norm=")]
+        assert local_widgets
+        assert all("Betting Street" not in ms.options for ms in local_widgets)
+        assert all(set(ms.options) == {"Facing A Bet", "Hand Strength Tier"} for ms in local_widgets)
+
+    def test_add_graph_for_one_group_only_renders_a_chart_there(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
+        at.run(timeout=60)
+
+        add_graph_widgets = [ms for ms in at.multiselect if ms.key and ms.key.endswith("::local_graph")]
+        add_graph_widgets[0].set_value(["facing_bet"])
+        at.run(timeout=60)
+
+        assert not at.exception
+        charts = at.get("plotly_chart")
+        assert len(charts) == 1
+        assert "local::graph_chart::facing_bet" in charts[0].id
+        assert add_graph_widgets[0].key.removesuffix("local_graph") in charts[0].id
+
+    def test_add_table_for_one_group_renders_a_labeled_extra_table(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
+        at.run(timeout=60)
+        dataframes_before = len(at.dataframe)
+
+        add_table_widgets = [ms for ms in at.multiselect if ms.key and ms.key.endswith("::local_table")]
+        add_table_widgets[0].set_value(["hand_category_norm"])
+        at.run(timeout=60)
+
+        assert not at.exception
+        assert len(at.dataframe) == dataframes_before + 2  # _render_table's own summary + sample-counts dataframes
+        assert any("Extra table: Hand Strength Tier" in c.value for c in at.caption)
+
+    def test_add_filter_narrows_just_that_groups_own_rows(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
+        at.run(timeout=60)
+
+        add_filter_widgets = [ms for ms in at.multiselect if ms.key and ms.key.endswith("::local_filter")]
+        group_prefix = add_filter_widgets[0].key.removesuffix("local_filter")
+        add_filter_widgets[0].set_value(["facing_bet"])
+        at.run(timeout=60)
+
+        values_widget = at.multiselect(key=f"{group_prefix}local_filter_values::facing_bet")
+        assert set(values_widget.value) == {"Not Facing A Bet", "Facing A Bet"}  # defaults to every observed value
+
+        values_widget.set_value([])  # narrow to nothing, matching the app's existing "no rows" handling
+        at.run(timeout=60)
+
+        assert not at.exception
+        assert any("No rows match this group's own local filters." in w.value for w in at.warning)
+
+    def test_add_subgroup_only_splits_that_one_group_further(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
+        at.run(timeout=60)
+
+        add_subgroup_widgets = [ms for ms in at.multiselect if ms.key and ms.key.endswith("::local_subgroup")]
+        add_subgroup_widgets[0].set_value(["hand_category_norm"])
+        at.run(timeout=60)
+
+        assert not at.exception
+        # Nested headings render as markdown (one level deeper than the
+        # top-level subheader -- see _render_group_heading) and only for
+        # the one group that got the subgroup split.
+        assert len(at.markdown) > 0
+        subheaders = [h.value for h in at.subheader]
+        assert len(subheaders) == 4  # still exactly one top-level heading per street_norm value
+
+    def test_subgroup_key_excluded_from_the_nested_groups_own_dropdowns(self, synthetic_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
+        at.run(timeout=60)
+
+        add_subgroup_widgets = [ms for ms in at.multiselect if ms.key and ms.key.endswith("::local_subgroup")]
+        chosen_group_prefix = add_subgroup_widgets[0].key.removesuffix("local_subgroup")
+        add_subgroup_widgets[0].set_value(["hand_category_norm"])
+        at.run(timeout=60)
+
+        nested_widgets = [
+            ms for ms in at.multiselect
+            if ms.key and ms.key.startswith(f"{chosen_group_prefix}hand_category_norm=") and ms.key.endswith("::local_graph")
+        ]
+        assert nested_widgets
+        assert all("Hand Strength Tier" not in ms.options for ms in nested_widgets)
+        assert all(ms.options == ["Facing A Bet"] for ms in nested_widgets)

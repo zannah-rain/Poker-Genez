@@ -194,6 +194,26 @@ def _filtered_feature_importance(
     return sorted(((key, folded.get(key, 0.0)) for key in display_keys), key=lambda kv: -kv[1])
 
 
+def _group_feature_importance(
+    checkpoint_path: str, max_samples: int, filters: dict[str, list[str]], group_constraints: dict[str, list[str]],
+) -> list[tuple[str, float]]:
+    """SHAP importance (see _filtered_feature_importance) restricted to the
+    rows matching both the sidebar's global filters and this specific
+    group's own defining constraints -- one exact bucket value per
+    ancestor group-split level, whichever feature contributed it (the
+    shared sidebar or a group's own locally-added subgroup split). A
+    group-defining constraint is just another filter that happens to pin
+    one key to a single value, so this reuses _filtered_feature_importance
+    directly: the per-group "Add ..." dropdowns (see _render_group_controls)
+    then rank by a feature's contribution *within that one group*, not the
+    whole reservoir -- a feature that matters a lot overall can be dead
+    weight (or vice versa) once you're already looking at just one street,
+    one position, etc."""
+    combined = {**filters, **group_constraints}
+    filters_key = tuple(sorted((key, tuple(values)) for key, values in combined.items()))
+    return _filtered_feature_importance(checkpoint_path, max_samples, filters_key)
+
+
 def _feature_col(key: str) -> str:
     return _FEATURE_COL_PREFIX + key
 
@@ -507,9 +527,77 @@ def _render_group_heading(text: str, level: int) -> None:
         st.markdown(f"{'#' * min(level + 3, 6)} {text}")
 
 
+def _render_group_controls(
+    group_df: pd.DataFrame, key_prefix: str, checkpoint_path: str, max_samples: int,
+    filters: dict[str, list[str]], group_constraints: dict[str, list[str]], excluded_keys: set[str],
+    display_keys: list[str], collapsed: bool,
+) -> tuple[pd.DataFrame, list[str]]:
+    """The 4 per-group "Add ..." dropdowns beneath one group heading (see
+    _render_grouped): options are every displayed feature except
+    `excluded_keys` (whatever's already fixed as a group-split value here
+    or at an ancestor level -- those carry zero information within this
+    one group), ranked by each feature's own mean normalized SHAP
+    contribution *within this specific group* rather than the sidebar's
+    whole-reservoir ranking (_group_feature_importance). These are local
+    to this one group -- they add graphs/tables/filters/subgroups just
+    here, on top of whatever the sidebar's "global" role selections
+    already apply to every group.
+
+    Returns (local_df, local_subgroup_keys): local_df is `group_df`
+    narrowed by this group's own "Add filter" picks (independent of the
+    sidebar's global filters and of every sibling group's own local
+    filters -- each "keep values" multiselect is keyed off `key_prefix`,
+    so no two groups' filter widgets collide); local_subgroup_keys are the
+    features picked via "Add subgroup", spliced in ahead of whatever
+    global group-split keys still remain for this branch by the caller."""
+    importance = _group_feature_importance(checkpoint_path, max_samples, filters, group_constraints)
+    options = [key for key, _ in importance if key not in excluded_keys]
+
+    col_graph, col_table, col_filter, col_subgroup = st.columns(4)
+    with col_graph:
+        local_graph_keys = st.multiselect(
+            "Add graph", options=options, format_func=cfr_features.feature_label, key=f"{key_prefix}local_graph",
+        )
+    with col_table:
+        local_table_keys = st.multiselect(
+            "Add table", options=options, format_func=cfr_features.feature_label, key=f"{key_prefix}local_table",
+        )
+    with col_filter:
+        local_filter_keys = st.multiselect(
+            "Add filter", options=options, format_func=cfr_features.feature_label, key=f"{key_prefix}local_filter",
+        )
+    with col_subgroup:
+        local_subgroup_keys = st.multiselect(
+            "Add subgroup", options=options, format_func=cfr_features.feature_label, key=f"{key_prefix}local_subgroup",
+        )
+
+    local_filters: dict[str, list[str]] = {}
+    for filter_key in local_filter_keys:
+        observed = _observed_categories(group_df, filter_key)
+        local_filters[filter_key] = st.multiselect(
+            f"{cfr_features.feature_label(filter_key)} -- keep values", options=observed, default=observed,
+            key=f"{key_prefix}local_filter_values::{filter_key}",
+        )
+    local_df = _apply_filters(group_df, local_filters)
+
+    if local_filters and local_df.empty:
+        st.warning("No rows match this group's own local filters.")
+        return local_df, []
+
+    for table_key in local_table_keys:
+        st.caption(f"Extra table: {cfr_features.feature_label(table_key)}")
+        _render_table(local_df, [table_key], collapsed)
+
+    cross_options = [k for k in display_keys if k not in excluded_keys]
+    _render_graphs(local_df, local_graph_keys, cross_options, collapsed, f"{key_prefix}local::")
+
+    return local_df, local_subgroup_keys
+
+
 def _render_grouped(
     df: pd.DataFrame, group_split_keys: list[str], table_split_keys: list[str], graph_keys: list[str],
-    display_keys: list[str], collapsed: bool, level: int = 0, key_prefix: str = "",
+    display_keys: list[str], collapsed: bool, checkpoint_path: str, max_samples: int, filters: dict[str, list[str]],
+    level: int = 0, key_prefix: str = "", group_constraints: dict[str, list[str]] | None = None,
 ) -> None:
     """One heading per observed value of group_split_keys[0], each nested
     under the previous one (see _render_group_heading) and recursed into
@@ -517,13 +605,19 @@ def _render_grouped(
     selected, a table sits under a chain of headings each naming just its
     own feature/value (e.g. Street = Flop, then nested under it Position =
     Late), rather than one flat heading repeating every key/value pair
-    above every leaf table.
+    above every leaf table. Every heading also gets its own set of
+    per-group "Add ..." controls (see _render_group_controls) immediately
+    below it, and recurses into any subgroup keys picked there ahead of
+    whatever global group_split_keys remain for this branch.
 
     Once group_split_keys is exhausted, every Graph-role feature also gets
     its own set of graphs here (see _render_graphs), computed over just
     this leaf group's own rows -- so a "Graph" feature's chart/heatmaps
     reflect each group split individually rather than one chart pooling
     across every group."""
+    if group_constraints is None:
+        group_constraints = {}
+
     if not group_split_keys:
         _render_table(df, table_split_keys, collapsed)
         _render_graphs(df, graph_keys, display_keys, collapsed, key_prefix)
@@ -536,9 +630,17 @@ def _render_grouped(
         if len(group_df) == 0:
             continue
         _render_group_heading(f"{label} = {value}  (n={len(group_df):,})", level)
+
+        child_key_prefix = f"{key_prefix}{key}={value}::"
+        child_constraints = {**group_constraints, key: [str(value)]}
+        local_df, local_subgroup_keys = _render_group_controls(
+            group_df, child_key_prefix, checkpoint_path, max_samples, filters, child_constraints,
+            set(child_constraints) | set(rest), display_keys, collapsed,
+        )
+
         _render_grouped(
-            group_df, rest, table_split_keys, graph_keys, display_keys, collapsed,
-            level + 1, f"{key_prefix}{key}={value}::",
+            local_df, local_subgroup_keys + rest, table_split_keys, graph_keys, display_keys, collapsed,
+            checkpoint_path, max_samples, filters, level + 1, child_key_prefix, child_constraints,
         )
 
 
@@ -581,7 +683,10 @@ def main() -> None:
         st.warning("No reservoir samples match the current filters.")
         st.stop()
 
-    _render_grouped(filtered, group_split_keys, table_split_keys, graph_keys, display_keys, collapsed)
+    _render_grouped(
+        filtered, group_split_keys, table_split_keys, graph_keys, display_keys, collapsed,
+        checkpoint_path, int(max_samples), filters,
+    )
 
 
 main()
