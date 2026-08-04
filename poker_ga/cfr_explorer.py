@@ -17,6 +17,19 @@ strategy for each sampled situation -- not the regret values stored in the
 reservoir itself, which reflect whatever earlier version of the net
 collected them. The reservoir just supplies a realistic, CFR-visitation-
 weighted sample of situations to ask the current net about.
+
+Exact Hole Hand (features.py's hole_hand_grid_x_norm, paired with
+hole_hand_grid_y_norm which collapses into it -- see
+cfr_features.display_feature_keys) is a partial exception: it's inherently
+2D, a position in the classic 13x13 preflop starting-hand grid rather than
+a single ordered scale, so it only ever supports being marked Unused or
+Graph (never Filter/Group split/Table split), rendering as its own fixed
+set of heatmaps in place of the usual line chart when graphed (see
+_hole_hand_grid_figures). It's greyed out (disabled, but still listed
+alongside every other feature) whenever the rows currently in view have no
+preflop samples to show -- masked to a negative sentinel outside preflop
+(see features.extract_features), so it has nothing meaningful to plot
+there.
 """
 
 from __future__ import annotations
@@ -35,9 +48,12 @@ import cfr_features
 import cfr_networks
 import cfr_reservoir
 import strategy
+# Named imports, not `import features` -- _build_dataframe already uses
+# `features` as a local variable name for the raw reservoir feature matrix.
+from features import HOLE_HAND_GRID_MASKED, HOLE_HAND_GRID_RANK_LABELS, HOLE_HAND_GRID_SIZE, hole_hand_grid_label
 
 DEFAULT_CHECKPOINT_PATH = os.path.join("cfr_runs", "checkpoint_latest")
-DEFAULT_MAX_SAMPLES = 50_000
+DEFAULT_MAX_SAMPLES = 1_000_000
 
 _FEATURE_COL_PREFIX = "feat::"
 _ACTION_COL_PREFIX = "action::"
@@ -49,6 +65,22 @@ ROLE_TABLE_SPLIT = "Table split"
 ROLE_GRAPH = "Graph"
 ROLES = (ROLE_UNUSED, ROLE_FILTER, ROLE_GROUP_SPLIT, ROLE_TABLE_SPLIT, ROLE_GRAPH)
 MAX_TABLE_SPLIT_FEATURES = 2
+
+# Exact Hole Hand: the display-representative key (features.py links
+# hole_hand_grid_y_norm to this one so display_feature_keys collapses them
+# into a single sidebar entry -- see that FeatureSpec's own docstring) and
+# its own second axis, plus the two raw (non-bucket-labeled) DataFrame
+# columns _build_dataframe stores its actual values under -- see
+# _hole_hand_grid_figures for why a generic bucket-label column wouldn't
+# make sense for it the way it does for every other feature.
+_HOLE_HAND_GRID_KEY = "hole_hand_grid_x_norm"
+_HOLE_HAND_GRID_Y_KEY = "hole_hand_grid_y_norm"
+_HOLE_HAND_GRID_RAW_X_COL = "raw::hole_hand_grid_x_norm"
+_HOLE_HAND_GRID_RAW_Y_COL = "raw::hole_hand_grid_y_norm"
+# Filter/Group split/Table split all rely on a feature having a single
+# ordered bucket-label scale -- meaningless for an inherently 2D position,
+# so its sidebar role is restricted to just these two.
+_HOLE_HAND_GRID_ROLES = (ROLE_UNUSED, ROLE_GRAPH)
 
 _COLLAPSED_LABELS = ("Fold", "Call", "Raise", "All-In")
 _COLLAPSED_GROUP_OF_ACTION = {
@@ -119,9 +151,14 @@ def _build_dataframe(checkpoint_path: str, max_samples: int) -> tuple[pd.DataFra
     represents the same concept -- see cfr_features.display_feature_keys)
     and one float column per action category (the *current* net's
     regret-matching probability for that action, given that row's own
-    legal-action mask). raw_features is the same rows' full net-input
-    vectors (row-aligned with df, i.e. same order/positions), kept around
-    so _filtered_feature_importance can re-explain just the rows a filter
+    legal-action mask). Exact Hole Hand (_HOLE_HAND_GRID_KEY) is the one
+    exception: rather than a generic bucket-label column (its own value
+    table is just 13 per-axis ranks, not the 169 combos it actually
+    represents jointly with its second axis), it gets two plain raw float
+    columns instead -- see _hole_hand_grid_figures, which reads them
+    directly. raw_features is the same rows' full net-input vectors
+    (row-aligned with df, i.e. same order/positions), kept around so
+    _filtered_feature_importance can re-explain just the rows a filter
     selects without re-touching the reservoir. Everything else the UI does
     is just pandas filtering/grouping over df, computed once."""
     net, net_config, reservoir = _load_checkpoint(checkpoint_path)
@@ -139,7 +176,7 @@ def _build_dataframe(checkpoint_path: str, max_samples: int) -> tuple[pd.DataFra
     displayed_keys = set(cfr_features.display_feature_keys(net_config.feature_keys))
     data = {}
     for i, key in enumerate(net_config.feature_keys):
-        if key not in displayed_keys:
+        if key not in displayed_keys or key == _HOLE_HAND_GRID_KEY:
             continue
         labels = cfr_features.bucket_labels(key, features[:, i])
         data[_FEATURE_COL_PREFIX + key] = pd.Categorical(
@@ -147,6 +184,12 @@ def _build_dataframe(checkpoint_path: str, max_samples: int) -> tuple[pd.DataFra
         )
     for i, label in enumerate(strategy.ACTION_CATEGORIES):
         data[_ACTION_COL_PREFIX + label] = probs[:, i]
+
+    if _HOLE_HAND_GRID_KEY in net_config.feature_keys and _HOLE_HAND_GRID_Y_KEY in net_config.feature_keys:
+        x_idx = net_config.feature_keys.index(_HOLE_HAND_GRID_KEY)
+        y_idx = net_config.feature_keys.index(_HOLE_HAND_GRID_Y_KEY)
+        data[_HOLE_HAND_GRID_RAW_X_COL] = features[:, x_idx]
+        data[_HOLE_HAND_GRID_RAW_Y_COL] = features[:, y_idx]
 
     return pd.DataFrame(data), features
 
@@ -216,6 +259,17 @@ def _group_feature_importance(
 
 def _feature_col(key: str) -> str:
     return _FEATURE_COL_PREFIX + key
+
+
+def _hole_hand_grid_available(df: pd.DataFrame) -> bool:
+    """Whether `df` has at least one preflop (unmasked) Exact Hole Hand
+    row -- used both to grey out its sidebar role (see _render_sidebar) and
+    to decide whether to offer it in a group's own "Add graph" dropdown
+    (see _render_group_controls). False if the checkpoint wasn't trained
+    with the feature at all (no raw column to check)."""
+    if _HOLE_HAND_GRID_RAW_X_COL not in df.columns:
+        return False
+    return bool((df[_HOLE_HAND_GRID_RAW_X_COL] >= 0.0).any())
 
 
 def _observed_categories(df: pd.DataFrame, key: str) -> list[str]:
@@ -352,6 +406,71 @@ def _heatmap_figures(filtered: pd.DataFrame, x_key: str, y_key: str) -> list[go.
     return figures
 
 
+def _hole_hand_grid_figures(df: pd.DataFrame) -> list[go.Figure]:
+    """One heatmap per collapsed action group (see _heatmap_figures for why
+    always these 4, never the native 9), mean action rate over every one of
+    the 169 exact starting hands, restricted to `df`'s own preflop
+    (unmasked) rows -- postflop rows are dropped rather than pooled in,
+    since the mask sentinel (features.HOLE_HAND_GRID_MASKED) is a real, if
+    negative, number that would otherwise corrupt the AA cell's own
+    statistics. Empty list if `df` has no preflop rows (see
+    _hole_hand_grid_available, checked by callers before rendering a
+    heading for this). Unlike _heatmap_figures, every one of the 169 cells
+    is always drawn and labeled with its combo code (see
+    features.hole_hand_grid_label) whether or not any sample landed there
+    -- this is a small, fixed, familiar chart, not an arbitrary feature
+    pairing, so it reads better shown in full than restricted to whatever
+    happens to be observed."""
+    preflop_df = df[df[_HOLE_HAND_GRID_RAW_X_COL] >= 0.0]
+    if preflop_df.empty:
+        return []
+    x = preflop_df[_HOLE_HAND_GRID_RAW_X_COL].to_numpy()
+    y = preflop_df[_HOLE_HAND_GRID_RAW_Y_COL].to_numpy()
+
+    size = HOLE_HAND_GRID_SIZE
+    rows = np.rint(y * (size - 1)).astype(int)
+    cols = np.rint(x * (size - 1)).astype(int)
+    combo_text = np.array([[hole_hand_grid_label(r, c) for c in range(size)] for r in range(size)])
+
+    # go.Heatmap draws z's first row at the bottom -- flip vertically (and
+    # reverse the y tick labels to match) so grid row 0 (Ace) ends up at
+    # the top and column 0 (also Ace) stays on the left, matching every
+    # real range-chart tool: Ace/Ace in the top-left corner, deuce/deuce in
+    # the bottom-right, suited hands (row < col) upper-right of that
+    # diagonal, offsuit (row > col) lower-left.
+    combo_text = combo_text[::-1]
+    y_labels = list(reversed(HOLE_HAND_GRID_RANK_LABELS))
+    x_labels = list(HOLE_HAND_GRID_RANK_LABELS)
+
+    view = _with_action_view(preflop_df, collapsed=True)
+    figures = []
+    for action_label in _COLLAPSED_LABELS:
+        action_col = _ACTION_COL_PREFIX + action_label
+        vals = view[action_col].to_numpy()
+        totals = np.zeros((size, size))
+        counts = np.zeros((size, size))
+        np.add.at(totals, (rows, cols), vals)
+        np.add.at(counts, (rows, cols), 1)
+        z = np.divide(totals, counts, out=np.full((size, size), np.nan), where=counts > 0)
+        z = z[::-1]
+
+        fig = go.Figure(data=go.Heatmap(
+            z=z, x=x_labels, y=y_labels, text=combo_text, texttemplate="%{text}",
+            zmin=0, zmax=1, colorscale=_SEQUENTIAL_BLUE_SCALE,
+            colorbar=dict(title="Rate", tickformat=".0%"),
+            hovertemplate="%{text}<br>" + f"{action_label}: " + "%{z:.1%}<extra></extra>",
+        ))
+        fig.update_layout(
+            **_chart_layout_kwargs(),
+            title=f"{action_label} rate",
+            xaxis=dict(type="category", categoryorder="array", categoryarray=x_labels),
+            yaxis=dict(type="category", categoryorder="array", categoryarray=y_labels),
+            height=520,
+        )
+        figures.append(fig)
+    return figures
+
+
 def _render_graphs(
     filtered: pd.DataFrame, graph_keys: list[str], display_keys: list[str], collapsed: bool, key_prefix: str = "",
     level: int = 0,
@@ -360,7 +479,11 @@ def _render_graphs(
     multiselect of other features to "cross" it with -- every feature
     picked there adds its own row of 4 heatmaps (this graphed feature as
     the x axis, the picked feature as the y axis, one heatmap per
-    simplified action rate).
+    simplified action rate). Exact Hole Hand (_HOLE_HAND_GRID_KEY) is the
+    one exception: inherently 2D already, it renders its own fixed set of
+    heatmaps in place of the line chart, with no "cross" multiselect (and
+    is never itself offered as something else's cross target -- it has no
+    ordinary bucket-label column to pivot on, see _build_dataframe).
 
     `key_prefix` disambiguates one call from another when _render_grouped
     calls this once per group split leaf (so every group gets its own,
@@ -381,7 +504,19 @@ def _render_graphs(
         _heading_at_level("Graphs", level)
 
     for key in graph_keys:
-        other_keys = [k for k in display_keys if k != key]
+        if key == _HOLE_HAND_GRID_KEY:
+            st.markdown(f"**{cfr_features.feature_label(key)}**")
+            figures = _hole_hand_grid_figures(filtered)
+            if not figures:
+                st.caption("No preflop rows in the current view.")
+                continue
+            heat_cols = st.columns(2)
+            for i, fig in enumerate(figures):
+                with heat_cols[i % 2]:
+                    st.plotly_chart(fig, key=f"{key_prefix}graph_chart::{key}::{i}")
+            continue
+
+        other_keys = [k for k in display_keys if k != key and k != _HOLE_HAND_GRID_KEY]
         col_controls, col_chart = st.columns([1, 3])
         with col_controls:
             st.markdown(f"**{cfr_features.feature_label(key)}**")
@@ -404,11 +539,17 @@ def _render_graphs(
 
 
 def _render_sidebar(
-    feature_order: list[tuple[str, float]], df: pd.DataFrame,
+    feature_order: list[tuple[str, float]], df: pd.DataFrame, hole_hand_grid_available: bool,
 ) -> tuple[dict[str, list[str]], list[str], list[str], list[str], bool]:
     """Returns (filters, group_split_keys, table_split_keys, graph_keys,
     collapsed). `filters` maps feature_key -> the bucket labels to keep for
-    it."""
+    it. Exact Hole Hand (_HOLE_HAND_GRID_KEY) gets a restricted options list
+    (Filter/Group split/Table split all rely on a single ordered
+    bucket-label scale, meaningless for its inherently 2D position -- see
+    _HOLE_HAND_GRID_ROLES) and is disabled (greyed out, but still listed
+    here like every other feature) whenever `hole_hand_grid_available` is
+    False -- the rows currently in view (after the *global* filters below)
+    have no preflop samples for it to show."""
     st.sidebar.header("Features")
     st.sidebar.caption(
         "Ordered by mean |SHAP| contribution to the net's predictions, over whichever rows "
@@ -422,9 +563,15 @@ def _render_sidebar(
 
     for key, importance in feature_order:
         label = f"{cfr_features.feature_label(key)}  (SHAP {importance:.4f})"
-        role = st.sidebar.selectbox(
-            label, ROLES, key=f"role::{key}", help=cfr_features.feature_description(key),
-        )
+        if key == _HOLE_HAND_GRID_KEY:
+            role = st.sidebar.selectbox(
+                label, _HOLE_HAND_GRID_ROLES, key=f"role::{key}", help=cfr_features.feature_description(key),
+                disabled=not hole_hand_grid_available,
+            )
+        else:
+            role = st.sidebar.selectbox(
+                label, ROLES, key=f"role::{key}", help=cfr_features.feature_description(key),
+            )
         if role == ROLE_FILTER:
             observed = _observed_categories(df, key)
             filters[key] = st.sidebar.multiselect("keep values", observed, default=observed, key=f"filter::{key}")
@@ -572,26 +719,36 @@ def _render_group_controls(
     filters -- each "keep values" multiselect is keyed off `key_prefix`,
     so no two groups' filter widgets collide); local_subgroup_keys are the
     features picked via "Add subgroup", spliced in ahead of whatever
-    global group-split keys still remain for this branch by the caller."""
+    global group-split keys still remain for this branch by the caller.
+
+    Exact Hole Hand (_HOLE_HAND_GRID_KEY) only ever supports being graphed
+    (see _render_sidebar), so it's excluded from "Add table"/"Add
+    filter"/"Add subgroup" unconditionally, and from "Add graph" too unless
+    this specific group's own rows have preflop data to show (see
+    _hole_hand_grid_available) -- matching the sidebar's disabled-when-
+    unavailable treatment, just via omission rather than a greyed-out
+    option, since a multiselect has no per-option disabled state."""
     importance = _group_feature_importance(checkpoint_path, max_samples, filters, group_constraints)
     options = [key for key, _ in importance if key not in excluded_keys]
+    non_graph_options = [k for k in options if k != _HOLE_HAND_GRID_KEY]
+    graph_options = options if _hole_hand_grid_available(group_df) else non_graph_options
 
     col_graph, col_table, col_filter, col_subgroup = st.columns(4)
     with col_graph:
         local_graph_keys = st.multiselect(
-            "Add graph", options=options, format_func=cfr_features.feature_label, key=f"{key_prefix}local_graph",
+            "Add graph", options=graph_options, format_func=cfr_features.feature_label, key=f"{key_prefix}local_graph",
         )
     with col_table:
         local_table_keys = st.multiselect(
-            "Add table", options=options, format_func=cfr_features.feature_label, key=f"{key_prefix}local_table",
+            "Add table", options=non_graph_options, format_func=cfr_features.feature_label, key=f"{key_prefix}local_table",
         )
     with col_filter:
         local_filter_keys = st.multiselect(
-            "Add filter", options=options, format_func=cfr_features.feature_label, key=f"{key_prefix}local_filter",
+            "Add filter", options=non_graph_options, format_func=cfr_features.feature_label, key=f"{key_prefix}local_filter",
         )
     with col_subgroup:
         local_subgroup_keys = st.multiselect(
-            "Add subgroup", options=options, format_func=cfr_features.feature_label, key=f"{key_prefix}local_subgroup",
+            "Add subgroup", options=non_graph_options, format_func=cfr_features.feature_label, key=f"{key_prefix}local_subgroup",
         )
 
     local_filters: dict[str, list[str]] = {}
@@ -698,8 +855,15 @@ def main() -> None:
 
     filters_key = tuple(sorted((key, tuple(values)) for key, values in current_filters.items()))
     feature_importance = _filtered_feature_importance(checkpoint_path, int(max_samples), filters_key)
+    # Whether Exact Hole Hand's sidebar role should be enabled -- based on
+    # the *global* filters already in place (see _current_filters_from_
+    # session_state), not yet the ones _render_sidebar is about to collect
+    # this same rerun (same read-ahead trick as feature_importance above).
+    hole_hand_grid_available = _hole_hand_grid_available(_apply_filters(df, current_filters))
 
-    filters, group_split_keys, table_split_keys, graph_keys, collapsed = _render_sidebar(feature_importance, df)
+    filters, group_split_keys, table_split_keys, graph_keys, collapsed = _render_sidebar(
+        feature_importance, df, hole_hand_grid_available,
+    )
     filtered = _apply_filters(df, filters)
 
     if filtered.empty:

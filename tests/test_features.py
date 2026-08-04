@@ -3,9 +3,9 @@ import pytest
 
 from cards import Card
 from features import (
-    FEATURE_GROUPS, FEATURE_NAMES, FEATURE_SPECS, NUM_FEATURES, Situation,
+    FEATURE_GROUPS, FEATURE_NAMES, FEATURE_SPECS, HOLE_HAND_GRID_MASKED, NUM_FEATURES, Situation,
     _ace_aware_span, _connectivity_label, _nearest_bucket_index, _rank_gap,
-    extract_features, group_of,
+    extract_features, group_of, hole_hand_grid_label,
 )
 from seating import SEAT_ROLES
 
@@ -238,6 +238,63 @@ class TestHoleHandCategoryFeature:
         assert values["hole_hand_category_norm"] == pytest.approx(11 / 11)
         values = values_by_key(make_situation(hole=[Card.from_str("Jh"), Card.from_str("5d")]))
         assert values["hole_hand_category_norm"] == pytest.approx(0 / 11)
+
+
+class TestHoleHandGridFeature:
+    def test_pocket_pair_is_on_the_diagonal(self):
+        values = values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("Ad")]))
+        assert values["hole_hand_grid_x_norm"] == pytest.approx(0.0)
+        assert values["hole_hand_grid_y_norm"] == pytest.approx(0.0)
+
+        values = values_by_key(make_situation(hole=[Card.from_str("2h"), Card.from_str("2d")]))
+        assert values["hole_hand_grid_x_norm"] == pytest.approx(1.0)
+        assert values["hole_hand_grid_y_norm"] == pytest.approx(1.0)
+
+    def test_suited_combo_is_above_the_diagonal(self):
+        # AKs: x (col) = K's index (1/12), y (row) = A's index (0) -- row < col.
+        values = values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("Kh")]))
+        assert values["hole_hand_grid_y_norm"] < values["hole_hand_grid_x_norm"]
+        assert values["hole_hand_grid_x_norm"] == pytest.approx(1 / 12)
+        assert values["hole_hand_grid_y_norm"] == pytest.approx(0.0)
+
+    def test_offsuit_combo_is_below_the_diagonal(self):
+        # AKo: x (col) = A's index (0), y (row) = K's index (1/12) -- row > col.
+        values = values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("Kd")]))
+        assert values["hole_hand_grid_y_norm"] > values["hole_hand_grid_x_norm"]
+        assert values["hole_hand_grid_x_norm"] == pytest.approx(0.0)
+        assert values["hole_hand_grid_y_norm"] == pytest.approx(1 / 12)
+
+    def test_masked_outside_preflop(self):
+        board = [Card.from_str("2c"), Card.from_str("5d"), Card.from_str("9h")]
+        values = values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("Kh")], board=board, street=1))
+        assert values["hole_hand_grid_x_norm"] == -1.0
+        assert values["hole_hand_grid_y_norm"] == -1.0
+
+    def test_masked_value_is_outside_the_normal_0_1_range(self):
+        # A deliberately out-of-range sentinel -- 0.0 would collide with AA's
+        # own real (preflop) grid position and be silently misread as it.
+        assert not (0.0 <= HOLE_HAND_GRID_MASKED <= 1.0)
+
+
+class TestHoleHandGridLabel:
+    def test_pairs(self):
+        assert hole_hand_grid_label(0, 0) == "AA"
+        assert hole_hand_grid_label(12, 12) == "22"
+
+    def test_suited_above_diagonal(self):
+        assert hole_hand_grid_label(0, 1) == "AKs"
+        assert hole_hand_grid_label(0, 12) == "A2s"
+
+    def test_offsuit_below_diagonal(self):
+        assert hole_hand_grid_label(1, 0) == "AKo"
+        assert hole_hand_grid_label(12, 0) == "A2o"
+
+    def test_label_only_depends_on_the_unordered_row_col_pair(self):
+        # (row, col) and (col, row) name the same two ranks -- only whether
+        # row < col (suited) or row > col (offsuit) should differ.
+        assert hole_hand_grid_label(2, 5)[:2] == hole_hand_grid_label(5, 2)[:2]
+        assert hole_hand_grid_label(2, 5).endswith("s")
+        assert hole_hand_grid_label(5, 2).endswith("o")
 
 
 class TestPositionAndStreet:

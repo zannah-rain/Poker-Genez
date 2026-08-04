@@ -578,3 +578,182 @@ class TestPerGroupControls:
         assert nested_widgets
         assert all("Hand Strength Tier" not in ms.options for ms in nested_widgets)
         assert all(ms.options == ["Suited Hole Cards"] for ms in nested_widgets)
+
+_HOLE_HAND_GRID_FEATURE_KEYS = ("street_norm", "hole_hand_grid_x_norm", "hole_hand_grid_y_norm")
+
+
+def _make_hole_hand_grid_checkpoint(path: str, rng: np.random.Generator, all_postflop: bool = False) -> None:
+    """A checkpoint whose feature set includes the Exact Hole Hand pair
+    alongside one ordinary feature (street_norm), correlated the way real
+    training data is: preflop rows (street_norm pinned to exactly 0.0,
+    "Preflop") carry a real grid position -- all pinned to the same cell,
+    AA, so the resulting heatmaps have exactly one populated cell to check
+    -- postflop rows (street_norm pinned to exactly 1.0, "River") carry the
+    masked sentinel instead. `all_postflop` makes every row postflop, for
+    testing the no-preflop-rows-anywhere case."""
+    feature_dim = len(cfr_features.feature_indices(_HOLE_HAND_GRID_FEATURE_KEYS))
+    street_idx = _HOLE_HAND_GRID_FEATURE_KEYS.index("street_norm")
+    x_idx = _HOLE_HAND_GRID_FEATURE_KEYS.index("hole_hand_grid_x_norm")
+    y_idx = _HOLE_HAND_GRID_FEATURE_KEYS.index("hole_hand_grid_y_norm")
+    net = cfr_networks.AdvantageNet(input_dim=feature_dim, hidden_sizes=(8, 8))
+    net_config = cfr_networks.AdvantageNetConfig(
+        feature_keys=_HOLE_HAND_GRID_FEATURE_KEYS, hidden_sizes=(8, 8), table_size=3,
+    )
+    cfr_networks.save(net, net_config, path)
+
+    num_samples = 100
+    reservoir = cfr_reservoir.ReservoirBuffer(
+        capacity=num_samples, feature_dim=feature_dim, num_actions=strategy.NUM_ACTION_CATEGORIES, rng=rng,
+    )
+    for i in range(num_samples):
+        feats = rng.random(feature_dim).astype(np.float32)
+        if not all_postflop and i % 2 == 0:
+            feats[street_idx] = 0.0  # Preflop
+            feats[x_idx] = 0.0  # AA
+            feats[y_idx] = 0.0
+        else:
+            feats[street_idx] = 1.0  # River
+            feats[x_idx] = -1.0  # masked, as if postflop
+            feats[y_idx] = -1.0
+        regrets = rng.normal(size=strategy.NUM_ACTION_CATEGORIES).astype(np.float32)
+        legal_mask = rng.random(strategy.NUM_ACTION_CATEGORIES) > 0.3
+        legal_mask[strategy.ACTION_CALL] = True
+        reservoir.add(feats, regrets, legal_mask, float(rng.integers(1, 10)))
+    reservoir.save(path)
+
+
+@pytest.fixture(scope="module")
+def _hole_hand_grid_checkpoint_path(tmp_path_factory) -> str:
+    path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_hole_hand_grid_checkpoint")), "checkpoint")
+    _make_hole_hand_grid_checkpoint(path, np.random.default_rng(0))
+    return path
+
+
+@pytest.fixture
+def hole_hand_grid_checkpoint(_hole_hand_grid_checkpoint_path, monkeypatch):
+    monkeypatch.setenv("CFR_EXPLORER_CHECKPOINT_PATH", _hole_hand_grid_checkpoint_path)
+    return _hole_hand_grid_checkpoint_path
+
+
+class TestExactHoleHand:
+    def test_appears_in_sidebar_with_restricted_roles(self, hole_hand_grid_checkpoint):
+        at = _run_app()
+        assert not at.exception
+        sb = at.sidebar.selectbox(key="role::hole_hand_grid_x_norm")
+        assert list(sb.proto.options) == ["Unused", "Graph"]
+        assert not sb.proto.disabled  # some preflop rows are in view by default
+
+    def test_second_axis_gets_no_selectbox_of_its_own(self, hole_hand_grid_checkpoint):
+        at = _run_app()
+        role_keys = {sb.key for sb in at.sidebar.selectbox if sb.key}
+        assert "role::hole_hand_grid_y_norm" not in role_keys
+        assert "role::street_norm" in role_keys  # the ordinary feature still gets its own
+
+    def test_not_displayed_by_default(self, hole_hand_grid_checkpoint):
+        at = _run_app()
+        assert not at.exception
+        assert not at.get("plotly_chart")
+        assert not any(h.value == "Graphs" for h in at.header)
+
+    def test_marking_as_graph_renders_heatmaps_in_the_graphs_section(self, hole_hand_grid_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::hole_hand_grid_x_norm").set_value("Graph")
+        at.run(timeout=60)
+
+        assert not at.exception
+        assert any(h.value == "Graphs" for h in at.header)
+        charts = [c for c in at.get("plotly_chart") if "graph_chart::hole_hand_grid_x_norm::" in c.id]
+        assert len(charts) == 4
+        titles = sorted(json.loads(c.proto.spec)["layout"]["title"]["text"] for c in charts)
+        assert titles == sorted(f"{label} rate" for label in _COLLAPSED_LABELS)
+        # No "cross with other features" control -- doesn't make sense for an already-2D feature.
+        assert not any(ms.key and ms.key.endswith("graph_cross::hole_hand_grid_x_norm") for ms in at.multiselect)
+
+    def test_axes_run_ace_to_deuce_with_ace_at_top_left(self, hole_hand_grid_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::hole_hand_grid_x_norm").set_value("Graph")
+        at.run(timeout=60)
+
+        chart = next(c for c in at.get("plotly_chart") if "graph_chart::hole_hand_grid_x_norm::" in c.id)
+        spec = json.loads(chart.proto.spec)
+        assert spec["data"][0]["x"] == list("AKQJT98765432")
+        assert spec["data"][0]["y"] == list("23456789TJQKA")  # reversed -- last entry (A) renders at the top
+        # AA sits at the last row (top, post-reversal), first column (left).
+        assert spec["data"][0]["text"][-1][0] == "AA"
+
+    def test_other_features_dont_offer_it_as_a_cross_target(self, hole_hand_grid_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Graph")
+        at.run(timeout=60)
+
+        cross = at.multiselect(key="graph_cross::street_norm")
+        assert "Exact Hole Hand" not in cross.options
+
+    def test_absent_when_checkpoint_lacks_the_feature(self, synthetic_checkpoint):
+        at = _run_app()
+        assert not at.exception
+        role_keys = {sb.key for sb in at.sidebar.selectbox if sb.key}
+        assert "role::hole_hand_grid_x_norm" not in role_keys
+
+    def test_disabled_when_global_filter_excludes_every_preflop_row(self, hole_hand_grid_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Filter")
+        at.run(timeout=60)
+        at.sidebar.multiselect(key="filter::street_norm").set_value(["River"])
+        at.run(timeout=60)
+
+        assert not at.exception
+        sb = at.sidebar.selectbox(key="role::hole_hand_grid_x_norm")
+        assert sb.proto.disabled
+
+    def test_group_split_gives_each_group_its_own_view(self, hole_hand_grid_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
+        at.sidebar.selectbox(key="role::hole_hand_grid_x_norm").set_value("Graph")
+        at.run(timeout=60)
+
+        assert not at.exception
+        # The Preflop group has real grid data -- 4 heatmaps.
+        preflop_charts = [
+            c for c in at.get("plotly_chart")
+            if "street_norm=Preflop::" in c.id and "graph_chart::hole_hand_grid_x_norm::" in c.id
+        ]
+        assert len(preflop_charts) == 4
+        # The River group is all masked -- no heatmaps, just the fallback caption.
+        river_charts = [
+            c for c in at.get("plotly_chart")
+            if "street_norm=River::" in c.id and "graph_chart::hole_hand_grid_x_norm::" in c.id
+        ]
+        assert len(river_charts) == 0
+        assert any("No preflop rows" in c.value for c in at.caption)
+
+    def test_excluded_from_add_graph_in_a_subgroup_without_preflop_rows(self, hole_hand_grid_checkpoint):
+        at = _run_app()
+        at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
+        at.run(timeout=60)
+
+        local_graph_widgets = {
+            ms.key: ms for ms in at.multiselect if ms.key and ms.key.endswith("::local_graph")
+        }
+        preflop_widget = next(ms for key, ms in local_graph_widgets.items() if "street_norm=Preflop::" in key)
+        river_widget = next(ms for key, ms in local_graph_widgets.items() if "street_norm=River::" in key)
+        assert "Exact Hole Hand" in preflop_widget.options
+        assert "Exact Hole Hand" not in river_widget.options
+        # Never offered in the other 3 "Add ..." dropdowns, preflop or not.
+        other_dropdown_suffixes = ("::local_table", "::local_filter", "::local_subgroup")
+        other_widgets = [
+            ms for ms in at.multiselect
+            if ms.key and ms.key.endswith(other_dropdown_suffixes) and "street_norm=Preflop::" in ms.key
+        ]
+        assert other_widgets
+        assert all("Exact Hole Hand" not in ms.options for ms in other_widgets)
+
+    def test_absent_when_every_row_is_postflop(self, tmp_path_factory, monkeypatch):
+        path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_all_postflop")), "checkpoint")
+        _make_hole_hand_grid_checkpoint(path, np.random.default_rng(1), all_postflop=True)
+        monkeypatch.setenv("CFR_EXPLORER_CHECKPOINT_PATH", path)
+
+        at = _run_app()
+        assert not at.exception
+        sb = at.sidebar.selectbox(key="role::hole_hand_grid_x_norm")
+        assert sb.proto.disabled

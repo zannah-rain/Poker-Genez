@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from cards import Card
+from cards import RANKS, Card
 from evaluator import (
     FULL_HOUSE, FLUSH, HIGH_CARD, PAIR, QUADS, STRAIGHT, STRAIGHT_FLUSH,
     TRIPS, TWO_PAIR, best_hand_from_available, count_straight_draw_outs, straight_high,
@@ -112,6 +112,47 @@ _HOLE_CATEGORY_LABELS = (
     "Junk", "Unsuited Connectors", "Suited 2 Gappers", "Suited 1 Gappers", "Suited Connectors",
     "Qxs", "Kxs", "Axo", "Axs", "Average Pairs", "High Pairs", "Premium Pairs",
 )  # index order = strength ascending; must match _hole_hand_category's return values
+
+
+# The classic 13x13 preflop starting-hand grid every range-chart tool uses:
+# both axes run Ace..deuce (index 0 = Ace), pocket pairs sit on the main
+# diagonal, suited combos above it, offsuit combos below it -- see
+# _hole_hand_grid_indices/hole_hand_grid_label.
+HOLE_HAND_GRID_RANKS = tuple(range(14, 1, -1))  # 14 (Ace), 13 (King), ..., 2
+HOLE_HAND_GRID_SIZE = len(HOLE_HAND_GRID_RANKS)
+HOLE_HAND_GRID_RANK_LABELS = tuple(RANKS[r - 2] for r in HOLE_HAND_GRID_RANKS)  # "A", "K", ..., "2"
+# Sentinel for hole_hand_grid_x_norm/y_norm outside preflop (see
+# extract_features) -- deliberately outside the 0-1 range every other
+# feature lives in, rather than reusing 0.0 (Ace's own real grid position),
+# so a masked reading can never be mistaken for a real hand.
+HOLE_HAND_GRID_MASKED = -1.0
+
+
+def _hole_hand_grid_indices(hole: list[Card]) -> tuple[int, int]:
+    """(row, col) in [0, HOLE_HAND_GRID_SIZE) x [0, HOLE_HAND_GRID_SIZE) for
+    this exact starting hand. A pocket pair always lands on the diagonal
+    (row == col). Otherwise the higher-ranked card sets the row and the
+    lower-ranked one sets the column for a suited combo (row < col, above
+    the diagonal), and the reverse for offsuit (row > col, below the
+    diagonal) -- see hole_hand_grid_label for the inverse mapping."""
+    r0, r1 = hole[0].rank, hole[1].rank
+    hi, lo = max(r0, r1), min(r0, r1)
+    hi_idx, lo_idx = 14 - hi, 14 - lo
+    if hi == lo:
+        return hi_idx, hi_idx
+    suited = hole[0].suit == hole[1].suit
+    return (hi_idx, lo_idx) if suited else (lo_idx, hi_idx)
+
+
+def hole_hand_grid_label(row: int, col: int) -> str:
+    """Human-readable combo code for one (row, col) grid cell -- e.g. "AA",
+    "AKs", "AKo" -- the inverse of _hole_hand_grid_indices. Used by
+    cfr_explorer.py to label every cell of its Exact Hole Hand heatmaps."""
+    hi_label = HOLE_HAND_GRID_RANK_LABELS[min(row, col)]
+    lo_label = HOLE_HAND_GRID_RANK_LABELS[max(row, col)]
+    if row == col:
+        return hi_label + lo_label
+    return hi_label + lo_label + ("s" if row < col else "o")
 
 
 def _hole_hand_category(hole: list[Card]) -> int:
@@ -262,6 +303,9 @@ _HAND_CATEGORY_VALUES = (
     (23 / 25, "Full House"), (24 / 25, "Four of a Kind"), (25 / 25, "Straight Flush"),
 )
 _HOLE_CATEGORY_VALUES = tuple((i / 11, label) for i, label in enumerate(_HOLE_CATEGORY_LABELS))
+_HOLE_HAND_GRID_VALUES = tuple(
+    (i / (HOLE_HAND_GRID_SIZE - 1), HOLE_HAND_GRID_RANK_LABELS[i]) for i in range(HOLE_HAND_GRID_SIZE)
+)
 _HOLE_HIGH_CARD_VALUES = tuple(((r - 2) / 12, _rank_label(r)) for r in range(2, 15))
 _SHARED_HIGH_CARD_VALUES = tuple(((r - 2) / 12, _rank_label(r)) for r in range(2, 15))
 _CONNECTIVITY_VALUES = tuple(
@@ -900,6 +944,33 @@ FEATURE_SPECS: list[FeatureSpec] = [
     *_HOLE_CATEGORY_CHILDREN,
 
     FeatureSpec(
+        "hole_hand_grid_x_norm", "Exact Hole Hand",
+        "Column position of this player's exact starting hand (both hole card ranks, "
+        "plus suited/offsuit) in the classic 13x13 preflop starting-hand grid, "
+        "normalized as rank_index / 12 (0.0 = Ace, 1.0 = deuce). Paired with "
+        "hole_hand_grid_y_norm (the row position -- linked here purely so the two "
+        "collapse into one entry everywhere features are listed, the same way a "
+        "one-hot indicator collapses into its parent elsewhere in this catalog; it "
+        "isn't a value-indicator of hole_hand_grid_x_norm the way a real linked child "
+        "is), the (row, column) cell puts pocket pairs on the diagonal, suited combos "
+        "above it, and offsuit combos below it -- exactly where a human would find "
+        "this hand on a range chart (see features.hole_hand_grid_label). Realistic to "
+        "memorize a chart against all 169 exact starting hands the way real players "
+        "do preflop, not against the far larger space of postflop "
+        "hole-cards-vs-board combinations, so this is masked to -1.0 "
+        "(features.HOLE_HAND_GRID_MASKED) outside preflop.",
+        kind="categorical", value_table=_HOLE_HAND_GRID_VALUES, group="Hole Card Characteristics",
+    ),
+    FeatureSpec(
+        "hole_hand_grid_y_norm", "Exact Hole Hand (Row)",
+        "Row position of this player's exact starting hand in the same 13x13 grid -- "
+        "see hole_hand_grid_x_norm for the full explanation, layout, and preflop-only "
+        "masking.",
+        kind="categorical", value_table=_HOLE_HAND_GRID_VALUES, group="Hole Card Characteristics",
+        linked_to="hole_hand_grid_x_norm",
+    ),
+
+    FeatureSpec(
         "street_norm", "Betting Street",
         "Current street normalized to 0-1: 0.0 = preflop, 0.33 = flop, 0.67 = turn, 1.0 = river.",
         kind="categorical", value_table=_STREET_VALUES, group="Table & Game State Features",
@@ -1504,6 +1575,20 @@ def _hand_category_bucket(hole: list[Card], board: list[Card], cat: int, hand: d
     return _STRAIGHT_FLUSH_INDEX
 
 
+def _hole_hand_grid_features(hole: list[Card], street: int) -> dict:
+    """hole_hand_grid_x_norm/y_norm: masked to HOLE_HAND_GRID_MASKED outside
+    preflop (street != 0) -- the hole cards themselves don't change, but a
+    human can realistically memorize a chart against all 169 exact
+    preflop combos, not against the far larger space of postflop
+    hole-cards-vs-board combinations, so the network shouldn't be handed
+    this exact an identity once there's a board to read instead."""
+    if street != 0:
+        return {"hole_hand_grid_x_norm": HOLE_HAND_GRID_MASKED, "hole_hand_grid_y_norm": HOLE_HAND_GRID_MASKED}
+    row, col = _hole_hand_grid_indices(hole)
+    denom = HOLE_HAND_GRID_SIZE - 1
+    return {"hole_hand_grid_x_norm": col / denom, "hole_hand_grid_y_norm": row / denom}
+
+
 _NO_FLOP_TEXTURE = {
     "flop_suit_texture_norm": 0.0, "rainbow_flop": 0.0, "flush_draw_flop": 0.0, "monotone_flop": 0.0,
     "flop_pairing_texture_norm": 0.0, "unpaired_flop": 0.0, "paired_flop": 0.0, "tripled_flop": 0.0,
@@ -1753,6 +1838,7 @@ def extract_features(sit: Situation) -> np.ndarray:
             values[key] = float(i == nearest)
 
     values.update(_hand_vs_board_heuristics(sit.hole, sit.board, hand))
+    values.update(_hole_hand_grid_features(sit.hole, sit.street))
     values.update(_flop_texture(sit.board, sit.hole))
     values.update(_suit_connection_features(sit.hole, sit.board))
 
