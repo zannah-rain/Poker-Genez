@@ -1,12 +1,10 @@
 """Maps a configurable subset of features.py's feature vocabulary to the
 positions Single Deep CFR reads out of extract_features()'s output vector.
 
-A Deep CFR advantage network can be pointed at *any* of features.py's ~200
-keys, including the one-hot indicator children -- there's no rule-bucketing
-machinery here that would make the children redundant with their parent,
-just a plain feature vector fed straight into a neural net. The default
-subset (see DEFAULT_FEATURE_KEYS below) takes advantage of that and reads
-the full vocabulary.
+A Deep CFR advantage network can be pointed at *any* of features.py's keys
+-- there's no rule-bucketing machinery here, just a plain feature vector fed
+straight into a neural net. The default subset (see DEFAULT_FEATURE_KEYS
+below) takes advantage of that and reads the full vocabulary.
 """
 
 from __future__ import annotations

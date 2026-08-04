@@ -7,18 +7,15 @@ Single Deep CFR advantage network (see cfr_features.py) reads a configured
 subset of these directly.
 
 Each "multi-value" characteristic (e.g. hand strength, high card rank) is
-represented twice: once as a single generalized 0-1 feature (so the genome
-can learn a linear trend across its values), and once as a set of exact
-per-value indicator features (so the genome can also learn a non-linear,
-value-specific adjustment). Indicator features declare which generalized
-feature and which specific value they belong to via `linked_to` /
-`linked_value_index`, purely so exported reports can fold them back into a
-single per-value row instead of listing near-duplicate entries.
+represented as a single ordinal/categorical 0-1 feature, since a neural
+network can read that value directly and learn any non-linear response to
+it. A feature can still declare a `linked_to` / `linked_value_index`
+relationship to another feature -- e.g. the Exact Hole Hand grid's second
+axis -- purely so exported reports can fold related rows together.
 """
 
 from __future__ import annotations
 
-import math
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -204,52 +201,6 @@ def _connectivity_label(gap: int) -> str:
     return f"{CONNECTIVITY_GAP_CAP} or more apart"
 
 
-def _linked_bool(key: str, label: str, description: str, linked_to: str, index: int) -> FeatureSpec:
-    return FeatureSpec(key, label, description, kind="boolean", linked_to=linked_to, linked_value_index=index)
-
-
-# Representative sample points used for every genuinely continuous feature, both for
-# its value table and for the "nearest point" bucket indicators computed at runtime.
-_BUCKET_POINTS = (0.0, 0.25, 0.5, 0.75, 1.0)
-
-
-_NUM_BUCKETS = len(_BUCKET_POINTS)  # 5
-
-
-def _nearest_bucket_index(value: float, num_buckets: int = _NUM_BUCKETS) -> int:
-    """Index into an evenly-spaced `num_buckets`-point grid over 0-1 (by
-    default _BUCKET_POINTS, the shared 5-point grid most continuous
-    features use) closest to `value`. call_amount_norm and num_raises_norm
-    each use their own different bucket count (see _CALL_SIZE_VALUES /
-    _RAISES_VALUES), hence the parameter instead of always assuming 5.
-    Since the grid is evenly spaced, the nearest point can be found with
-    direct arithmetic instead of scanning+comparing every candidate --
-    this is called from extract_features' hottest inner loop (once per
-    continuous feature per decision), so the constant-factor savings add up.
-    `ceil(x - 0.5)` (rather than the more common `round`) is deliberate: it
-    breaks an exact tie between two adjacent points toward the *lower*
-    index, matching what the original `min(range(...), key=...)` scan did
-    (the first-encountered minimum wins ties, and range() visits indices
-    ascending) -- plain `round()` would instead break ties to the nearest
-    *even* index (banker's rounding) and silently disagree at the exact
-    midpoints."""
-    last = num_buckets - 1
-    idx = math.ceil(value * last - 0.5)
-    return 0 if idx < 0 else (last if idx > last else idx)
-
-
-def _continuous_children(parent_key: str, value_table: tuple) -> list[FeatureSpec]:
-    return [
-        _linked_bool(
-            f"{parent_key}_bucket_{i}", label,
-            f"1 if {parent_key}'s value falls closest to {point:.2f} on a 0-1 scale "
-            f"(\"{label}\"), else 0. One of these {len(value_table)} is always 1.",
-            parent_key, i,
-        )
-        for i, (point, label) in enumerate(value_table)
-    ]
-
-
 # Every made-hand category, in strength order -- but High Card, Pair, Three
 # of a Kind, Straight, and Flush are each split into several sub-buckets
 # (still ordered weakest-to-strongest within that category) instead of one
@@ -415,334 +366,11 @@ _OPP_FOLD_VS_BET_VALUES = (
     (0.75, "Active opponents fold to a postflop bet about 3 in 4 times (75%)"),
     (1.0, "Active opponents (almost) always fold to a postflop bet (100%)"),
 )
-_OPP_VPIP_CHILDREN = _continuous_children("opp_vpip_norm", _OPP_VPIP_VALUES)
-_OPP_PFR_CHILDREN = _continuous_children("opp_pfr_norm", _OPP_PFR_VALUES)
-_OPP_THREE_BET_CHILDREN = _continuous_children("opp_three_bet_norm", _OPP_THREE_BET_VALUES)
-_OPP_FOLD_TO_THREE_BET_CHILDREN = _continuous_children(
-    "opp_fold_to_three_bet_norm", _OPP_FOLD_TO_THREE_BET_VALUES
-)
-_OPP_AGGRESSION_FREQ_CHILDREN = _continuous_children("opp_aggression_freq_norm", _OPP_AGGRESSION_FREQ_VALUES)
-_OPP_FOLD_VS_BET_CHILDREN = _continuous_children("opp_fold_vs_bet_norm", _OPP_FOLD_VS_BET_VALUES)
-
 _SEAT_ROLE_LABELS = {
     "UTG": "Under The Gun (UTG)", "HJ": "Hijack (HJ)", "CO": "Cutoff (CO)",
     "BTN": "Button (BTN)", "SB": "Small Blind (SB)", "BB": "Big Blind (BB)",
 }
 _SEAT_ROLE_VALUES = tuple((i / (len(SEAT_ROLES) - 1), _SEAT_ROLE_LABELS[role]) for i, role in enumerate(SEAT_ROLES))
-
-_HAND_CATEGORY_CHILDREN = [
-    _linked_bool(
-        "has_high_card", "High Card",
-        "1 if the best available hand's category is exactly High Card (no pair or better) "
-        "and the overall (hole+board) high card isn't a King or Ace, else 0.",
-        "hand_category_norm", 0,
-    ),
-    _linked_bool(
-        "has_king_high", "King High",
-        "1 if the best available hand's category is exactly High Card (no pair or better) "
-        "and the overall (hole+board) high card is a King, else 0.",
-        "hand_category_norm", 1,
-    ),
-    _linked_bool(
-        "has_ace_high", "Ace High",
-        "1 if the best available hand's category is exactly High Card (no pair or better) "
-        "and the overall (hole+board) high card is an Ace, else 0.",
-        "hand_category_norm", 2,
-    ),
-    _linked_bool(
-        "has_low_pair", "Low Pair",
-        "1 if the hole cards are a pocket pair ranked lower than every board card, else 0.",
-        "hand_category_norm", 3,
-    ),
-    _linked_bool(
-        "has_underpair", "Underpair",
-        "1 if the hole cards are a pocket pair ranked lower than the board's highest card, "
-        "but not Low Pair (it still beats at least one board card), else 0.",
-        "hand_category_norm", 4,
-    ),
-    _linked_bool(
-        "has_pair", "Pair",
-        "1 if the best available hand is exactly a pair that doesn't fit any of the more "
-        "specific pair buckets around it -- a preflop pocket pair with no board yet to "
-        "compare against, or a postflop pair matching a board rank below the top 3 "
-        "distinct ranks -- else 0.",
-        "hand_category_norm", 5,
-    ),
-    _linked_bool(
-        "has_third_pair", "Third Pair",
-        "1 if exactly one hole card rank-matches the third-highest distinct board rank "
-        "(and the best overall hand is exactly a pair), else 0. Needs a board with at "
-        "least 3 distinct ranks.",
-        "hand_category_norm", 6,
-    ),
-    _linked_bool(
-        "has_second_pair", "Second Pair",
-        "1 if exactly one hole card rank-matches the second-highest distinct board rank "
-        "(and the best overall hand is exactly a pair), else 0. Needs a board with at "
-        "least 2 distinct ranks.",
-        "hand_category_norm", 7,
-    ),
-    _linked_bool(
-        "has_top_pair", "Top Pair",
-        "1 if exactly one hole card rank-matches the single highest board card, the best "
-        "overall hand is exactly a pair, and the other hole card (the kicker) is a Ten or "
-        "below -- a Jack, Queen, King, or Ace kicker gets its own Good/Top Kicker bucket "
-        "instead -- else 0.",
-        "hand_category_norm", 8,
-    ),
-    _linked_bool(
-        "has_top_pair_good_kicker", "Top Pair + Good Kicker",
-        "1 if this is Top Pair (see has_top_pair) and the kicker is a Jack, Queen, or "
-        "King, else 0.",
-        "hand_category_norm", 9,
-    ),
-    _linked_bool(
-        "has_top_pair_top_kicker", "Top Pair + Top Kicker",
-        "1 if this is Top Pair (see has_top_pair) and the kicker is an Ace, else 0.",
-        "hand_category_norm", 10,
-    ),
-    _linked_bool(
-        "has_overpair", "Overpair",
-        "1 if the hole cards are a pocket pair ranked higher than every board card, else 0.",
-        "hand_category_norm", 11,
-    ),
-    _linked_bool(
-        "has_two_pair", "Two Pair", "1 if the best available hand is exactly two pair, else 0.",
-        "hand_category_norm", 12,
-    ),
-    _linked_bool(
-        "has_bottom_set", "Bottom Set",
-        "1 if the hole cards are a pocket pair matching the board's single lowest distinct "
-        "rank (the worst possible three of a kind on this board), else 0.",
-        "hand_category_norm", 13,
-    ),
-    _linked_bool(
-        "has_set", "Set",
-        "1 if the best available hand is exactly three of a kind and it's neither Bottom "
-        "Set nor Top Set -- either a middle set (a pocket pair matching a board rank "
-        "that's neither the board's highest nor lowest) or the classic board-paired "
-        "'trips' case (a non-pocket hole card matching a pair already on the board) -- "
-        "else 0.",
-        "hand_category_norm", 14,
-    ),
-    _linked_bool(
-        "has_top_set", "Top Set",
-        "1 if the hole cards are a pocket pair matching the board's single highest "
-        "distinct rank (the best possible three of a kind on this board), else 0.",
-        "hand_category_norm", 15,
-    ),
-    _linked_bool(
-        "has_bottom_straight", "Bottom Straight",
-        "1 if the best available hand is exactly a straight, and its high card is the "
-        "lowest straight_high any 2 hole cards could make on this board, else 0.",
-        "hand_category_norm", 16,
-    ),
-    _linked_bool(
-        "has_straight", "Straight",
-        "1 if the best available hand is exactly a straight that's neither the highest "
-        "nor lowest one possible on this board, else 0.",
-        "hand_category_norm", 17,
-    ),
-    _linked_bool(
-        "has_top_straight", "Top Straight",
-        "1 if the best available hand is exactly a straight, its high card is the highest "
-        "straight_high any 2 hole cards could make on this board, and a flush is still "
-        "possible for someone (3+ board cards share a suit) -- so it's the best straight "
-        "here but not provably the best hand overall, else 0.",
-        "hand_category_norm", 18,
-    ),
-    _linked_bool(
-        "has_nuts_straight", "Nuts Straight",
-        "1 if the best available hand is exactly a straight, its high card is the highest "
-        "straight_high any 2 hole cards could make on this board, and no flush is "
-        "possible for anyone (fewer than 3 board cards share any one suit) -- so no "
-        "better hand is possible given the shared cards, else 0.",
-        "hand_category_norm", 19,
-    ),
-    _linked_bool(
-        "has_flush", "Flush",
-        "1 if the best available hand is exactly a flush and its own highest card isn't "
-        "an Ace or King, else 0.",
-        "hand_category_norm", 20,
-    ),
-    _linked_bool(
-        "has_king_high_flush", "King High Flush",
-        "1 if the best available hand is exactly a flush and its own highest card is a "
-        "King, else 0.",
-        "hand_category_norm", 21,
-    ),
-    _linked_bool(
-        "has_ace_high_flush", "Ace High Flush",
-        "1 if the best available hand is exactly a flush and its own highest card is an "
-        "Ace (the best possible flush of that suit), else 0.",
-        "hand_category_norm", 22,
-    ),
-    _linked_bool(
-        "has_full_house", "Full House", "1 if the best available hand is exactly a full house, else 0.",
-        "hand_category_norm", 23,
-    ),
-    _linked_bool(
-        "has_quads", "Four of a Kind", "1 if the best available hand is exactly four of a kind, else 0.",
-        "hand_category_norm", 24,
-    ),
-    _linked_bool(
-        "has_straight_flush", "Straight Flush", "1 if the best available hand is a straight flush, else 0.",
-        "hand_category_norm", 25,
-    ),
-]
-
-_HOLE_HIGH_CARD_CHILDREN = [
-    _linked_bool(
-        f"hole_high_card_is_{_rank_key(r)}", _rank_label(r),
-        f"1 if the higher of this player's two hole cards has rank {_rank_label(r)}, else 0.",
-        "hole_high_card_norm", r - 2,
-    )
-    for r in range(2, 15)
-]
-
-_SHARED_HIGH_CARD_CHILDREN = [
-    _linked_bool(
-        f"shared_high_card_is_{_rank_key(r)}", _rank_label(r),
-        f"1 if the highest board (shared/community) card has rank {_rank_label(r)}, else 0. "
-        "Never true preflop, since there are no shared cards yet.",
-        "shared_high_card_norm", r - 2,
-    )
-    for r in range(2, 15)
-]
-
-_CONNECTIVITY_CHILDREN = [
-    _linked_bool(
-        "hole_paired", "Same rank (pocket pair)", "1 if both hole cards share a rank, else 0.",
-        "hole_connectivity", 0,
-    ),
-] + [
-    _linked_bool(
-        f"connectivity_gap_{gap}", _connectivity_label(gap),
-        f"1 if the two hole card ranks are exactly {gap} apart (treating the Ace as high or "
-        "low, whichever is closer), else 0.",
-        "hole_connectivity", gap,
-    )
-    for gap in range(1, CONNECTIVITY_GAP_CAP)
-] + [
-    _linked_bool(
-        f"connectivity_gap_{CONNECTIVITY_GAP_CAP}plus", _connectivity_label(CONNECTIVITY_GAP_CAP),
-        f"1 if the two hole card ranks are {CONNECTIVITY_GAP_CAP} or more apart (treating the "
-        "Ace as high or low, whichever is closer), else 0.",
-        "hole_connectivity", CONNECTIVITY_GAP_CAP,
-    )
-]
-
-_HOLE_CATEGORY_KEYS_BY_INDEX = (
-    "hole_category_junk", "hole_category_unsuited_connector", "hole_category_suited_two_gapper",
-    "hole_category_suited_one_gapper", "hole_category_suited_connector", "hole_category_qxs",
-    "hole_category_kxs", "hole_category_axo", "hole_category_axs", "hole_category_average_pair",
-    "hole_category_high_pair", "hole_category_premium_pair",
-)
-_HOLE_CATEGORY_DESCRIPTIONS = (
-    "the hand doesn't fit any other bucket (e.g. K9o, J4s, 73o)",
-    "the two hole cards are offsuit and 1 apart in rank (e.g. KQo, T9o)",
-    "the two hole cards are suited and 3 apart in rank (e.g. J8s, T7s)",
-    "the two hole cards are suited and 2 apart in rank (e.g. J9s, T8s)",
-    "the two hole cards are suited and 1 apart in rank (e.g. JTs, T9s)",
-    "one hole card is a Queen, the other is a suited non-Ace, non-King kicker (e.g. QJs, Q4s)",
-    "one hole card is a King, the other is a suited non-Ace kicker (e.g. KQs, K4s)",
-    "one hole card is an Ace, the other is an offsuit kicker (e.g. AKo, A4o)",
-    "one hole card is an Ace, the other is a suited kicker (e.g. AKs, A4s)",
-    "the hole cards are a pocket pair from 22 to 88",
-    "the hole cards are a pocket pair from 99 to JJ",
-    "the hole cards are a pocket pair of Aces, Kings, or Queens",
-)
-_HOLE_CATEGORY_CHILDREN = [
-    _linked_bool(
-        _HOLE_CATEGORY_KEYS_BY_INDEX[i], _HOLE_CATEGORY_LABELS[i],
-        f"1 if {_HOLE_CATEGORY_DESCRIPTIONS[i]}, else 0.",
-        "hole_hand_category_norm", i,
-    )
-    for i in range(len(_HOLE_CATEGORY_LABELS))
-]
-
-_STREET_CHILDREN = [
-    _linked_bool(key, label, f"1 if the current street is {label}, else 0.", "street_norm", i)
-    for i, (key, label) in enumerate(
-        [("is_preflop", "Preflop"), ("is_flop", "Flop"), ("is_turn", "Turn"), ("is_river", "River")]
-    )
-]
-
-_CALL_SIZE_CHILDREN = _continuous_children("call_amount_norm", _CALL_SIZE_VALUES)
-_SPR_CHILDREN = _continuous_children("spr_norm", _SPR_VALUES)
-_POSITION_CHILDREN = _continuous_children("position_norm", _POSITION_VALUES)
-_STACK_DEPTH_CHILDREN = _continuous_children("stack_depth_norm", _STACK_DEPTH_VALUES)
-
-_ACTIVE_PLAYERS_CHILDREN = [
-    _linked_bool(
-        f"active_players_is_{n}", f"{n} players",
-        f"1 if exactly {n} players are still in the hand, else 0.",
-        "num_active_norm", n - 2,
-    )
-    for n in range(2, 7)
-]
-
-_OVERCARDS_CHILDREN = [
-    _linked_bool(
-        f"num_overcards_is_{n}", ("0 overcards" if n == 0 else f"{n} overcard{'s' if n != 1 else ''}"),
-        f"1 if exactly {n} board cards rank higher than the higher of this player's two hole "
-        "cards, else 0.",
-        "num_overcards_norm", n,
-    )
-    for n in range(6)
-]
-
-_RAISES_CHILDREN = [
-    _linked_bool(
-        f"raises_is_{r}", ("No raises" if r == 0 else f"{r} raise{'s' if r != 1 else ''}"),
-        f"1 if exactly {r} raises have occurred so far this street, else 0.",
-        "num_raises_norm", r,
-    )
-    for r in range(0, 3)
-] + [
-    _linked_bool(
-        "raises_is_3plus", "3+ raises",
-        "1 if 3 or more raises have occurred so far this street, else 0.",
-        "num_raises_norm", 3,
-    )
-]
-
-_POT_TYPE_CHILDREN = [
-    _linked_bool(
-        "is_unraised_pot", "Unraised Pot",
-        "1 if there have been no preflop raises (everyone limped/checked/folded to the big "
-        "blind), else 0.",
-        "pot_type_norm", 0,
-    ),
-    _linked_bool(
-        "is_single_raised_pot", "Single Raised Pot",
-        "1 if there has been exactly 1 preflop raise (the standard 'open'), else 0.",
-        "pot_type_norm", 1,
-    ),
-    _linked_bool(
-        "is_3bet_pot", "3-Bet Pot",
-        "1 if there have been exactly 2 preflop raises (someone re-raised the opener), else 0.",
-        "pot_type_norm", 2,
-    ),
-    _linked_bool(
-        "is_4bet_plus_pot", "4-Bet+ Pot",
-        "1 if there have been 3 or more preflop raises, else 0.",
-        "pot_type_norm", 3,
-    ),
-]
-
-_SEAT_ROLE_KEYS = {
-    "UTG": "is_utg", "HJ": "is_hijack", "CO": "is_cutoff",
-    "BTN": "is_button", "SB": "is_small_blind", "BB": "is_big_blind",
-}
-_SEAT_ROLE_CHILDREN = [
-    _linked_bool(
-        _SEAT_ROLE_KEYS[role], _SEAT_ROLE_LABELS[role],
-        f"1 if this player's starting seat this hand was {_SEAT_ROLE_LABELS[role]}, else 0.",
-        "starting_position_norm", i,
-    )
-    for i, role in enumerate(SEAT_ROLES)
-]
 
 # Flop-texture features describe the flop (board[:3]) and, for the
 # connectivity family below, how this player's hole cards personally
@@ -774,55 +402,9 @@ _SUIT_CONNECTION_VALUES = (
     (3 / 5, "3 Cards"), (4 / 5, "4 Cards (a flush draw)"), (5 / 5, "5+ Cards (a flush made)"),
 )
 
-# flop_suit_texture_norm's own one-hot family: exact indicators for its 3
-# suit-family values, no hole-card awareness (see suit_connection_index for
-# that dimension, which is entirely separate now rather than folded in).
-_FLOP_SUIT_TEXTURE_CHILDREN = [
-    _linked_bool(
-        "rainbow_flop", "Rainbow",
-        "1 if the flop's 3 cards are all different suits, else 0.",
-        "flop_suit_texture_norm", 0,
-    ),
-    _linked_bool(
-        "flush_draw_flop", "Flush Draw Flop",
-        "1 if exactly 2 of the flop's 3 cards share a suit (a two-tone flop), else 0.",
-        "flop_suit_texture_norm", 1,
-    ),
-    _linked_bool(
-        "monotone_flop", "Monotone",
-        "1 if all 3 flop cards share the same suit, else 0.",
-        "flop_suit_texture_norm", 2,
-    ),
-]
-_SUIT_CONNECTION_CHILDREN = [
-    _linked_bool(
-        f"suit_connection_is_{n}", f"{n} Card{'s' if n != 1 else ''} Same Suit" if n < 5 else "5+ Cards Same Suit",
-        f"1 if the most cards of any single suit among this player's hole cards plus "
-        f"the current board is exactly {n}{' or more' if n == 5 else ''}, else 0.",
-        "suit_connection_index", n - 1,
-    )
-    for n in range(1, 6)
-]
-_FLOP_PAIRING_CHILDREN = [
-    _linked_bool(
-        "unpaired_flop", "Unpaired",
-        "1 if the flop's 3 cards all have different ranks, else 0.",
-        "flop_pairing_texture_norm", 0,
-    ),
-    _linked_bool(
-        "paired_flop", "Paired",
-        "1 if exactly 2 of the flop's 3 cards share a rank, else 0.",
-        "flop_pairing_texture_norm", 1,
-    ),
-    _linked_bool(
-        "tripled_flop", "Tripled",
-        "1 if all 3 flop cards share the same rank, else 0.",
-        "flop_pairing_texture_norm", 2,
-    ),
-]
 # "connected_flop" is a family-level aggregate (indices 1+2 of the 3-value
-# family below), so -- like the suit family booleans above -- it's declared
-# standalone rather than as a `linked_to` child.
+# family below), so it's declared standalone rather than as a `linked_to`
+# child (which can only ever point at one single index).
 _FLOP_CONNECTED_FAMILY_SPEC = FeatureSpec(
     "connected_flop", "Connected",
     "1 if the flop's ranks (Ace counted as high or low, whichever is closer) span 4 "
@@ -830,52 +412,6 @@ _FLOP_CONNECTED_FAMILY_SPEC = FeatureSpec(
     "(see flop_connectivity_norm for the hole-card-aware breakdown), else 0.",
     group="Board / Flop Characteristics",
 )
-_FLOP_CONNECTIVITY_CHILDREN = [
-    _linked_bool(
-        "disconnected_flop", "Disconnected",
-        "1 if the flop's ranks (Ace counted as high or low, whichever is closer) span more "
-        "than 4, too spread out to easily combine into straights, else 0.",
-        "flop_connectivity_norm", 0,
-    ),
-    _linked_bool(
-        "connected_no_straight_draw_flop", "Connected, No Straight Draw",
-        "1 if the flop is Connected (see flop_connectivity_norm) but this player's "
-        "hole+flop cards have no rank that would complete a straight, else 0.",
-        "flop_connectivity_norm", 1,
-    ),
-    _linked_bool(
-        "connected_straight_draw_flop", "Connected, Straight Draw (4+/8+ Outs)",
-        "1 if the flop is Connected and this player has a live straight draw there -- "
-        "a gutshot (1 rank, ~4 real outs) or open-ended/double-gutshot (2 ranks, ~8 "
-        "real outs) -- else 0.",
-        "flop_connectivity_norm", 2,
-    ),
-]
-_FLOP_WETNESS_CHILDREN = [
-    _linked_bool(
-        "dry_flop", "Dry",
-        "1 if the flop is Dry (see flop_wetness_norm for the underlying score), else 0.",
-        "flop_wetness_norm", 0,
-    ),
-    _linked_bool(
-        "wet_flop", "Wet",
-        "1 if the flop is Wet (see flop_wetness_norm for the underlying score), else 0.",
-        "flop_wetness_norm", 1,
-    ),
-]
-_FLOP_DYNAMISM_CHILDREN = [
-    _linked_bool(
-        "static_flop", "Static",
-        "1 if the flop is Static (see flop_dynamism_norm), else 0.",
-        "flop_dynamism_norm", 0,
-    ),
-    _linked_bool(
-        "dynamic_flop", "Dynamic",
-        "1 if the flop is Dynamic (see flop_dynamism_norm), else 0.",
-        "flop_dynamism_norm", 1,
-    ),
-]
-
 
 # Grouped as parent-feature-then-its-children for readability; array order is
 # otherwise arbitrary since extract_features looks values up by key, not position.
@@ -896,7 +432,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "how each one is computed.",
         kind="categorical", value_table=_HAND_CATEGORY_VALUES, group="Made Hand Features",
     ),
-    *_HAND_CATEGORY_CHILDREN,
 
     FeatureSpec(
         "hole_high_card_norm", "Hole High Card Rank",
@@ -904,7 +439,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "(rank - 2) / 12, so 0.0 = deuce and 1.0 = ace. Always defined, from preflop on.",
         kind="categorical", value_table=_HOLE_HIGH_CARD_VALUES, group="Hole Card Characteristics",
     ),
-    *_HOLE_HIGH_CARD_CHILDREN,
 
     FeatureSpec(
         "shared_high_card_norm", "Shared Cards High Card Rank",
@@ -914,7 +448,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "yet' apart from 'the board's high card really is a deuce'.",
         kind="categorical", value_table=_SHARED_HIGH_CARD_VALUES, group="Board / Flop Characteristics",
     ),
-    *_SHARED_HIGH_CARD_CHILDREN,
 
     FeatureSpec(
         "hole_connectivity", "Hole Card Connectivity",
@@ -925,7 +458,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "consecutive ranks (e.g. 9-T); 0.0 means 6 or more apart.",
         kind="categorical", value_table=_CONNECTIVITY_VALUES, group="Hole Card Characteristics",
     ),
-    *_CONNECTIVITY_CHILDREN,
 
     FeatureSpec(
         "hole_hand_category_norm", "Hole Hand Category",
@@ -941,7 +473,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "Premium Pairs, so higher is a stronger starting hand.",
         kind="categorical", value_table=_HOLE_CATEGORY_VALUES, group="Hole Card Characteristics",
     ),
-    *_HOLE_CATEGORY_CHILDREN,
 
     FeatureSpec(
         "hole_hand_grid_x_norm", "Exact Hole Hand",
@@ -975,7 +506,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "Current street normalized to 0-1: 0.0 = preflop, 0.33 = flop, 0.67 = turn, 1.0 = river.",
         kind="categorical", value_table=_STREET_VALUES, group="Table & Game State Features",
     ),
-    *_STREET_CHILDREN,
 
     FeatureSpec(
         "call_amount_norm", "Call Size Vs Pot",
@@ -986,7 +516,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "of being lumped in with an exactly-pot-sized bet.",
         kind="continuous", value_table=_CALL_SIZE_VALUES, group="Betting Behaviour Features",
     ),
-    *_CALL_SIZE_CHILDREN,
 
     FeatureSpec(
         "spr_norm", "Stack-To-Pot Ratio",
@@ -995,7 +524,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "pot-sized bets remain; divided by 20 and clipped to 0-1.",
         kind="continuous", value_table=_SPR_VALUES, group="Stack & Pot Features",
     ),
-    *_SPR_CHILDREN,
 
     FeatureSpec(
         "position_norm", "Table Position",
@@ -1003,7 +531,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "0.0 (acts first) to 1.0 (acts last).",
         kind="continuous", value_table=_POSITION_VALUES, group="Table & Game State Features",
     ),
-    *_POSITION_CHILDREN,
 
     FeatureSpec(
         "starting_position_norm", "Starting Seat Position",
@@ -1014,14 +541,12 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "small blind are the same seat, labeled SB).",
         kind="categorical", value_table=_SEAT_ROLE_VALUES, group="Table & Game State Features",
     ),
-    *_SEAT_ROLE_CHILDREN,
 
     FeatureSpec(
         "num_active_norm", "Players Still In Hand",
         "Number of players who have not folded yet this hand, divided by 6.",
         kind="categorical", value_table=_ACTIVE_PLAYERS_VALUES, group="Table & Game State Features",
     ),
-    *_ACTIVE_PLAYERS_CHILDREN,
 
     FeatureSpec(
         "num_raises_norm", "Raises This Street",
@@ -1031,7 +556,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "exactly how many more re-raises it's technically been.",
         kind="categorical", value_table=_RAISES_VALUES, group="Betting Behaviour Features",
     ),
-    *_RAISES_CHILDREN,
 
     FeatureSpec(
         "pot_type_norm", "Pot Type",
@@ -1042,7 +566,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "not just the current street.",
         kind="categorical", value_table=_POT_TYPE_VALUES, group="Betting Behaviour Features",
     ),
-    *_POT_TYPE_CHILDREN,
 
     FeatureSpec(
         "stack_depth_norm", "Stack Depth",
@@ -1051,7 +574,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "blinds, divided by 200 and clipped to 0-1 (1.0 = 200bb or more).",
         kind="continuous", value_table=_STACK_DEPTH_VALUES, group="Stack & Pot Features",
     ),
-    *_STACK_DEPTH_CHILDREN,
 
     # Standalone booleans: not tied to a specific value of any other feature.
     FeatureSpec(
@@ -1088,7 +610,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "value) before the flop.",
         kind="categorical", value_table=_FLOP_SUIT_TEXTURE_VALUES, group="Board / Flop Characteristics",
     ),
-    *_FLOP_SUIT_TEXTURE_CHILDREN,
 
     FeatureSpec(
         "suit_connection_index", "Suit Connection",
@@ -1103,7 +624,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "5-card cap as a flush comes together.",
         kind="categorical", value_table=_SUIT_CONNECTION_VALUES, group="Board / Flop Characteristics",
     ),
-    *_SUIT_CONNECTION_CHILDREN,
 
     FeatureSpec(
         "flop_pairing_texture_norm", "Flop Pairing Texture",
@@ -1112,7 +632,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "once the flop is dealt; defaults to 0.0 (Unpaired's value) before the flop.",
         kind="categorical", value_table=_FLOP_PAIRING_VALUES, group="Board / Flop Characteristics",
     ),
-    *_FLOP_PAIRING_CHILDREN,
 
     FeatureSpec(
         "flop_connectivity_norm", "Flop Connectivity",
@@ -1127,7 +646,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "0.0 (Disconnected's value) before the flop.",
         kind="categorical", value_table=_FLOP_CONNECTIVITY_VALUES, group="Board / Flop Characteristics",
     ),
-    *_FLOP_CONNECTIVITY_CHILDREN,
     _FLOP_CONNECTED_FAMILY_SPEC,
 
     FeatureSpec(
@@ -1154,7 +672,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "before the flop.",
         kind="categorical", value_table=_FLOP_WETNESS_VALUES, group="Board / Flop Characteristics",
     ),
-    *_FLOP_WETNESS_CHILDREN,
 
     FeatureSpec(
         "flop_dynamism_norm", "Flop Static vs Dynamic",
@@ -1171,7 +688,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "flop is dealt; defaults to 0.0 (Static's value) before the flop.",
         kind="categorical", value_table=_FLOP_DYNAMISM_VALUES, group="Board / Flop Characteristics",
     ),
-    *_FLOP_DYNAMISM_CHILDREN,
 
     FeatureSpec(
         "num_overcards_norm", "Board Overcards",
@@ -1182,7 +698,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "highest rank regardless of this player's own hole cards.",
         kind="categorical", value_table=_OVERCARDS_VALUES, group="Made Hand Features",
     ),
-    *_OVERCARDS_CHILDREN,
 
     # Hand-vs-board heuristics: not mutually exclusive as a group, so unlike
     # the categorical features above these aren't organized as a one-hot
@@ -1210,19 +725,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "(2 or more distinct ranks would -- approximates a true open-ended draw; also "
         "covers double-gutshots, which have similar equity). Always 0 preflop.",
         kind="categorical", value_table=_STRAIGHT_DRAW_VALUES, group="Draw Features",
-    ),
-    _linked_bool(
-        "has_gutshot", "Gutshot",
-        "1 if exactly 1 distinct rank would complete a straight (an inside/gutshot "
-        "draw), else 0.",
-        "straight_draw_norm", 1,
-    ),
-    _linked_bool(
-        "has_open_ended_straight_draw", "Open Ended Straight Draw",
-        "1 if 2 or more distinct ranks would complete a straight (approximates a true "
-        "open-ended draw; also covers double-gutshots, which have similar equity), "
-        "else 0.",
-        "straight_draw_norm", 2,
     ),
 
     FeatureSpec(
@@ -1255,7 +757,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "on small samples.",
         kind="continuous", value_table=_OPP_VPIP_VALUES, group="Opponent Tendency Features",
     ),
-    *_OPP_VPIP_CHILDREN,
 
     FeatureSpec(
         "opp_pfr_norm", "Opponent PFR (Table Average)",
@@ -1264,7 +765,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "session. Shrunk toward a neutral 0.5 on small samples.",
         kind="continuous", value_table=_OPP_PFR_VALUES, group="Opponent Tendency Features",
     ),
-    *_OPP_PFR_CHILDREN,
 
     FeatureSpec(
         "opp_three_bet_norm", "Opponent 3-Bet % (Table Average)",
@@ -1273,7 +773,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "so this session. Shrunk toward a neutral 0.5 on small samples.",
         kind="continuous", value_table=_OPP_THREE_BET_VALUES, group="Opponent Tendency Features",
     ),
-    *_OPP_THREE_BET_CHILDREN,
 
     FeatureSpec(
         "opp_fold_to_three_bet_norm", "Opponent Fold to 3-Bet % (Table Average)",
@@ -1282,7 +781,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "session. Shrunk toward a neutral 0.5 on small samples.",
         kind="continuous", value_table=_OPP_FOLD_TO_THREE_BET_VALUES, group="Opponent Tendency Features",
     ),
-    *_OPP_FOLD_TO_THREE_BET_CHILDREN,
 
     FeatureSpec(
         "opp_aggression_freq_norm", "Opponent Postflop Aggression Frequency (Table Average)",
@@ -1291,7 +789,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "actions taken this session. Shrunk toward a neutral 0.5 on small samples.",
         kind="continuous", value_table=_OPP_AGGRESSION_FREQ_VALUES, group="Opponent Tendency Features",
     ),
-    *_OPP_AGGRESSION_FREQ_CHILDREN,
 
     FeatureSpec(
         "opp_fold_vs_bet_norm", "Opponent Fold vs Bet, Postflop (Table Average)",
@@ -1300,7 +797,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "session. Shrunk toward a neutral 0.5 on small samples.",
         kind="continuous", value_table=_OPP_FOLD_VS_BET_VALUES, group="Opponent Tendency Features",
     ),
-    *_OPP_FOLD_VS_BET_CHILDREN,
 ]
 
 FEATURE_NAMES = [spec.key for spec in FEATURE_SPECS]
@@ -1590,13 +1086,12 @@ def _hole_hand_grid_features(hole: list[Card], street: int) -> dict:
 
 
 _NO_FLOP_TEXTURE = {
-    "flop_suit_texture_norm": 0.0, "rainbow_flop": 0.0, "flush_draw_flop": 0.0, "monotone_flop": 0.0,
-    "flop_pairing_texture_norm": 0.0, "unpaired_flop": 0.0, "paired_flop": 0.0, "tripled_flop": 0.0,
-    "flop_connectivity_norm": 0.0, "disconnected_flop": 0.0, "connected_flop": 0.0,
-    "connected_no_straight_draw_flop": 0.0, "connected_straight_draw_flop": 0.0,
+    "flop_suit_texture_norm": 0.0,
+    "flop_pairing_texture_norm": 0.0,
+    "flop_connectivity_norm": 0.0, "connected_flop": 0.0,
     "oesd_possible_flop": 0.0,
-    "flop_wetness_norm": 0.0, "dry_flop": 0.0, "wet_flop": 0.0,
-    "flop_dynamism_norm": 0.0, "static_flop": 0.0, "dynamic_flop": 0.0,
+    "flop_wetness_norm": 0.0,
+    "flop_dynamism_norm": 0.0,
 }
 
 
@@ -1615,7 +1110,7 @@ def _flop_texture(board: list[Card], hole: list[Card]) -> dict:
 
     suit_counts = Counter(c.suit for c in flop)
     max_suit_count = max(suit_counts.values())
-    monotone, two_tone, rainbow = max_suit_count == 3, max_suit_count == 2, max_suit_count == 1
+    monotone, two_tone = max_suit_count == 3, max_suit_count == 2
     suit_index = 2 if monotone else (1 if two_tone else 0)
 
     rank_counts = Counter(c.rank for c in flop)
@@ -1654,76 +1149,22 @@ def _flop_texture(board: list[Card], hole: list[Card]) -> dict:
 
     return {
         "flop_suit_texture_norm": suit_index / 2.0,
-        "rainbow_flop": float(rainbow),
-        "flush_draw_flop": float(two_tone),
-        "monotone_flop": float(monotone),
         "flop_pairing_texture_norm": pairing_index / 2.0,
-        "unpaired_flop": float(unpaired),
-        "paired_flop": float(paired),
-        "tripled_flop": float(tripled),
         "flop_connectivity_norm": connectivity_index / 2.0,
-        "disconnected_flop": float(connectivity_index == 0),
         "connected_flop": float(connectivity_index != 0),
-        "connected_no_straight_draw_flop": float(connectivity_index == 1),
-        "connected_straight_draw_flop": float(connectivity_index == 2),
         "oesd_possible_flop": float(oesd_possible),
         "flop_wetness_norm": float(wet),
-        "dry_flop": float(not wet),
-        "wet_flop": float(wet),
         "flop_dynamism_norm": float(dynamic),
-        "static_flop": float(not dynamic),
-        "dynamic_flop": float(dynamic),
     }
 
 
-_SUIT_CONNECTION_KEYS = tuple(spec.key for spec in _SUIT_CONNECTION_CHILDREN)  # n=1..5
-
-
 def _suit_connection_features(hole: list[Card], board: list[Card]) -> dict:
-    """suit_connection_index and its one-hot children (see that FeatureSpec):
-    the most cards of any single suit among hole + the *current* board,
-    capped at 5 -- unlike _flop_texture's suit family, this isn't frozen at
-    the flop, so it's computed fresh from whatever board extract_features
-    was called with (3, 4, or 5 cards -- or 0, preflop)."""
+    """suit_connection_index: the most cards of any single suit among hole +
+    the *current* board, capped at 5 -- unlike _flop_texture's suit family,
+    this isn't frozen at the flop, so it's computed fresh from whatever board
+    extract_features was called with (3, 4, or 5 cards -- or 0, preflop)."""
     count = min(max(Counter(c.suit for c in hole + board).values()), 5)
-    values = {"suit_connection_index": count / 5.0}
-    for i, key in enumerate(_SUIT_CONNECTION_KEYS):
-        values[key] = float(count == i + 1)
-    return values
-
-
-# Precomputed, call-invariant key names for extract_features' per-rank and
-# per-bucket one-hot loops below. These are exactly the same FeatureSpec keys
-# already built above (e.g. _HOLE_HIGH_CARD_CHILDREN) -- just indexed by
-# position here instead of being rebuilt from an f-string (and, for the rank
-# ones, a `_rank_key` dict lookup) on every single extract_features call.
-# extract_features runs once per in-game decision, so this recomputation was
-# previously one of the hottest code paths in the whole simulation.
-_HAND_CATEGORY_KEYS = tuple(spec.key for spec in _HAND_CATEGORY_CHILDREN)  # index 0..23, see _hand_category_bucket
-_HOLE_HIGH_CARD_KEYS = tuple(spec.key for spec in _HOLE_HIGH_CARD_CHILDREN)  # rank 2..14
-_SHARED_HIGH_CARD_KEYS = tuple(spec.key for spec in _SHARED_HIGH_CARD_CHILDREN)  # rank 2..14
-_CONNECTIVITY_GAP_KEYS = tuple(spec.key for spec in _CONNECTIVITY_CHILDREN[1:-1])  # gap 1..CAP-1
-_CONNECTIVITY_GAP_PLUS_KEY = _CONNECTIVITY_CHILDREN[-1].key
-_HOLE_CATEGORY_KEYS = tuple(spec.key for spec in _HOLE_CATEGORY_CHILDREN)  # index 0..11, see _hole_hand_category
-_ACTIVE_PLAYERS_KEYS = tuple(spec.key for spec in _ACTIVE_PLAYERS_CHILDREN)  # n=2..6
-_RAISES_KEYS = tuple(spec.key for spec in _RAISES_CHILDREN[:3])  # r=0..2 ("raises_is_3plus" is already a literal)
-_OVERCARDS_KEYS = tuple(spec.key for spec in _OVERCARDS_CHILDREN)  # n=0..5
-
-_BUCKET_KEY_FAMILIES = {
-    "call_amount_norm": _CALL_SIZE_CHILDREN,
-    "spr_norm": _SPR_CHILDREN,
-    "position_norm": _POSITION_CHILDREN,
-    "stack_depth_norm": _STACK_DEPTH_CHILDREN,
-    "opp_vpip_norm": _OPP_VPIP_CHILDREN,
-    "opp_pfr_norm": _OPP_PFR_CHILDREN,
-    "opp_three_bet_norm": _OPP_THREE_BET_CHILDREN,
-    "opp_fold_to_three_bet_norm": _OPP_FOLD_TO_THREE_BET_CHILDREN,
-    "opp_aggression_freq_norm": _OPP_AGGRESSION_FREQ_CHILDREN,
-    "opp_fold_vs_bet_norm": _OPP_FOLD_VS_BET_CHILDREN,
-}
-_BUCKET_KEYS_BY_FEATURE = {
-    name: tuple(spec.key for spec in children) for name, children in _BUCKET_KEY_FAMILIES.items()
-}
+    return {"suit_connection_index": count / 5.0}
 
 
 def extract_features(sit: Situation) -> np.ndarray:
@@ -1784,59 +1225,6 @@ def extract_features(sit: Situation) -> np.ndarray:
         "opp_aggression_freq_norm": _clip01(sit.opp_aggression_freq),
         "opp_fold_vs_bet_norm": _clip01(sit.opp_fold_vs_bet),
     }
-    for i, seat_role_name in enumerate(SEAT_ROLES):
-        values[_SEAT_ROLE_KEYS[seat_role_name]] = float(role_index == i)
-
-    # Exact one-hot indicators for hand_category_norm's 24 sub-buckets.
-    for i, key in enumerate(_HAND_CATEGORY_KEYS):
-        values[key] = float(hand_category_bucket == i)
-
-    for i, r in enumerate(range(2, 15)):
-        values[_HOLE_HIGH_CARD_KEYS[i]] = float(hole_high_card_rank == r)
-        values[_SHARED_HIGH_CARD_KEYS[i]] = float(shared_high_card_rank == r)
-
-    values["hole_paired"] = float(gap == 0)
-    for i, g in enumerate(range(1, CONNECTIVITY_GAP_CAP)):
-        values[_CONNECTIVITY_GAP_KEYS[i]] = float(gap == g)
-    values[_CONNECTIVITY_GAP_PLUS_KEY] = float(gap == CONNECTIVITY_GAP_CAP)
-
-    for i in range(len(_HOLE_CATEGORY_KEYS)):
-        values[_HOLE_CATEGORY_KEYS[i]] = float(hole_category == i)
-
-    for i, key in enumerate(("is_preflop", "is_flop", "is_turn", "is_river")):
-        values[key] = float(sit.street == i)
-
-    values["has_gutshot"] = float(straight_draw_bucket == 1)
-    values["has_open_ended_straight_draw"] = float(straight_draw_bucket == 2)
-
-    for i, n in enumerate(range(2, 7)):
-        values[_ACTIVE_PLAYERS_KEYS[i]] = float(sit.num_active == n)
-
-    for i, n in enumerate(range(6)):
-        values[_OVERCARDS_KEYS[i]] = float(num_overcards == n)
-
-    for i, r in enumerate(range(0, 3)):
-        values[_RAISES_KEYS[i]] = float(sit.num_raises_this_street == r)
-    values["raises_is_3plus"] = float(sit.num_raises_this_street >= 3)
-
-    for i, key in enumerate(("is_unraised_pot", "is_single_raised_pot", "is_3bet_pot", "is_4bet_plus_pot")):
-        values[key] = float(pot_type_raises == i)
-
-    # Nearest-representative-point bucket indicators for genuinely continuous features.
-    for feature_key, raw_value in (
-        ("call_amount_norm", call_amount_norm), ("spr_norm", spr_norm),
-        ("position_norm", position_norm), ("stack_depth_norm", stack_depth_norm),
-        ("opp_vpip_norm", values["opp_vpip_norm"]), ("opp_pfr_norm", values["opp_pfr_norm"]),
-        ("opp_three_bet_norm", values["opp_three_bet_norm"]),
-        ("opp_fold_to_three_bet_norm", values["opp_fold_to_three_bet_norm"]),
-        ("opp_aggression_freq_norm", values["opp_aggression_freq_norm"]),
-        ("opp_fold_vs_bet_norm", values["opp_fold_vs_bet_norm"]),
-    ):
-        bucket_keys = _BUCKET_KEYS_BY_FEATURE[feature_key]
-        nearest = _nearest_bucket_index(raw_value, len(bucket_keys))
-        for i, key in enumerate(bucket_keys):
-            values[key] = float(i == nearest)
-
     values.update(_hand_vs_board_heuristics(sit.hole, sit.board, hand))
     values.update(_hole_hand_grid_features(sit.hole, sit.street))
     values.update(_flop_texture(sit.board, sit.hole))

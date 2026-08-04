@@ -146,8 +146,8 @@ def _build_dataframe(checkpoint_path: str, max_samples: int) -> tuple[pd.DataFra
     """(df, raw_features): df has one row per (subsampled) reservoir entry
     -- one Categorical column per *displayed* feature (its bucket label, in
     the feature's own natural value order -- see
-    cfr_features.bucket_categories; a linked child like has_pair gets no
-    column of its own, since its parent hand_category_norm already
+    cfr_features.bucket_categories; a linked child like hole_hand_grid_y_norm
+    gets no column of its own, since its parent hole_hand_grid_x_norm already
     represents the same concept -- see cfr_features.display_feature_keys)
     and one float column per action category (the *current* net's
     regret-matching probability for that action, given that row's own
