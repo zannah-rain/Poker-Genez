@@ -417,7 +417,7 @@ class TestFlopTexture:
         board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kc")]
         one = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("2s")], board=board))
         two = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("4c")], board=board))
-        assert one["flush_draw"] == 1.0
+        assert one["suit_connection_index"] == pytest.approx(4 / 5)  # flush draw: 4 cards of one suit
         # Both hole cards + all 3 board cards = a made flush -- King high
         # (the board's own Kc), since that's the flush's own highest card.
         assert two["hand_category_norm"] == pytest.approx(21 / 25)  # King High Flush
@@ -622,14 +622,14 @@ class TestHandVsBoardHeuristics:
         hole = [Card.from_str("Ah"), Card.from_str("9h")]
         board = [Card.from_str("7h"), Card.from_str("4h"), Card.from_str("2c")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["flush_draw"] == 1.0
+        assert values["suit_connection_index"] == pytest.approx(4 / 5)  # flush draw: 4 cards of one suit
         assert values["nuts_flush_draw"] == 1.0
 
     def test_flush_draw_without_the_nut_card(self):
         hole = [Card.from_str("Qh"), Card.from_str("9h")]
         board = [Card.from_str("7h"), Card.from_str("4h"), Card.from_str("2c")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["flush_draw"] == 1.0
+        assert values["suit_connection_index"] == pytest.approx(4 / 5)  # flush draw: 4 cards of one suit
         assert values["nuts_flush_draw"] == 0.0
 
     def test_open_ended_straight_draw_is_the_top_bucket(self):
@@ -654,7 +654,7 @@ class TestHandVsBoardHeuristics:
         hole = [Card.from_str("6h"), Card.from_str("7h")]
         board = [Card.from_str("8h"), Card.from_str("9h"), Card.from_str("2c")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["flush_draw"] == 1.0
+        assert values["suit_connection_index"] == pytest.approx(4 / 5)  # flush draw: 4 cards of one suit
         assert values["straight_draw_norm"] > 0.0
         assert values["combo_draw"] == 1.0
 

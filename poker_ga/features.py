@@ -577,12 +577,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
 
     # Standalone booleans: not tied to a specific value of any other feature.
     FeatureSpec(
-        "flush_draw", "Flush Draw",
-        "1 if exactly 4 of the hole+board cards share one suit (a live one-card "
-        "flush draw), else 0. Always 0 preflop, since a flush needs 5+ cards.",
-        group="Draw Features",
-    ),
-    FeatureSpec(
         "hole_suited", "Suited Hole Cards", "1 if both hole cards share a suit, else 0.",
         group="Hole Card Characteristics",
     ),
@@ -1203,7 +1197,6 @@ def extract_features(sit: Situation) -> np.ndarray:
         "hole_high_card_norm": (hole_high_card_rank - 2) / 12.0,
         "shared_high_card_norm": ((shared_high_card_rank - 2) / 12.0) if shared_high_card_rank else 0.0,
         "num_overcards_norm": num_overcards / 5.0,
-        "flush_draw": float(hand["flush_draw"]),
         "straight_draw_norm": straight_draw_bucket / 2.0,
         "hole_suited": hole_suited,
         "hole_connectivity": hole_connectivity,
