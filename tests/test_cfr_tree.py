@@ -240,3 +240,53 @@ class TestIsAggressorReflectsThePreviousStreet:
 
         assert captured["previous_street_aggressor"] == 1
         assert captured["street"] == 1
+
+
+class TestPositionRelativeToNonFoldedPlayers:
+    """features.Situation.position/num_seats_this_street (and so
+    position_norm) should reflect only players still in the hand at the
+    moment of this decision -- not `order`'s fixed street-start lineup --
+    since a player who was dealt a late seat but finds everyone ahead of
+    them has already folded is, in every way that matters to the decision
+    in front of them, acting early, not late."""
+
+    def _make_state(self, num_seats=4):
+        seats = [SeatState(player=Player(player_id=i, genome=None), stack=200.0) for i in range(num_seats)]
+        for s in seats:
+            s.hole = [Card.from_str("Ah"), Card.from_str("Kh")]
+        deck = Deck(rng=_np_rng_to_random(np.random.default_rng(0)))
+        return cfr_tree._HandState(
+            seats=seats, board=[], deck=deck, button_idx=0, config=GameConfig(),
+            starting_stacks=[200.0] * num_seats,
+        )
+
+    def test_folded_seats_are_excluded_from_position_and_count(self):
+        # order=[0, 1, 2, 3] at street start, but seats 0 and 2 have since
+        # folded -- seat 1 should read as acting first (position 0.0) of 2
+        # remaining, not second (position 1/3) of the original 4.
+        state = self._make_state(num_seats=4)
+        state.seats[0].folded = True
+        state.seats[2].folded = True
+
+        seat1_situation = cfr_tree._build_situation(
+            state, street=1, order=[0, 1, 2, 3], i=1, pot=10.0, call_amount=0.0,
+            num_raises=0, preflop_raise_count=0, previous_street_aggressor=None, raiser_seats=frozenset(),
+        )
+        seat3_situation = cfr_tree._build_situation(
+            state, street=1, order=[0, 1, 2, 3], i=3, pot=10.0, call_amount=0.0,
+            num_raises=0, preflop_raise_count=0, previous_street_aggressor=None, raiser_seats=frozenset(),
+        )
+
+        assert seat1_situation.num_seats_this_street == 2
+        assert seat1_situation.position == 0
+        assert seat3_situation.num_seats_this_street == 2
+        assert seat3_situation.position == 1
+
+    def test_no_folds_matches_the_full_street_start_order(self):
+        state = self._make_state(num_seats=4)
+        situation = cfr_tree._build_situation(
+            state, street=1, order=[0, 1, 2, 3], i=2, pot=10.0, call_amount=0.0,
+            num_raises=0, preflop_raise_count=0, previous_street_aggressor=None, raiser_seats=frozenset(),
+        )
+        assert situation.num_seats_this_street == 4
+        assert situation.position == 2

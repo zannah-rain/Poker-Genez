@@ -160,7 +160,7 @@ def betting_round(
         if seats[i].stack > call_amount + 1e-9 and num_raises < max_raises_per_street:
             legal_actions.append(BET_RAISE)
 
-        position = order.index(i)
+        position = non_folded.index(i)
         opponent_ids = [seats[j].player.player_id for j in non_folded if j != i]
         opp_features = compute_opponent_features(opp_model, opponent_ids)
         situation = Situation(
@@ -172,7 +172,7 @@ def betting_round(
             my_stack=seats[i].stack,
             effective_stack=_effective_stack(seats, i, non_folded),
             position=position,
-            num_seats_this_street=len(order),
+            num_seats_this_street=len(non_folded),
             seat_index=i,
             button_idx=button_idx,
             num_seats_total=len(seats),

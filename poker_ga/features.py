@@ -526,9 +526,14 @@ FEATURE_SPECS: list[FeatureSpec] = [
     ),
 
     FeatureSpec(
-        "position_norm", "Table Position",
+        "position_norm", "In/Out of Position",
         "How late this player acts in the current street's action order, from "
-        "0.0 (acts first) to 1.0 (acts last).",
+        "0.0 (acts first) to 1.0 (acts last) -- relative only to players who "
+        "haven't folded yet, not this player's fixed seat at the table (see "
+        "Starting Seat Position for that): a player who was dealt into a late "
+        "seat but finds everyone ahead of them has folded reads as acting "
+        "early here, since that's what actually determines their own "
+        "information/leverage at the moment of this decision.",
         kind="continuous", value_table=_POSITION_VALUES, group="Table & Game State Features",
     ),
 
