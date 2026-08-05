@@ -49,6 +49,24 @@ class FeatureSpec:
     # family, and standalone booleans; linked children inherit their
     # parent's group instead of repeating it (see group_of() below).
     group: str | None = None
+    # True for a feature that reads as MASKED in some situations (e.g. a
+    # draw-shape feature at the river, once no more cards are coming to
+    # complete or miss a draw) instead of a real 0-1 reading -- see MASKED's
+    # own docstring. Lets cfr_features.py's generic bucket_label/
+    # bucket_categories/bucket_labels recognize and label that reading
+    # instead of nearest-point-matching it into whichever real bucket
+    # happens to sit closest to a negative number.
+    maskable: bool = False
+
+
+# Sentinel for a `maskable` FeatureSpec's reading whenever the situation
+# makes that feature inapplicable (e.g. a draw-shape feature at the river,
+# once no more cards are coming, or the Exact Hole Hand grid postflop, once
+# there's a board to read instead of just the two hole cards) -- deliberately
+# outside the 0-1 range every real feature value lives in, rather than
+# reusing 0.0 (a real, if extreme, value for most features), so a masked
+# reading can never be mistaken for a real one.
+MASKED = -1.0
 
 
 # Fixed, human-chosen reading order for report sections -- not derived from
@@ -118,11 +136,6 @@ _HOLE_CATEGORY_LABELS = (
 HOLE_HAND_GRID_RANKS = tuple(range(14, 1, -1))  # 14 (Ace), 13 (King), ..., 2
 HOLE_HAND_GRID_SIZE = len(HOLE_HAND_GRID_RANKS)
 HOLE_HAND_GRID_RANK_LABELS = tuple(RANKS[r - 2] for r in HOLE_HAND_GRID_RANKS)  # "A", "K", ..., "2"
-# Sentinel for hole_hand_grid_x_norm/y_norm outside preflop (see
-# extract_features) -- deliberately outside the 0-1 range every other
-# feature lives in, rather than reusing 0.0 (Ace's own real grid position),
-# so a masked reading can never be mistaken for a real hand.
-HOLE_HAND_GRID_MASKED = -1.0
 
 
 def _hole_hand_grid_indices(hole: list[Card]) -> tuple[int, int]:
@@ -489,8 +502,9 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "memorize a chart against all 169 exact starting hands the way real players "
         "do preflop, not against the far larger space of postflop "
         "hole-cards-vs-board combinations, so this is masked to -1.0 "
-        "(features.HOLE_HAND_GRID_MASKED) outside preflop.",
+        "(features.MASKED) outside preflop.",
         kind="categorical", value_table=_HOLE_HAND_GRID_VALUES, group="Hole Card Characteristics",
+        maskable=True,
     ),
     FeatureSpec(
         "hole_hand_grid_y_norm", "Exact Hole Hand (Row)",
@@ -498,7 +512,7 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "see hole_hand_grid_x_norm for the full explanation, layout, and preflop-only "
         "masking.",
         kind="categorical", value_table=_HOLE_HAND_GRID_VALUES, group="Hole Card Characteristics",
-        linked_to="hole_hand_grid_x_norm",
+        linked_to="hole_hand_grid_x_norm", maskable=True,
     ),
 
     FeatureSpec(
@@ -616,12 +630,16 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "the current board (however many board cards are out so far), capped at "
         "5 and normalized as count / 5. Unlike flop_suit_texture_norm above, this "
         "is never frozen -- it's recomputed from the *current* board every time, "
-        "so it keeps updating on the turn and river as more of this player's suit "
+        "so it keeps updating on the turn as more of this player's suit "
         "potentially shows up. Preflop (2 hole cards only) it's just whether "
         "they're suited: 1 card if not, 2 if so. Once the flop is out, pigeonhole "
         "guarantees at least 2 (5 cards split across 4 suits), rising toward the "
-        "5-card cap as a flush comes together.",
+        "5-card cap as a flush comes together. Masked to -1.0 (features.MASKED) "
+        "on the river: by then a made flush is already fully captured by "
+        "hand_category_norm, and 'how many cards of one suit' stops being a "
+        "*draw* signal once there's no next card left to complete one.",
         kind="categorical", value_table=_SUIT_CONNECTION_VALUES, group="Board / Flop Characteristics",
+        maskable=True,
     ),
 
     FeatureSpec(
@@ -707,14 +725,16 @@ FEATURE_SPECS: list[FeatureSpec] = [
     FeatureSpec(
         "combo_draw", "Combo Draw",
         "1 if this player has both a flush draw and a straight draw (open-ended or "
-        "gutshot) at the same time, else 0.",
-        group="Draw Features",
+        "gutshot) at the same time, else 0. Masked to -1.0 (features.MASKED) on the "
+        "river, once no next card is left to complete either draw.",
+        group="Draw Features", maskable=True,
     ),
     FeatureSpec(
         "nuts_flush_draw", "Nuts Flush Draw",
         "1 if this player has a flush draw and holds the Ace of the drawing suit in "
-        "their hole cards, else 0.",
-        group="Draw Features",
+        "their hole cards, else 0. Masked to -1.0 (features.MASKED) on the river, "
+        "once no next card is left to complete the draw.",
+        group="Draw Features", maskable=True,
     ),
 
     FeatureSpec(
@@ -722,8 +742,11 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "Straight-draw strength: 0 if no single rank would complete a straight, 0.5 "
         "for a Gutshot (exactly 1 distinct rank would), 1.0 for an Open Ended draw "
         "(2 or more distinct ranks would -- approximates a true open-ended draw; also "
-        "covers double-gutshots, which have similar equity). Always 0 preflop.",
+        "covers double-gutshots, which have similar equity). Always 0 preflop; masked "
+        "to -1.0 (features.MASKED) on the river, once no next card is left to "
+        "complete a straight.",
         kind="categorical", value_table=_STRAIGHT_DRAW_VALUES, group="Draw Features",
+        maskable=True,
     ),
 
     # Opponent-tendency features: observed HUD-style stats accumulated over
@@ -852,13 +875,18 @@ def _clip01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
-def _hand_vs_board_heuristics(hole: list[Card], hand: dict) -> dict:
+def _hand_vs_board_heuristics(hole: list[Card], hand: dict, street: int) -> dict:
     """Draw-shape heuristics relative to the board that don't fit
     hand_category_norm's ordinal scale (pair/set/straight/flush strength
     relative to the board, and now also no-made-hand high-card strength,
     are folded in there instead -- see _hand_category_bucket). Not mutually
     exclusive as a group, so these are standalone booleans rather than a
-    one-hot family."""
+    one-hot family. Masked to MASKED on the river (street == 3): a draw is
+    by definition unresolved (neither made nor whiffed yet), which is no
+    longer a meaningful state once there's no next card left to complete it."""
+    if street == 3:
+        return {"nuts_flush_draw": MASKED, "combo_draw": MASKED}
+
     flush_draw = hand["flush_draw"]
     draw_suit = hand["flush_draw_suit"]
     nuts_flush_draw = flush_draw and any(c.suit == draw_suit and c.rank == 14 for c in hole)
@@ -1044,14 +1072,14 @@ def _hand_category_bucket(hole: list[Card], board: list[Card], cat: int, hand: d
 
 
 def _hole_hand_grid_features(hole: list[Card], street: int) -> dict:
-    """hole_hand_grid_x_norm/y_norm: masked to HOLE_HAND_GRID_MASKED outside
-    preflop (street != 0) -- the hole cards themselves don't change, but a
+    """hole_hand_grid_x_norm/y_norm: masked to MASKED outside preflop
+    (street != 0) -- the hole cards themselves don't change, but a
     human can realistically memorize a chart against all 169 exact
     preflop combos, not against the far larger space of postflop
     hole-cards-vs-board combinations, so the network shouldn't be handed
     this exact an identity once there's a board to read instead."""
     if street != 0:
-        return {"hole_hand_grid_x_norm": HOLE_HAND_GRID_MASKED, "hole_hand_grid_y_norm": HOLE_HAND_GRID_MASKED}
+        return {"hole_hand_grid_x_norm": MASKED, "hole_hand_grid_y_norm": MASKED}
     row, col = _hole_hand_grid_indices(hole)
     denom = HOLE_HAND_GRID_SIZE - 1
     return {"hole_hand_grid_x_norm": col / denom, "hole_hand_grid_y_norm": row / denom}
@@ -1130,11 +1158,15 @@ def _flop_texture(board: list[Card], hole: list[Card]) -> dict:
     }
 
 
-def _suit_connection_features(hole: list[Card], board: list[Card]) -> dict:
+def _suit_connection_features(hole: list[Card], board: list[Card], street: int) -> dict:
     """suit_connection_index: the most cards of any single suit among hole +
     the *current* board, capped at 5 -- unlike _flop_texture's suit family,
     this isn't frozen at the flop, so it's computed fresh from whatever board
-    extract_features was called with (3, 4, or 5 cards -- or 0, preflop)."""
+    extract_features was called with (3, 4, or 5 cards -- or 0, preflop).
+    Masked to MASKED on the river (street == 3) -- see this feature's
+    FeatureSpec description."""
+    if street == 3:
+        return {"suit_connection_index": MASKED}
     count = min(max(Counter(c.suit for c in hole + board).values()), 5)
     return {"suit_connection_index": count / 5.0}
 
@@ -1175,7 +1207,7 @@ def extract_features(sit: Situation) -> np.ndarray:
         "hole_high_card_norm": (hole_high_card_rank - 2) / 12.0,
         "shared_high_card_norm": ((shared_high_card_rank - 2) / 12.0) if shared_high_card_rank else 0.0,
         "num_overcards_norm": num_overcards / 5.0,
-        "straight_draw_norm": straight_draw_bucket / 2.0,
+        "straight_draw_norm": MASKED if sit.street == 3 else straight_draw_bucket / 2.0,
         "hole_suited": hole_suited,
         "hole_connectivity": hole_connectivity,
         "hole_hand_category_norm": hole_category / 11.0,
@@ -1196,9 +1228,9 @@ def extract_features(sit: Situation) -> np.ndarray:
         "opp_aggression_freq_norm": _clip01(sit.opp_aggression_freq),
         "opp_fold_vs_bet_norm": _clip01(sit.opp_fold_vs_bet),
     }
-    values.update(_hand_vs_board_heuristics(sit.hole, hand))
+    values.update(_hand_vs_board_heuristics(sit.hole, hand, sit.street))
     values.update(_hole_hand_grid_features(sit.hole, sit.street))
     values.update(_flop_texture(sit.board, sit.hole))
-    values.update(_suit_connection_features(sit.hole, sit.board))
+    values.update(_suit_connection_features(sit.hole, sit.board, sit.street))
 
     return np.array([values[spec.key] for spec in FEATURE_SPECS], dtype=np.float64)

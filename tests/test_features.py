@@ -3,7 +3,7 @@ import pytest
 
 from cards import Card
 from features import (
-    FEATURE_GROUPS, FEATURE_NAMES, FEATURE_SPECS, HOLE_HAND_GRID_MASKED, NUM_FEATURES, Situation,
+    FEATURE_GROUPS, FEATURE_NAMES, FEATURE_SPECS, MASKED, NUM_FEATURES, Situation,
     _ace_aware_span, _connectivity_label, _rank_gap,
     extract_features, group_of, hole_hand_grid_label,
 )
@@ -234,7 +234,7 @@ class TestHoleHandGridFeature:
     def test_masked_value_is_outside_the_normal_0_1_range(self):
         # A deliberately out-of-range sentinel -- 0.0 would collide with AA's
         # own real (preflop) grid position and be silently misread as it.
-        assert not (0.0 <= HOLE_HAND_GRID_MASKED <= 1.0)
+        assert not (0.0 <= MASKED <= 1.0)
 
 
 class TestHoleHandGridLabel:
@@ -657,6 +657,48 @@ class TestHandVsBoardHeuristics:
         assert values["suit_connection_index"] == pytest.approx(4 / 5)  # flush draw: 4 cards of one suit
         assert values["straight_draw_norm"] > 0.0
         assert values["combo_draw"] == 1.0
+
+
+class TestDrawFeaturesMaskedAtRiver:
+    """nuts_flush_draw/combo_draw/suit_connection_index/straight_draw_norm
+    are all draw-shape reads -- meaningless once the river's dealt and no
+    next card is left to complete or miss a draw -- so extract_features
+    masks all four to MASKED there, the same convention as
+    hole_hand_grid_x_norm/y_norm outside preflop."""
+
+    def _river_situation(self):
+        # A flop/turn flush-and-straight-draw-heavy hand, still holding a
+        # live draw (per test_combo_draw above) right up until the river
+        # card either completes it or doesn't -- exactly the case where
+        # unmasked values would otherwise read as real (nonzero) draws.
+        hole = [Card.from_str("6h"), Card.from_str("7h")]
+        board = [
+            Card.from_str("8h"), Card.from_str("9h"), Card.from_str("2c"),
+            Card.from_str("3d"), Card.from_str("4s"),
+        ]
+        return make_situation(hole=hole, board=board, street=3)
+
+    def test_nuts_flush_draw_masked_at_river(self):
+        assert values_by_key(self._river_situation())["nuts_flush_draw"] == MASKED
+
+    def test_combo_draw_masked_at_river(self):
+        assert values_by_key(self._river_situation())["combo_draw"] == MASKED
+
+    def test_suit_connection_index_masked_at_river(self):
+        assert values_by_key(self._river_situation())["suit_connection_index"] == MASKED
+
+    def test_straight_draw_norm_masked_at_river(self):
+        assert values_by_key(self._river_situation())["straight_draw_norm"] == MASKED
+
+    def test_not_masked_on_the_turn(self):
+        hole = [Card.from_str("6h"), Card.from_str("7h")]
+        board = [Card.from_str("8h"), Card.from_str("9h"), Card.from_str("2c"), Card.from_str("3d")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=2))
+        assert values["nuts_flush_draw"] != MASKED
+        assert values["combo_draw"] != MASKED
+        assert values["suit_connection_index"] != MASKED
+        assert values["straight_draw_norm"] != MASKED
+
 
 class TestOvercardsFeature:
     def test_zero_overcards_preflop(self):

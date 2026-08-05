@@ -11,10 +11,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from features import FEATURE_NAMES, FEATURE_SPECS, extract_features
+from features import FEATURE_NAMES, FEATURE_SPECS, MASKED, extract_features
 
 _INDEX_BY_KEY: dict[str, int] = {key: i for i, key in enumerate(FEATURE_NAMES)}
 _SPEC_BY_KEY = {spec.key: spec for spec in FEATURE_SPECS}
+
+# bucket_label/bucket_categories/bucket_labels' shared label for a
+# `maskable` feature's features.MASKED reading -- e.g. a draw-shape feature
+# on the river, once no next card is left to complete or miss it.
+MASKED_LABEL = "N/A"
 
 # Opponent-tendency features (opp_vpip_norm, ...) read session history
 # accumulated across many hands (see opponent_model.py) -- a single-hand CFR
@@ -61,7 +66,8 @@ def feature_description(key: str) -> str:
 
 def bucket_label(key: str, value: float) -> str:
     """Human-readable label for one raw normalized feature value -- for a
-    boolean feature, `spec.label`/f"Not {spec.label}"; otherwise
+    `maskable` feature's features.MASKED reading, MASKED_LABEL; otherwise,
+    for a boolean feature, `spec.label`/f"Not {spec.label}"; otherwise
     the label of the nearest point in the feature's own
     features.FeatureSpec.value_table (e.g. 0.33 -> "Flop" for street_norm).
     Reuses features.py's existing human-facing names for each value rather
@@ -69,6 +75,8 @@ def bucket_label(key: str, value: float) -> str:
     turn raw reservoir columns into filter/split/table values a person can
     read."""
     spec = _SPEC_BY_KEY[key]
+    if spec.maskable and value == MASKED:
+        return MASKED_LABEL
     if spec.kind == "boolean":
         return spec.label if value >= 0.5 else f"Not {spec.label}"
     points = np.array([p for p, _ in spec.value_table])
@@ -81,11 +89,17 @@ def bucket_categories(key: str) -> list[str]:
     feature, in the feature's own natural value order (e.g. "Preflop" <
     "Flop" < "Turn" < "River" for street_norm, not alphabetical) -- used to
     order a feature's buckets consistently for display/grouping rather than
-    alphabetically."""
+    alphabetically. MASKED_LABEL is appended last for a `maskable` feature,
+    since it isn't a real point on that order -- it's "this reading doesn't
+    apply here" instead."""
     spec = _SPEC_BY_KEY[key]
     if spec.kind == "boolean":
-        return [f"Not {spec.label}", spec.label]
-    return [label for _, label in spec.value_table]
+        categories = [f"Not {spec.label}", spec.label]
+    else:
+        categories = [label for _, label in spec.value_table]
+    if spec.maskable:
+        categories = categories + [MASKED_LABEL]
+    return categories
 
 
 def display_feature_keys(feature_keys: list[str] | tuple[str, ...]) -> list[str]:
@@ -119,13 +133,17 @@ def fold_child_contributions(contributions: list[tuple[str, float]]) -> list[tup
 
 def bucket_labels(key: str, values: np.ndarray) -> np.ndarray:
     """Vectorized bucket_label over a whole array of one feature's raw
-    values -- the same nearest-point/boolean logic, without a Python loop
-    per row (cfr_explorer.py calls this once per feature for the whole
+    values -- the same masked/nearest-point/boolean logic, without a Python
+    loop per row (cfr_explorer.py calls this once per feature for the whole
     loaded reservoir)."""
     spec = _SPEC_BY_KEY[key]
     if spec.kind == "boolean":
-        return np.where(values >= 0.5, spec.label, f"Not {spec.label}")
-    points = np.array([p for p, _ in spec.value_table])
-    labels = np.array([label for _, label in spec.value_table])
-    nearest = np.argmin(np.abs(values[:, None] - points[None, :]), axis=1)
-    return labels[nearest]
+        labels = np.where(values >= 0.5, spec.label, f"Not {spec.label}")
+    else:
+        points = np.array([p for p, _ in spec.value_table])
+        table_labels = np.array([label for _, label in spec.value_table])
+        nearest = np.argmin(np.abs(values[:, None] - points[None, :]), axis=1)
+        labels = table_labels[nearest]
+    if spec.maskable:
+        labels = np.where(values == MASKED, MASKED_LABEL, labels)
+    return labels

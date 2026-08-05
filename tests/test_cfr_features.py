@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 import cfr_features
+import features
 from cards import Card
 from features import FEATURE_NAMES, Situation, extract_features
 
@@ -85,6 +86,23 @@ class TestBucketLabel:
         assert cfr_features.bucket_label("hand_category_norm", 12 / 25) == "Two Pair"
         assert cfr_features.bucket_label("hand_category_norm", 1.0) == "Straight Flush"
 
+    def test_maskable_categorical_feature_masked_reading(self):
+        # straight_draw_norm is masked (features.MASKED) on the river --
+        # should read as MASKED_LABEL rather than snapping to whichever
+        # real value_table point happens to sit nearest -1.0.
+        assert cfr_features.bucket_label("straight_draw_norm", features.MASKED) == cfr_features.MASKED_LABEL
+
+    def test_maskable_boolean_feature_masked_reading(self):
+        # nuts_flush_draw is a maskable boolean -- MASKED must win out over
+        # the normal >=0.5 true/false split, not read as "Not Nuts Flush Draw".
+        assert cfr_features.bucket_label("nuts_flush_draw", features.MASKED) == cfr_features.MASKED_LABEL
+
+    def test_non_maskable_feature_ignores_negative_values(self):
+        # street_norm was never declared maskable -- a negative reading
+        # (which extract_features never actually produces for it) should
+        # still nearest-point-match rather than being treated as masked.
+        assert cfr_features.bucket_label("street_norm", -1.0) == "Preflop"
+
 
 class TestBucketLabels:
     def test_vectorized_matches_scalar_per_element(self):
@@ -98,6 +116,11 @@ class TestBucketLabels:
         labels = cfr_features.bucket_labels("hole_suited", values)
         assert list(labels) == ["Not Suited Hole Cards", "Suited Hole Cards", "Suited Hole Cards", "Not Suited Hole Cards"]
 
+    def test_maskable_feature_vectorized(self):
+        values = np.array([0.0, 0.5, 1.0, features.MASKED])
+        labels = cfr_features.bucket_labels("straight_draw_norm", values)
+        assert list(labels) == ["No Straight Draw", "Gutshot", "Open Ended Straight Draw", cfr_features.MASKED_LABEL]
+
 
 class TestBucketCategories:
     def test_categorical_order_matches_value_table_not_alphabetical(self):
@@ -110,6 +133,22 @@ class TestBucketCategories:
         values = np.array([0.0, 1 / 3, 2 / 3, 1.0, 0.1, 0.9])
         categories = set(cfr_features.bucket_categories("street_norm"))
         for label in cfr_features.bucket_labels("street_norm", values):
+            assert label in categories
+
+    def test_maskable_feature_appends_masked_label_last(self):
+        assert cfr_features.bucket_categories("straight_draw_norm") == [
+            "No Straight Draw", "Gutshot", "Open Ended Straight Draw", cfr_features.MASKED_LABEL,
+        ]
+
+    def test_maskable_boolean_feature_appends_masked_label_last(self):
+        assert cfr_features.bucket_categories("nuts_flush_draw") == [
+            "Not Nuts Flush Draw", "Nuts Flush Draw", cfr_features.MASKED_LABEL,
+        ]
+
+    def test_every_bucket_label_output_is_a_valid_category_including_masked(self):
+        values = np.array([0.0, 0.5, 1.0, features.MASKED])
+        categories = set(cfr_features.bucket_categories("straight_draw_norm"))
+        for label in cfr_features.bucket_labels("straight_draw_norm", values):
             assert label in categories
 
 

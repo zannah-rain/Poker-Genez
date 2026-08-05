@@ -50,7 +50,7 @@ import cfr_reservoir
 import strategy
 # Named imports, not `import features` -- _build_dataframe already uses
 # `features` as a local variable name for the raw reservoir feature matrix.
-from features import HOLE_HAND_GRID_MASKED, HOLE_HAND_GRID_RANK_LABELS, HOLE_HAND_GRID_SIZE, hole_hand_grid_label
+from features import HOLE_HAND_GRID_RANK_LABELS, HOLE_HAND_GRID_SIZE, MASKED, hole_hand_grid_label
 
 DEFAULT_CHECKPOINT_PATH = os.path.join("cfr_runs", "checkpoint_latest")
 DEFAULT_MAX_SAMPLES = 1_000_000
@@ -411,7 +411,7 @@ def _hole_hand_grid_figures(df: pd.DataFrame) -> list[go.Figure]:
     always these 4, never the native 9), mean action rate over every one of
     the 169 exact starting hands, restricted to `df`'s own preflop
     (unmasked) rows -- postflop rows are dropped rather than pooled in,
-    since the mask sentinel (features.HOLE_HAND_GRID_MASKED) is a real, if
+    since the mask sentinel (features.MASKED) is a real, if
     negative, number that would otherwise corrupt the AA cell's own
     statistics. Empty list if `df` has no preflop rows (see
     _hole_hand_grid_available, checked by callers before rendering a
