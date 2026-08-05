@@ -47,6 +47,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sgd-steps-per-iteration", type=int, default=10)
     p.add_argument("--batch-size", type=int, default=2048)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument(
+        "--dropout", type=float, default=cfr_networks.DEFAULT_DROPOUT,
+        help="Advantage-net hidden-layer dropout rate (0 disables it). A no-op outside training "
+        "-- predict()/SHAP both run in eval mode, where Dropout is the identity. Ignored (with a "
+        "warning) if a checkpoint is reloaded -- see --hidden-sizes.",
+    )
+    p.add_argument(
+        "--weight-decay", type=float, default=1e-5,
+        help="Adam's L2 weight decay coefficient.",
+    )
+    p.add_argument(
+        "--grad-clip-norm", type=float, default=5.0,
+        help="Clips each _train_step's gradient to this global L2 norm before the optimizer step "
+        "(0 disables clipping) -- guards against the loss-spike failure mode described in "
+        "cfr_train.py's _train_step.",
+    )
     p.add_argument("--reservoir-capacity", type=int, default=1_000_000)
     p.add_argument(
         "--num-equity-rollouts", type=int, default=cfr_tree.DEFAULT_NUM_EQUITY_ROLLOUTS,
@@ -212,15 +228,17 @@ def _reload_checkpoint(
         loaded_config.feature_keys != config.feature_keys
         or loaded_config.hidden_sizes != config.hidden_sizes
         or loaded_config.table_size != config.table_size
+        or loaded_config.dropout != config.dropout
     ):
         print(
             "Warning: reloaded checkpoint's architecture differs from the requested "
-            "--feature-keys/--hidden-sizes/--table-size -- using the checkpoint's own "
+            "--feature-keys/--hidden-sizes/--table-size/--dropout -- using the checkpoint's own "
             "architecture instead."
         )
     config.feature_keys = loaded_config.feature_keys
     config.hidden_sizes = loaded_config.hidden_sizes
     config.table_size = loaded_config.table_size
+    config.dropout = loaded_config.dropout
 
     reservoir = None
     if os.path.exists(f"{checkpoint_path}.npz"):
@@ -288,6 +306,9 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
         sgd_steps_per_iteration=args.sgd_steps_per_iteration,
         batch_size=args.batch_size,
         lr=args.lr,
+        dropout=args.dropout,
+        weight_decay=args.weight_decay,
+        grad_clip_norm=args.grad_clip_norm,
         reservoir_capacity=args.reservoir_capacity,
         num_equity_rollouts=args.num_equity_rollouts,
         min_starting_stack_bb=args.min_starting_stack_bb,

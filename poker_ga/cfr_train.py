@@ -50,6 +50,15 @@ class DeepCFRConfig:
     sgd_steps_per_iteration: int = 200
     batch_size: int = 256
     lr: float = 1e-3
+    dropout: float = cfr_networks.DEFAULT_DROPOUT
+    weight_decay: float = 1e-5
+    # torch.nn.utils.clip_grad_norm_'s max_norm, applied every _train_step
+    # before optimizer.step() -- 0 disables clipping. Guards against exactly
+    # the failure mode _train_step's own comment describes: Adam's second-
+    # moment estimate lagging a gradient scale that's climbing (e.g. from a
+    # bad minibatch, or a distribution shift as the reservoir fills), which
+    # otherwise shows up as a sudden, hard-to-recover loss spike.
+    grad_clip_norm: float = 5.0
     reservoir_capacity: int = 200_000
     num_equity_rollouts: int = cfr_tree.DEFAULT_NUM_EQUITY_ROLLOUTS
     min_starting_stack_bb: float = cfr_tree.DEFAULT_MIN_STARTING_STACK_BB
@@ -100,9 +109,9 @@ class Trainer:
     ) -> "Trainer":
         feature_indices = cfr_features.feature_indices(config.feature_keys)
         net = initial_net if initial_net is not None else cfr_networks.AdvantageNet(
-            input_dim=len(feature_indices), hidden_sizes=config.hidden_sizes,
+            input_dim=len(feature_indices), hidden_sizes=config.hidden_sizes, dropout=config.dropout,
         )
-        optimizer = torch.optim.Adam(net.parameters(), lr=config.lr)
+        optimizer = torch.optim.Adam(net.parameters(), lr=config.lr, weight_decay=config.weight_decay)
         if initial_optimizer_state is not None:
             optimizer.load_state_dict(initial_optimizer_state)
         reservoir = initial_reservoir if initial_reservoir is not None else cfr_reservoir.ReservoirBuffer(
@@ -116,7 +125,7 @@ class Trainer:
     def net_config(self) -> cfr_networks.AdvantageNetConfig:
         return cfr_networks.AdvantageNetConfig(
             feature_keys=self.config.feature_keys, hidden_sizes=self.config.hidden_sizes,
-            table_size=self.config.table_size,
+            table_size=self.config.table_size, dropout=self.config.dropout,
         )
 
     def save(self, path: str) -> None:
@@ -160,12 +169,13 @@ class Trainer:
         being discarded -- keeping them would just push back in roughly the
         same (apparently unhelpful) direction."""
         self.net.load_state_dict(checkpoint_net.state_dict())
-        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.config.lr)
+        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.config.lr, weight_decay=self.config.weight_decay)
 
 
 def _train_step(
     net: cfr_networks.AdvantageNet, optimizer: torch.optim.Optimizer,
     reservoir: cfr_reservoir.ReservoirBuffer, batch_size: int, current_iteration: int,
+    grad_clip_norm: float = 0.0,
 ) -> float:
     features, regret_targets, legal_mask, raw_weights = reservoir.sample(batch_size)
     # Each sample's weight is the outer iteration t it was collected at
@@ -197,6 +207,8 @@ def _train_step(
 
     optimizer.zero_grad()
     loss.backward()
+    if grad_clip_norm > 0.0:
+        torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=grad_clip_norm)
     optimizer.step()
     return float(loss.item())
 
@@ -240,7 +252,10 @@ def run_iteration(trainer: Trainer, rng: np.random.Generator, iteration: int, sh
     ):
         if len(trainer.reservoir) == 0:
             break
-        losses.append(_train_step(trainer.net, trainer.optimizer, trainer.reservoir, config.batch_size, iteration))
+        losses.append(_train_step(
+            trainer.net, trainer.optimizer, trainer.reservoir, config.batch_size, iteration,
+            grad_clip_norm=config.grad_clip_norm,
+        ))
     trainer.completed_iterations = iteration
     return float(np.mean(losses)) if losses else float("nan")
 

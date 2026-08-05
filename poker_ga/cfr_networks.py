@@ -20,26 +20,60 @@ import cfr_features
 import strategy
 
 DEFAULT_HIDDEN_SIZES = (512, 512, 512)
+DEFAULT_DROPOUT = 0.1
 
 
 class AdvantageNet(nn.Module):
     def __init__(
         self, input_dim: int, hidden_sizes: tuple[int, ...] = DEFAULT_HIDDEN_SIZES,
-        output_dim: int = strategy.NUM_ACTION_CATEGORIES,
+        output_dim: int = strategy.NUM_ACTION_CATEGORIES, dropout: float = DEFAULT_DROPOUT,
     ):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_sizes = tuple(hidden_sizes)
         self.output_dim = output_dim
+        self.dropout = dropout
 
+        # Each hidden block is Linear -> LayerNorm -> ReLU -> Dropout.
+        # LayerNorm (not BatchNorm) since `predict` runs single-sample
+        # (batch size 1) forward passes during CFR traversal -- LayerNorm
+        # normalizes each sample independently and behaves identically in
+        # train/eval, unlike BatchNorm, which needs a batch to estimate
+        # statistics from and would otherwise need separate handling for
+        # single-sample inference. Dropout is a no-op once `predict`/
+        # `mean_shap_contributions_for_samples` call `self.eval()`, so it
+        # only ever regularizes the minibatch training steps in
+        # cfr_train.py's _train_step.
         layers: list[nn.Module] = []
         prev = input_dim
         for h in hidden_sizes:
             layers.append(nn.Linear(prev, h))
+            layers.append(nn.LayerNorm(h))
             layers.append(nn.ReLU())
+            if dropout > 0.0:
+                layers.append(nn.Dropout(dropout))
             prev = h
         layers.append(nn.Linear(prev, output_dim))  # linear output: this is a regression head, not a classifier
         self.model = nn.Sequential(*layers)
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        """Kaiming-normal init (fan_in, ReLU gain) for every hidden Linear
+        layer, matching the ReLU nonlinearity that follows each -- PyTorch's
+        own default Linear init assumes a Leaky ReLU-ish gain that's a
+        reasonable general default but not tuned to this network's actual
+        activation. The final output Linear (a regression head, no
+        activation after it) instead gets a small-gain Xavier init, so the
+        net's initial regret predictions start out close to 0 rather than
+        with ReLU-scaled variance that has no reason to match the true
+        target scale."""
+        hidden_linears = [m for m in self.model if isinstance(m, nn.Linear)][:-1]
+        for layer in hidden_linears:
+            nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
+            nn.init.zeros_(layer.bias)
+        output_layer = self.model[-1]
+        nn.init.xavier_normal_(output_layer.weight, gain=0.1)
+        nn.init.zeros_(output_layer.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
@@ -62,7 +96,9 @@ def clone(net: AdvantageNet) -> AdvantageNet:
     since moved on. `load_state_dict` copies tensor *values* into the new
     module's own parameters rather than aliasing the source's, so later
     training on `net` can never leak into the clone."""
-    cloned = AdvantageNet(input_dim=net.input_dim, hidden_sizes=net.hidden_sizes, output_dim=net.output_dim)
+    cloned = AdvantageNet(
+        input_dim=net.input_dim, hidden_sizes=net.hidden_sizes, output_dim=net.output_dim, dropout=net.dropout,
+    )
     cloned.load_state_dict(net.state_dict())
     cloned.eval()
     return cloned
@@ -73,6 +109,7 @@ class AdvantageNetConfig:
     feature_keys: tuple[str, ...]
     hidden_sizes: tuple[int, ...]
     table_size: int
+    dropout: float = DEFAULT_DROPOUT
 
 
 def save(net: AdvantageNet, config: AdvantageNetConfig, path: str) -> None:
@@ -86,6 +123,7 @@ def save(net: AdvantageNet, config: AdvantageNetConfig, path: str) -> None:
                 "feature_keys": list(config.feature_keys),
                 "hidden_sizes": list(config.hidden_sizes),
                 "table_size": config.table_size,
+                "dropout": config.dropout,
                 "action_categories": strategy.ACTION_CATEGORIES,
             },
             f,
@@ -161,11 +199,18 @@ def load(path: str) -> tuple[AdvantageNet, AdvantageNetConfig]:
         meta = json.load(f)
     feature_keys = tuple(meta["feature_keys"])
     hidden_sizes = tuple(meta["hidden_sizes"])
+    # .get, not meta[...]: a checkpoint saved before dropout existed simply
+    # didn't have any (an unregularized net is equivalent to dropout=0.0),
+    # not an error -- same "missing means it predates the field" treatment
+    # Trainer.load_trainer_state gives an absent trainer-state file.
+    dropout = meta.get("dropout", 0.0)
     input_dim = len(cfr_features.feature_indices(feature_keys))
 
-    net = AdvantageNet(input_dim=input_dim, hidden_sizes=hidden_sizes)
+    net = AdvantageNet(input_dim=input_dim, hidden_sizes=hidden_sizes, dropout=dropout)
     net.load_state_dict(torch.load(f"{path}.pt", map_location="cpu"))
     net.eval()
 
-    config = AdvantageNetConfig(feature_keys=feature_keys, hidden_sizes=hidden_sizes, table_size=meta["table_size"])
+    config = AdvantageNetConfig(
+        feature_keys=feature_keys, hidden_sizes=hidden_sizes, table_size=meta["table_size"], dropout=dropout,
+    )
     return net, config
