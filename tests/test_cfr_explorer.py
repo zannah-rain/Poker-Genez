@@ -28,6 +28,14 @@ def _shap_values_by_key(at: AppTest) -> dict[str, float]:
     }
 
 
+def _strip_shap_suffix(option: str) -> str:
+    """A "Add graph/table/filter/subgroup" dropdown option's plain feature
+    label, with its "  (SHAP 0.0000)" suffix (see _render_group_controls)
+    removed -- so tests can check which features are offered without
+    hardcoding an exact importance value."""
+    return re.sub(r"\s+\(SHAP [\d.]+\)$", "", option)
+
+
 def _make_checkpoint(path: str, rng: np.random.Generator, num_samples: int = 200) -> None:
     feature_dim = len(cfr_features.feature_indices(_FEATURE_KEYS))
     net = cfr_networks.AdvantageNet(input_dim=feature_dim, hidden_sizes=(8, 8))
@@ -517,8 +525,14 @@ class TestPerGroupControls:
 
         local_widgets = [ms for ms in at.multiselect if ms.key and ms.key.startswith("street_norm=")]
         assert local_widgets
-        assert all("Betting Street" not in ms.options for ms in local_widgets)
-        assert all(set(ms.options) == {"Suited Hole Cards", "Hand Strength Tier"} for ms in local_widgets)
+        assert all("Betting Street" not in {_strip_shap_suffix(o) for o in ms.options} for ms in local_widgets)
+        assert all(
+            {_strip_shap_suffix(o) for o in ms.options} == {"Suited Hole Cards", "Hand Strength Tier"}
+            for ms in local_widgets
+        )
+        # Every option is also annotated with its own SHAP contribution,
+        # like the sidebar's own role dropdowns (see _shap_values_by_key).
+        assert all(re.search(r"\(SHAP [\d.]+\)$", o) for ms in local_widgets for o in ms.options)
 
     def test_add_graph_for_one_group_only_renders_a_chart_there(self, synthetic_checkpoint):
         at = _run_app()
@@ -611,8 +625,8 @@ class TestPerGroupControls:
             if ms.key and ms.key.startswith(f"{chosen_group_prefix}hand_category_norm=") and ms.key.endswith("::local_graph")
         ]
         assert nested_widgets
-        assert all("Hand Strength Tier" not in ms.options for ms in nested_widgets)
-        assert all(ms.options == ["Suited Hole Cards"] for ms in nested_widgets)
+        assert all("Hand Strength Tier" not in {_strip_shap_suffix(o) for o in ms.options} for ms in nested_widgets)
+        assert all([_strip_shap_suffix(o) for o in ms.options] == ["Suited Hole Cards"] for ms in nested_widgets)
 
 _HOLE_HAND_GRID_FEATURE_KEYS = ("street_norm", "hole_hand_grid_x_norm", "hole_hand_grid_y_norm")
 
@@ -772,8 +786,8 @@ class TestExactHoleHand:
         }
         preflop_widget = next(ms for key, ms in local_graph_widgets.items() if "street_norm=Preflop::" in key)
         river_widget = next(ms for key, ms in local_graph_widgets.items() if "street_norm=River::" in key)
-        assert "Exact Hole Hand" in preflop_widget.options
-        assert "Exact Hole Hand" not in river_widget.options
+        assert "Exact Hole Hand" in {_strip_shap_suffix(o) for o in preflop_widget.options}
+        assert "Exact Hole Hand" not in {_strip_shap_suffix(o) for o in river_widget.options}
         # Never offered in the other 3 "Add ..." dropdowns, preflop or not.
         other_dropdown_suffixes = ("::local_table", "::local_filter", "::local_subgroup")
         other_widgets = [
@@ -781,7 +795,7 @@ class TestExactHoleHand:
             if ms.key and ms.key.endswith(other_dropdown_suffixes) and "street_norm=Preflop::" in ms.key
         ]
         assert other_widgets
-        assert all("Exact Hole Hand" not in ms.options for ms in other_widgets)
+        assert all("Exact Hole Hand" not in {_strip_shap_suffix(o) for o in ms.options} for ms in other_widgets)
 
     def test_absent_when_every_row_is_postflop(self, tmp_path_factory, monkeypatch):
         path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_all_postflop")), "checkpoint")

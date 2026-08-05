@@ -732,23 +732,31 @@ def _render_group_controls(
     options = [key for key, _ in importance if key not in excluded_keys]
     non_graph_options = [k for k in options if k != _HOLE_HAND_GRID_KEY]
     graph_options = options if _hole_hand_grid_available(group_df) else non_graph_options
+    # Same "Label  (SHAP 0.0000)" formatting as the sidebar's own role
+    # dropdowns (see _render_sidebar) -- this group's own importance
+    # ranking, not the sidebar's whole-reservoir one, since that's what
+    # `options` above is already ordered by.
+    importance_by_key = dict(importance)
+
+    def _option_label(key: str) -> str:
+        return f"{cfr_features.feature_label(key)}  (SHAP {importance_by_key[key]:.4f})"
 
     col_graph, col_table, col_filter, col_subgroup = st.columns(4)
     with col_graph:
         local_graph_keys = st.multiselect(
-            "Add graph", options=graph_options, format_func=cfr_features.feature_label, key=f"{key_prefix}local_graph",
+            "Add graph", options=graph_options, format_func=_option_label, key=f"{key_prefix}local_graph",
         )
     with col_table:
         local_table_keys = st.multiselect(
-            "Add table", options=non_graph_options, format_func=cfr_features.feature_label, key=f"{key_prefix}local_table",
+            "Add table", options=non_graph_options, format_func=_option_label, key=f"{key_prefix}local_table",
         )
     with col_filter:
         local_filter_keys = st.multiselect(
-            "Add filter", options=non_graph_options, format_func=cfr_features.feature_label, key=f"{key_prefix}local_filter",
+            "Add filter", options=non_graph_options, format_func=_option_label, key=f"{key_prefix}local_filter",
         )
     with col_subgroup:
         local_subgroup_keys = st.multiselect(
-            "Add subgroup", options=non_graph_options, format_func=cfr_features.feature_label, key=f"{key_prefix}local_subgroup",
+            "Add subgroup", options=non_graph_options, format_func=_option_label, key=f"{key_prefix}local_subgroup",
         )
 
     local_filters: dict[str, list[str]] = {}
