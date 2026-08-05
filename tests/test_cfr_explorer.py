@@ -262,7 +262,8 @@ class TestFilteredFeatureImportance:
 class TestActiveFiltersWidget:
     def test_no_widget_when_no_filters_active(self, synthetic_checkpoint):
         at = _run_app()
-        assert len(at.multiselect) == 0
+        active_widgets = [ms for ms in at.multiselect if ms.key and ms.key.startswith("active_filters::")]
+        assert len(active_widgets) == 0
 
     def test_active_filter_shows_a_removable_tag_widget(self, synthetic_checkpoint):
         at = _run_app()
@@ -283,7 +284,8 @@ class TestActiveFiltersWidget:
 
         assert not at.exception
         assert at.sidebar.selectbox(key="role::hole_suited").value == "Unused"
-        assert len(at.multiselect) == 0
+        active_widgets = [ms for ms in at.multiselect if ms.key and ms.key.startswith("active_filters::")]
+        assert len(active_widgets) == 0
 
 
 class TestHierarchicalGroupSplit:
@@ -488,9 +490,25 @@ class TestPerGroupControls:
 
         assert not at.exception
         for suffix in ("local_graph", "local_table", "local_filter", "local_subgroup"):
-            widgets = [ms for ms in at.multiselect if ms.key and ms.key.endswith(f"::{suffix}")]
+            # Excludes the global::-prefixed row (see
+            # test_global_level_also_gets_the_four_add_dropdowns below) --
+            # that one sits above every heading, not under one.
+            widgets = [
+                ms for ms in at.multiselect
+                if ms.key and ms.key.endswith(f"::{suffix}") and not ms.key.startswith("global::")
+            ]
             assert len(widgets) == 4  # one street_norm value observed per bucket
             assert len({ms.key for ms in widgets}) == 4  # every group's own widget, none collide
+
+    def test_global_level_also_gets_the_four_add_dropdowns(self, synthetic_checkpoint):
+        # The global/top-level view (no grouping active at all) should get
+        # the exact same Add graph/table/filter/subgroup row every subgroup
+        # heading gets, not a bare table+graphs with no way to add to it.
+        at = _run_app()
+        assert not at.exception
+        for suffix in ("local_graph", "local_table", "local_filter", "local_subgroup"):
+            widgets = [ms for ms in at.multiselect if ms.key == f"global::{suffix}"]
+            assert len(widgets) == 1
 
     def test_dropdown_options_exclude_the_group_split_feature(self, synthetic_checkpoint):
         at = _run_app()
@@ -555,7 +573,13 @@ class TestPerGroupControls:
         at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
         at.run(timeout=60)
 
-        add_subgroup_widgets = [ms for ms in at.multiselect if ms.key and ms.key.endswith("::local_subgroup")]
+        # Excludes global::local_subgroup -- picking that one would apply
+        # the split to every street_norm value at once, not just this one
+        # group (see test_global_level_also_gets_the_four_add_dropdowns).
+        add_subgroup_widgets = [
+            ms for ms in at.multiselect
+            if ms.key and ms.key.endswith("::local_subgroup") and ms.key.startswith("street_norm=")
+        ]
         add_subgroup_widgets[0].set_value(["hand_category_norm"])
         at.run(timeout=60)
 
@@ -572,7 +596,12 @@ class TestPerGroupControls:
         at.sidebar.selectbox(key="role::street_norm").set_value("Group split")
         at.run(timeout=60)
 
-        add_subgroup_widgets = [ms for ms in at.multiselect if ms.key and ms.key.endswith("::local_subgroup")]
+        # Excludes global::local_subgroup -- see
+        # test_add_subgroup_only_splits_that_one_group_further.
+        add_subgroup_widgets = [
+            ms for ms in at.multiselect
+            if ms.key and ms.key.endswith("::local_subgroup") and ms.key.startswith("street_norm=")
+        ]
         chosen_group_prefix = add_subgroup_widgets[0].key.removesuffix("local_subgroup")
         add_subgroup_widgets[0].set_value(["hand_category_norm"])
         at.run(timeout=60)

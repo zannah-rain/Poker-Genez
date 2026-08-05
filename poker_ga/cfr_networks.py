@@ -19,7 +19,7 @@ import torch.nn as nn
 import cfr_features
 import strategy
 
-DEFAULT_HIDDEN_SIZES = (512, 512, 512)
+DEFAULT_HIDDEN_SIZES = (1024, 1024, 1024, 1024)
 DEFAULT_DROPOUT = 0.1
 
 

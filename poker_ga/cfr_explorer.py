@@ -870,8 +870,21 @@ def main() -> None:
         st.warning("No reservoir samples match the current filters.")
         st.stop()
 
+    # The global/top-level view is just another group -- the whole
+    # reservoir (post sidebar filters), with no group-defining constraints
+    # of its own -- so it gets the exact same "Add graph/table/filter/
+    # subgroup" row every subgroup heading gets (see _render_group_controls),
+    # not a bare table+graphs with no way to add to it. `excluded_keys` is
+    # every key already queued up as a global group split (group_split_keys)
+    # -- nothing's fixed to one value yet, but offering one of those again
+    # here would just be redundant with the split about to apply it below.
+    global_df, global_subgroup_keys = _render_group_controls(
+        filtered, "global::", checkpoint_path, int(max_samples), filters, {},
+        set(group_split_keys), display_keys, collapsed, 0,
+    )
+
     _render_grouped(
-        filtered, group_split_keys, table_split_keys, graph_keys, display_keys, collapsed,
+        global_df, global_subgroup_keys + group_split_keys, table_split_keys, graph_keys, display_keys, collapsed,
         checkpoint_path, int(max_samples), filters,
     )
 
