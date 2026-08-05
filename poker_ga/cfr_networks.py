@@ -153,6 +153,16 @@ def _normalized_mean_abs_shap(shap_values: list[np.ndarray]) -> np.ndarray:
     return np.mean(np.abs(centered), axis=(0, 1))
 
 
+def _validity_codes(valid: np.ndarray) -> np.ndarray:
+    """One integer per row of `valid` (see cfr_features.unmasked_validity),
+    bit-packing which columns are real (1) vs masked (0) -- two rows get the
+    same code exactly when they share the same masking pattern across every
+    feature (e.g., for this codebase's actual masking conditions, every row
+    from the same street)."""
+    weights = (1 << np.arange(valid.shape[1], dtype=np.int64))
+    return valid.astype(np.int64) @ weights
+
+
 def mean_shap_contributions_for_samples(
     net: AdvantageNet, explain_features: np.ndarray, background_features: np.ndarray,
     feature_keys: tuple[str, ...], rng: np.random.Generator,
@@ -161,10 +171,8 @@ def mean_shap_contributions_for_samples(
     """Normalized mean |SHAP value| per feature (see _normalized_mean_abs_shap;
     shap.GradientExplainer's Expected Gradients approximation -- exact
     Shapley values are NP-hard, this is what SHAP itself uses for neural
-    nets too) over a random subsample of `explain_features`, using a
-    random subsample of `background_features` as the explainer's reference
-    distribution, averaged over every one of the net's
-    NUM_ACTION_CATEGORIES outputs.
+    nets too), averaged over every one of the net's NUM_ACTION_CATEGORIES
+    outputs.
 
     Takes an explicit pool of rows to explain (rather than reading straight
     from a reservoir) so a caller like cfr_explorer.py can restrict to just
@@ -172,23 +180,70 @@ def mean_shap_contributions_for_samples(
     `background_size` bound the cost to roughly constant regardless of pool
     size.
 
+    Computed separately per distinct masking pattern (see
+    cfr_features.unmasked_validity/_validity_codes -- in practice, one
+    stratum per street, since that's what actually drives every `maskable`
+    feature's masking condition in this codebase, though nothing here
+    hardcodes "street"), each explained using ONLY a same-pattern-masked
+    background, then combined via a weighted average (weight = that
+    stratum's own share of the sampled explain rows). A single joint
+    computation over the whole (mixed) pool would let a masked feature get
+    explained against an unmasked background (or vice versa) -- since every
+    `maskable` feature that shares one masking condition (e.g. every
+    draw-shape feature, all masked together at the river) is then perfectly
+    collinear with whatever real effect actually distinguishes that
+    condition (e.g. street_norm's own river bucket), a gradient-based
+    explainer can misattribute that real effect onto the masked features
+    instead of the feature actually responsible for it -- confirmed with a
+    synthetic experiment where masked features with *zero* true causal
+    effect still outranked the real cause of an effect under the mixed-pool
+    computation. Within one masking-pattern stratum, every masked feature is
+    an exactly-constant reading for the whole stratum (background and
+    explain alike), so it contributes exactly 0 there without needing any
+    special-casing -- the real fix is just never letting background and
+    explain disagree about which features are masked.
+
     Returns (feature_key, mean_abs_shap) pairs sorted most-to-least
     important. Empty list if `explain_features` is empty."""
     if len(explain_features) == 0:
         return []
 
-    explain_n = min(sample_size, len(explain_features))
-    explain_idx = rng.choice(len(explain_features), size=explain_n, replace=False)
-    x = torch.from_numpy(explain_features[explain_idx])
-
-    background_n = min(background_size, len(background_features))
-    background_idx = rng.choice(len(background_features), size=background_n, replace=False)
-    background = torch.from_numpy(background_features[background_idx])
+    explain_codes = _validity_codes(cfr_features.unmasked_validity(feature_keys, explain_features))
+    background_codes = _validity_codes(cfr_features.unmasked_validity(feature_keys, background_features))
 
     net.eval()
-    explainer = shap.GradientExplainer(net, background)
-    shap_values = explainer.shap_values(x, nsamples=nsamples)  # list of NUM_ACTIONS arrays, each (explain_n, num_features)
-    mean_abs = _normalized_mean_abs_shap(shap_values)
+    totals = np.zeros(len(feature_keys))
+    total_weight = 0
+    for code in np.unique(explain_codes):
+        code_explain_idx = np.flatnonzero(explain_codes == code)
+        code_background_idx = np.flatnonzero(background_codes == code)
+        if len(code_background_idx) == 0:
+            # No same-masking-pattern background available for this
+            # stratum -- skip it rather than fall back to a background that
+            # would reintroduce the exact mismatch this is meant to avoid.
+            continue
+
+        # Each stratum's own share of sample_size, proportional to its
+        # share of the explain pool, so the total explain rows used across
+        # every stratum stays close to sample_size regardless of how many
+        # distinct masking patterns are present.
+        stratum_n = max(1, round(sample_size * len(code_explain_idx) / len(explain_codes)))
+        explain_n = min(stratum_n, len(code_explain_idx))
+        explain_idx = rng.choice(code_explain_idx, size=explain_n, replace=False)
+        x = torch.from_numpy(explain_features[explain_idx])
+
+        background_n = min(background_size, len(code_background_idx))
+        background_idx = rng.choice(code_background_idx, size=background_n, replace=False)
+        background = torch.from_numpy(background_features[background_idx])
+
+        explainer = shap.GradientExplainer(net, background)
+        shap_values = explainer.shap_values(x, nsamples=nsamples)  # list of NUM_ACTIONS arrays, each (explain_n, num_features)
+        totals += _normalized_mean_abs_shap(shap_values) * explain_n
+        total_weight += explain_n
+
+    if total_weight == 0:
+        return []
+    mean_abs = totals / total_weight
 
     order = np.argsort(-mean_abs)
     return [(feature_keys[i], float(mean_abs[i])) for i in order]

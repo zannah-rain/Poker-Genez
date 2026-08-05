@@ -147,3 +147,20 @@ def bucket_labels(key: str, values: np.ndarray) -> np.ndarray:
     if spec.maskable:
         labels = np.where(values == MASKED, MASKED_LABEL, labels)
     return labels
+
+
+def unmasked_validity(feature_keys: list[str] | tuple[str, ...], values: np.ndarray) -> np.ndarray:
+    """(n_rows, len(feature_keys)) boolean array -- True wherever `values`
+    (raw, un-normalized feature readings, one column per feature_keys entry,
+    in that order) holds a real reading for that (row, feature); False only
+    for a `maskable` feature's features.MASKED rows (e.g. a draw-shape
+    feature on the river). Always True for a non-maskable feature, at every
+    row. Used by cfr_networks.mean_shap_contributions_for_samples so a
+    maskable feature's masked rows -- which carry no information for it by
+    construction -- don't get counted as real observations of its
+    importance."""
+    valid = np.ones_like(values, dtype=bool)
+    for i, key in enumerate(feature_keys):
+        if _SPEC_BY_KEY[key].maskable:
+            valid[:, i] = values[:, i] != MASKED
+    return valid

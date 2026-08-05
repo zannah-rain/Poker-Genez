@@ -152,6 +152,29 @@ class TestBucketCategories:
             assert label in categories
 
 
+class TestUnmaskedValidity:
+    def test_non_maskable_feature_is_always_valid(self):
+        keys = ("street_norm",)
+        values = np.array([[0.0], [1 / 3], [features.MASKED]])  # last row never actually happens, but isn't special-cased
+        assert cfr_features.unmasked_validity(keys, values).tolist() == [[True], [True], [True]]
+
+    def test_maskable_feature_invalid_only_at_masked_rows(self):
+        keys = ("straight_draw_norm",)
+        values = np.array([[0.0], [0.5], [features.MASKED], [1.0]])
+        assert cfr_features.unmasked_validity(keys, values).tolist() == [[True], [True], [False], [True]]
+
+    def test_mixed_maskable_and_non_maskable_columns(self):
+        keys = ("straight_draw_norm", "street_norm", "nuts_flush_draw")
+        values = np.array([
+            [0.5, 1.0, 1.0],
+            [features.MASKED, 1.0, features.MASKED],
+        ])
+        assert cfr_features.unmasked_validity(keys, values).tolist() == [
+            [True, True, True],
+            [False, True, False],
+        ]
+
+
 class TestDisplayFeatureKeys:
     # hole_hand_grid_y_norm is the one remaining `linked_to` relationship in
     # features.py (the 2D Exact Hole Hand grid's second axis, linked to

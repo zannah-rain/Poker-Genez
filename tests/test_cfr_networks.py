@@ -7,9 +7,11 @@ import torch
 
 import strategy
 from cfr_networks import (
-    AdvantageNet, AdvantageNetConfig, _normalized_mean_abs_shap, clone, load, mean_shap_contributions_for_samples, save,
+    AdvantageNet, AdvantageNetConfig, _normalized_mean_abs_shap, _validity_codes, clone, load,
+    mean_shap_contributions_for_samples, save,
 )
 from cfr_reservoir import ReservoirBuffer
+from features import MASKED
 
 
 class TestAdvantageNetForward:
@@ -141,23 +143,52 @@ class TestNormalizedMeanAbsShap:
         assert mean_abs[0] == pytest.approx(1.5)  # mean(|1|,|1|,|2|,|2|) unchanged by centering on a zero mean
 
 
+class TestValidityCodes:
+    def test_identical_rows_get_the_same_code(self):
+        valid = np.array([[True, False, True], [True, False, True]])
+        codes = _validity_codes(valid)
+        assert codes[0] == codes[1]
+
+    def test_different_patterns_get_different_codes(self):
+        valid = np.array([[True, True], [True, False], [False, True], [False, False]])
+        codes = _validity_codes(valid)
+        assert len(set(codes.tolist())) == 4
+
+    def test_all_true_row_matches_across_widths_conceptually(self):
+        # Not a real invariant of the encoding itself -- just documents that
+        # an all-True row (nothing masked) always decodes to the same
+        # "everything real" code regardless of which columns happen to be
+        # maskable at all, since every unmaskable column contributes a
+        # constant True that never differentiates rows.
+        valid = np.array([[True, True, True]])
+        assert _validity_codes(valid)[0] == (1 << 3) - 1
+
+
 class TestMeanShapContributionsForSamples:
+    # Real (non-maskable) features.FEATURE_NAMES keys, not placeholders --
+    # mean_shap_contributions_for_samples now looks each key up in
+    # features.py's catalog (see cfr_features.unmasked_validity) to know
+    # whether it needs masked-row-aware stratification.
+    _KEYS = ("hand_category_norm", "street_norm", "spr_norm", "pot_type_norm")
+
     def test_empty_pool_returns_empty_list(self):
         rng = np.random.default_rng(0)
         net = AdvantageNet(input_dim=4, hidden_sizes=(8,))
         empty = np.zeros((0, 4), dtype=np.float32)
-        keys = ("a", "b", "c", "d")
-        assert mean_shap_contributions_for_samples(net, empty, empty, keys, rng, sample_size=5, background_size=2, nsamples=5) == []
+        assert mean_shap_contributions_for_samples(
+            net, empty, empty, self._KEYS, rng, sample_size=5, background_size=2, nsamples=5,
+        ) == []
 
     def test_returns_one_entry_per_feature_sorted_descending_and_nonnegative(self):
         rng = np.random.default_rng(0)
         net = AdvantageNet(input_dim=4, hidden_sizes=(8,))
         features = _filled_reservoir(capacity=30, feature_dim=4, rng=rng).features
-        keys = ("a", "b", "c", "d")
 
-        result = mean_shap_contributions_for_samples(net, features, features, keys, rng, sample_size=10, background_size=5, nsamples=5)
+        result = mean_shap_contributions_for_samples(
+            net, features, features, self._KEYS, rng, sample_size=10, background_size=5, nsamples=5,
+        )
 
-        assert sorted(k for k, _ in result) == sorted(keys)
+        assert sorted(k for k, _ in result) == sorted(self._KEYS)
         values = [v for _, v in result]
         assert all(v >= 0.0 for v in values)
         assert values == sorted(values, reverse=True)
@@ -167,12 +198,74 @@ class TestMeanShapContributionsForSamples:
         net = AdvantageNet(input_dim=4, hidden_sizes=(8,))
         with torch.no_grad():
             first_layer = net.model[0]
-            first_layer.weight[:, 2] = 0.0  # feature index 2 can never affect any hidden unit
+            first_layer.weight[:, 2] = 0.0  # feature index 2 (spr_norm) can never affect any hidden unit
         features = _filled_reservoir(capacity=30, feature_dim=4, rng=rng).features
-        keys = ("a", "b", "ignored", "d")
 
-        result = mean_shap_contributions_for_samples(net, features, features, keys, rng, sample_size=10, background_size=5, nsamples=5)
+        result = mean_shap_contributions_for_samples(
+            net, features, features, self._KEYS, rng, sample_size=10, background_size=5, nsamples=5,
+        )
 
         by_key = dict(result)
-        assert by_key["ignored"] == pytest.approx(0.0, abs=1e-6)
-        assert result[-1][0] == "ignored"
+        assert by_key["spr_norm"] == pytest.approx(0.0, abs=1e-6)
+        assert result[-1][0] == "spr_norm"
+
+
+class TestMeanShapContributionsForSamplesMaskedFeatures:
+    """Regression coverage for a real bug: a `maskable` feature (see
+    features.FeatureSpec) that's pure noise -- no real relationship to the
+    net's output at all -- could still read as highly important under the
+    default (unfiltered, mixed-street) SHAP computation, purely because it
+    shares its masking condition (e.g. every draw-shape feature masks
+    together at the river) with some other, genuinely important feature.
+    A gradient-based explainer comparing a masked row against an unmasked
+    background (or vice versa) sees a huge, off-training-domain jump in
+    that one dimension and can misattribute the *other* feature's real
+    effect onto it. mean_shap_contributions_for_samples now computes each
+    masking-pattern stratum (see _validity_codes) separately, with
+    background restricted to the same pattern, specifically to prevent
+    this."""
+
+    def test_masked_noise_feature_does_not_inflate_above_an_honest_control(self):
+        rng = np.random.default_rng(0)
+        n = 4000
+        is_river = rng.random(n) < 0.25
+        # nuts_flush_draw/combo_draw: pure noise, masked together at
+        # "river" -- zero true relationship to the target, whether masked
+        # or not. street_norm: the *real* cause of a river-specific shift
+        # (standing in for the actual reason draw features mask together
+        # with it). hole_suited: an honest, never-masked, always-irrelevant
+        # control -- the noise floor these should NOT exceed.
+        keys = ("nuts_flush_draw", "combo_draw", "street_norm", "hole_suited")
+        noise1 = np.where(is_river, MASKED, rng.random(n))
+        noise2 = np.where(is_river, MASKED, rng.random(n))
+        real_cause = is_river.astype(np.float64)
+        control = rng.random(n)
+        target = 20.0 * real_cause + rng.normal(scale=0.5, size=n)
+
+        X = np.stack([noise1, noise2, real_cause, control], axis=1).astype(np.float32)
+        y = np.stack([target, target], axis=1).astype(np.float32)
+
+        torch.manual_seed(0)
+        net = AdvantageNet(input_dim=4, hidden_sizes=(32, 32), output_dim=2, dropout=0.0)
+        optimizer = torch.optim.Adam(net.parameters(), lr=2e-3, weight_decay=1e-5)
+        Xt, yt = torch.from_numpy(X), torch.from_numpy(y)
+        net.train()
+        train_rng = np.random.default_rng(0)
+        for _ in range(1200):
+            idx = train_rng.integers(0, n, size=256)
+            pred = net(Xt[idx])
+            loss = ((pred - yt[idx]) ** 2).mean()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        result = dict(mean_shap_contributions_for_samples(
+            net, X, X, keys, np.random.default_rng(1), sample_size=150, background_size=20, nsamples=15,
+        ))
+
+        control_floor = result["hole_suited"]
+        # Generous margin above the honest control's own noise-floor score
+        # -- the old (unfixed) behavior scored these an order of magnitude
+        # higher than a feature that's never masked and never matters.
+        assert result["nuts_flush_draw"] <= control_floor * 3 + 0.05
+        assert result["combo_draw"] <= control_floor * 3 + 0.05
