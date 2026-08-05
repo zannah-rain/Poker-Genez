@@ -726,21 +726,6 @@ FEATURE_SPECS: list[FeatureSpec] = [
         kind="categorical", value_table=_STRAIGHT_DRAW_VALUES, group="Draw Features",
     ),
 
-    FeatureSpec(
-        "backdoor_flush_draw_2", "Backdoor Flush Draw (2 Cards)",
-        "1 if, on the flop only, this player has exactly 3 cards of one suit (needing "
-        "both the turn and river to complete a flush) and 2 of those 3 are hole cards, "
-        "else 0.",
-        group="Draw Features",
-    ),
-    FeatureSpec(
-        "backdoor_flush_draw_1", "Backdoor Flush Draw (1 Card)",
-        "1 if, on the flop only, this player has exactly 3 cards of one suit (needing "
-        "both the turn and river to complete a flush) and 1 of those 3 is a hole card, "
-        "else 0.",
-        group="Draw Features",
-    ),
-
     # Opponent-tendency features: observed HUD-style stats accumulated over
     # the current session's hands (see opponent_model.py), not derivable
     # from this hand's cards/board alone -- this is what lets a genome
@@ -867,7 +852,7 @@ def _clip01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
-def _hand_vs_board_heuristics(hole: list[Card], board: list[Card], hand: dict) -> dict:
+def _hand_vs_board_heuristics(hole: list[Card], hand: dict) -> dict:
     """Draw-shape heuristics relative to the board that don't fit
     hand_category_norm's ordinal scale (pair/set/straight/flush strength
     relative to the board, and now also no-made-hand high-card strength,
@@ -881,21 +866,9 @@ def _hand_vs_board_heuristics(hole: list[Card], board: list[Card], hand: dict) -
     outs = hand["straight_draw_outs"]
     combo_draw = flush_draw and outs >= 1
 
-    backdoor_flush_draw_2 = False
-    backdoor_flush_draw_1 = False
-    if len(board) == 3:
-        suit_counts = Counter(c.suit for c in hole + board)
-        backdoor_suit = next((s for s, n in suit_counts.items() if n == 3), None)
-        if backdoor_suit is not None:
-            hole_suited_count = sum(1 for c in hole if c.suit == backdoor_suit)
-            backdoor_flush_draw_2 = hole_suited_count == 2
-            backdoor_flush_draw_1 = hole_suited_count == 1
-
     return {
         "nuts_flush_draw": float(nuts_flush_draw),
         "combo_draw": float(combo_draw),
-        "backdoor_flush_draw_2": float(backdoor_flush_draw_2),
-        "backdoor_flush_draw_1": float(backdoor_flush_draw_1),
     }
 
 
@@ -1223,7 +1196,7 @@ def extract_features(sit: Situation) -> np.ndarray:
         "opp_aggression_freq_norm": _clip01(sit.opp_aggression_freq),
         "opp_fold_vs_bet_norm": _clip01(sit.opp_fold_vs_bet),
     }
-    values.update(_hand_vs_board_heuristics(sit.hole, sit.board, hand))
+    values.update(_hand_vs_board_heuristics(sit.hole, hand))
     values.update(_hole_hand_grid_features(sit.hole, sit.street))
     values.update(_flop_texture(sit.board, sit.hole))
     values.update(_suit_connection_features(sit.hole, sit.board))

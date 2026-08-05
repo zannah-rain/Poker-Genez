@@ -658,28 +658,6 @@ class TestHandVsBoardHeuristics:
         assert values["straight_draw_norm"] > 0.0
         assert values["combo_draw"] == 1.0
 
-    def test_backdoor_flush_draw_two_hole_cards(self):
-        hole = [Card.from_str("Ah"), Card.from_str("9h")]
-        board = [Card.from_str("7h"), Card.from_str("4c"), Card.from_str("2d")]
-        values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["backdoor_flush_draw_2"] == 1.0
-        assert values["backdoor_flush_draw_1"] == 0.0
-
-    def test_backdoor_flush_draw_one_hole_card(self):
-        hole = [Card.from_str("Ah"), Card.from_str("9c")]
-        board = [Card.from_str("7h"), Card.from_str("4h"), Card.from_str("2d")]
-        values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["backdoor_flush_draw_1"] == 1.0
-        assert values["backdoor_flush_draw_2"] == 0.0
-
-    def test_backdoor_draws_only_apply_on_the_flop(self):
-        hole = [Card.from_str("Ah"), Card.from_str("9h")]
-        board = [Card.from_str("7h"), Card.from_str("4c"), Card.from_str("2d"), Card.from_str("3s")]
-        values = values_by_key(make_situation(hole=hole, board=board, street=2))
-        assert values["backdoor_flush_draw_2"] == 0.0
-        assert values["backdoor_flush_draw_1"] == 0.0
-
-
 class TestOvercardsFeature:
     def test_zero_overcards_preflop(self):
         # No board yet, so nothing can rank higher than the hole cards.
