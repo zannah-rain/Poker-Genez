@@ -1,9 +1,27 @@
-"""Interactive Streamlit app for interrogating a trained Single Deep CFR
-strategy: mark any of the checkpoint's features as a filter, a "group
-split" (renders a separate table per observed combination of values), or a
-"table split" (becomes a row/column axis within each table -- capped at 2,
-since a table only has two axes), then see the current net's average action
-distribution over the matching reservoir samples.
+"""Interactive Streamlit app for turning a trained Single Deep CFR strategy
+into a human-*implementable* one: a tree of "sub-strategies", each an
+ordered, filtered slice of the reservoir with its own 1-2 "Split By"
+features whose exact table+graph become its implementable rule, a
+%SHAP-explained figure showing how much predictive signal that
+simplification keeps, and its own further-nested child sub-strategies.
+
+Every feature gets a sidebar role: Unused, Filter (narrows every
+sub-strategy's rows globally), Split By (up to 2 features -- also what sets
+the *root* sub-strategy's own Split By pair), or Graph (an illustrative
+line/heatmap chart rendered under every sub-strategy). Beneath that, the
+root sub-strategy -- and every child added via "Add sub-strategy" -- gets
+its own local controls: its own filters (for a child, this *is* its claim
+condition -- see below), its own Split By pair (defaulting to inherit its
+parent's, independently overridable), and purely illustrative "Add
+table"/"Add graph" additions.
+
+Sub-strategies claim rows in priority order: each child sees only its
+parent's rows minus whatever earlier siblings already claimed (via their
+own filters), and a sub-strategy's actual "default behaviour" -- the
+prominent table+graph -- is whatever's left of its own rows once every one
+of its children has claimed its share. That's deliberately the same shape
+as a real "if this situation, do X; elif that, do Y; else, do Z" rule list
+a person could actually follow.
 
 Run with:
     streamlit run poker_ga/cfr_explorer.py -- --checkpoint-path cfr_runs/checkpoint_latest
@@ -22,20 +40,23 @@ Exact Hole Hand (features.py's hole_hand_grid_x_norm, paired with
 hole_hand_grid_y_norm which collapses into it -- see
 cfr_features.display_feature_keys) is a partial exception: it's inherently
 2D, a position in the classic 13x13 preflop starting-hand grid rather than
-a single ordered scale, so it only ever supports being marked Unused or
-Graph (never Filter/Group split/Table split), rendering as its own fixed
-set of heatmaps in place of the usual line chart when graphed (see
-_hole_hand_grid_figures). It's greyed out (disabled, but still listed
-alongside every other feature) whenever the rows currently in view have no
-preflop samples to show -- masked to a negative sentinel outside preflop
-(see features.extract_features), so it has nothing meaningful to plot
-there.
+a single ordered scale, so Filter doesn't apply to it, and picking it as
+Split By fills *both* slots by itself (see _resolve_split_by) and only
+actually renders (as its own fixed set of heatmaps, in place of the usual
+table+line-chart -- see _hole_hand_grid_figures) once a sub-strategy's own
+rows are 100% preflop (see _hole_hand_grid_split_by_available). Its sidebar
+role is greyed out (disabled, but still listed alongside every other
+feature) whenever the rows currently in view have no preflop samples at
+all -- masked to a negative sentinel outside preflop (see
+features.extract_features), so it has nothing meaningful to plot there.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
+import uuid
 
 import numpy as np
 import pandas as pd
@@ -60,11 +81,10 @@ _ACTION_COL_PREFIX = "action::"
 
 ROLE_UNUSED = "Unused"
 ROLE_FILTER = "Filter"
-ROLE_GROUP_SPLIT = "Group split"
-ROLE_TABLE_SPLIT = "Table split"
+ROLE_SPLIT_BY = "Split By"
 ROLE_GRAPH = "Graph"
-ROLES = (ROLE_UNUSED, ROLE_FILTER, ROLE_GROUP_SPLIT, ROLE_TABLE_SPLIT, ROLE_GRAPH)
-MAX_TABLE_SPLIT_FEATURES = 2
+ROLES = (ROLE_UNUSED, ROLE_FILTER, ROLE_SPLIT_BY, ROLE_GRAPH)
+MAX_SPLIT_BY_FEATURES = 2
 
 # Exact Hole Hand: the display-representative key (features.py links
 # hole_hand_grid_y_norm to this one so display_feature_keys collapses them
@@ -77,10 +97,10 @@ _HOLE_HAND_GRID_KEY = "hole_hand_grid_x_norm"
 _HOLE_HAND_GRID_Y_KEY = "hole_hand_grid_y_norm"
 _HOLE_HAND_GRID_RAW_X_COL = "raw::hole_hand_grid_x_norm"
 _HOLE_HAND_GRID_RAW_Y_COL = "raw::hole_hand_grid_y_norm"
-# Filter/Group split/Table split all rely on a feature having a single
-# ordered bucket-label scale -- meaningless for an inherently 2D position,
-# so its sidebar role is restricted to just these two.
-_HOLE_HAND_GRID_ROLES = (ROLE_UNUSED, ROLE_GRAPH)
+# Filter relies on a feature having a single ordered bucket-label scale --
+# meaningless for an inherently 2D position, so its sidebar role is
+# restricted to these three (Split By is fine -- see _resolve_split_by).
+_HOLE_HAND_GRID_ROLES = (ROLE_UNUSED, ROLE_SPLIT_BY, ROLE_GRAPH)
 
 _COLLAPSED_LABELS = ("Fold", "Call", "Raise", "All-In")
 _COLLAPSED_GROUP_OF_ACTION = {
@@ -237,39 +257,78 @@ def _filtered_feature_importance(
     return sorted(((key, folded.get(key, 0.0)) for key in display_keys), key=lambda kv: -kv[1])
 
 
-def _group_feature_importance(
-    checkpoint_path: str, max_samples: int, filters: dict[str, list[str]], group_constraints: dict[str, list[str]],
+def _row_digest(row_index: np.ndarray) -> str:
+    """Cheap, stable hash of a set of row positions -- the actual
+    st.cache_data key for _shap_importance_for_rows, since the row array
+    itself (potentially large) is excluded from Streamlit's own hashing via
+    its leading-underscore parameter name."""
+    return hashlib.sha1(np.ascontiguousarray(row_index).tobytes()).hexdigest()
+
+
+@st.cache_data(show_spinner="Ranking features by SHAP contribution for this sub-strategy...")
+def _shap_importance_for_rows(
+    checkpoint_path: str, max_samples: int, row_digest: str, _row_index: np.ndarray,
 ) -> list[tuple[str, float]]:
-    """SHAP importance (see _filtered_feature_importance) restricted to the
-    rows matching both the sidebar's global filters and this specific
-    group's own defining constraints -- one exact bucket value per
-    ancestor group-split level, whichever feature contributed it (the
-    shared sidebar or a group's own locally-added subgroup split). A
-    group-defining constraint is just another filter that happens to pin
-    one key to a single value, so this reuses _filtered_feature_importance
-    directly: the per-group "Add ..." dropdowns (see _render_group_controls)
-    then rank by a feature's contribution *within that one group*, not the
-    whole reservoir -- a feature that matters a lot overall can be dead
-    weight (or vice versa) once you're already looking at just one street,
-    one position, etc."""
-    combined = {**filters, **group_constraints}
-    filters_key = tuple(sorted((key, tuple(values)) for key, values in combined.items()))
-    return _filtered_feature_importance(checkpoint_path, max_samples, filters_key)
+    """SHAP importance (see _filtered_feature_importance) restricted to
+    exactly the rows at `_row_index` -- a sub-strategy's own claimed rows,
+    however they got there (its own filters, minus whatever earlier
+    siblings already claimed -- not representable as a simple
+    feature->kept-bucket-labels dict the way the sidebar's global filters
+    are, since claim-order exclusion isn't "pin one key to one value").
+    Used both for a sub-strategy's own "Add ..." dropdown ranking (in place
+    of the whole-reservoir sidebar ranking) and its %SHAP-explained figure.
+    Always one entry per displayed feature, 0.0 for every feature when
+    `_row_index` is empty -- see _filtered_feature_importance for why that
+    matters to callers that iterate this to build widgets."""
+    net, net_config, _reservoir = _load_checkpoint(checkpoint_path)
+    display_keys = cfr_features.display_feature_keys(net_config.feature_keys)
+    if len(_row_index) == 0:
+        return [(key, 0.0) for key in display_keys]
+    _df, raw_features = _build_dataframe(checkpoint_path, max_samples)
+    selected = raw_features[_row_index]
+    contributions = cfr_networks.mean_shap_contributions_for_samples(
+        net, selected, selected, net_config.feature_keys, np.random.default_rng(0),
+    )
+    folded = dict(cfr_features.fold_child_contributions(contributions))
+    return sorted(((key, folded.get(key, 0.0)) for key in display_keys), key=lambda kv: -kv[1])
 
 
 def _feature_col(key: str) -> str:
     return _FEATURE_COL_PREFIX + key
 
 
+def _resolve_split_by(chosen_keys: list[str]) -> list[str]:
+    """If Exact Hole Hand (_HOLE_HAND_GRID_KEY) is among `chosen_keys`, it
+    alone fills both of Split By's slots -- it's already inherently 2D, so
+    any other co-selected feature is dropped (callers render an st.caption
+    explaining why when that happens). Otherwise just the first
+    MAX_SPLIT_BY_FEATURES picks, in whatever order they were chosen."""
+    if _HOLE_HAND_GRID_KEY in chosen_keys:
+        return [_HOLE_HAND_GRID_KEY]
+    return list(chosen_keys[:MAX_SPLIT_BY_FEATURES])
+
+
 def _hole_hand_grid_available(df: pd.DataFrame) -> bool:
     """Whether `df` has at least one preflop (unmasked) Exact Hole Hand
     row -- used both to grey out its sidebar role (see _render_sidebar) and
-    to decide whether to offer it in a group's own "Add graph" dropdown
-    (see _render_group_controls). False if the checkpoint wasn't trained
-    with the feature at all (no raw column to check)."""
+    to decide whether to offer it in a sub-strategy's own "Add graph"
+    dropdown (see _render_substrategy). False if the checkpoint wasn't
+    trained with the feature at all (no raw column to check)."""
     if _HOLE_HAND_GRID_RAW_X_COL not in df.columns:
         return False
     return bool((df[_HOLE_HAND_GRID_RAW_X_COL] >= 0.0).any())
+
+
+def _hole_hand_grid_split_by_available(df: pd.DataFrame) -> bool:
+    """Whether *every* row of `df` is preflop (unmasked) Exact Hole Hand --
+    stricter than _hole_hand_grid_available's `.any()` (used for the
+    sidebar role / "Add graph" eligibility, where a partial view is still
+    fine to chart). Split By is meant to be exactly implementable, so
+    picking Exact Hole Hand there only actually renders once a
+    sub-strategy's own rows are 100% preflop -- see _render_substrategy."""
+    if _HOLE_HAND_GRID_RAW_X_COL not in df.columns or df.empty:
+        return False
+    return bool((df[_HOLE_HAND_GRID_RAW_X_COL] >= 0.0).all())
 
 
 def _observed_categories(df: pd.DataFrame, key: str) -> list[str]:
@@ -485,17 +544,17 @@ def _render_graphs(
     is never itself offered as something else's cross target -- it has no
     ordinary bucket-label column to pivot on, see _build_dataframe).
 
-    `key_prefix` disambiguates one call from another when _render_grouped
-    calls this once per group split leaf (so every group gets its own,
+    `key_prefix` disambiguates one call from another when _render_substrategy
+    calls this once per sub-strategy node (so every node gets its own,
     independently-computed set of graphs over just its own rows) --
-    without it, two groups' widgets for the same graphed feature would
+    without it, two nodes' widgets for the same graphed feature would
     collide on the same Streamlit widget key. `level` should already be
-    one past whatever group heading this call's graphs belong to (0 with
-    no grouping at all) -- the "Graphs" heading here renders at exactly
-    that level (_heading_at_level), i.e. one level below its own group's
-    heading, so it always reads as a subsection of that group rather than
-    a sibling of equal weight; with no grouping, it's the page's only
-    section heading, so it keeps the more prominent st.header instead."""
+    one past whatever sub-strategy heading this call's graphs belong to (0
+    at root) -- the "Graphs" heading here renders at exactly that level
+    (_heading_at_level), i.e. one level below its own node's heading, so it
+    always reads as a subsection of that sub-strategy rather than a sibling
+    of equal weight; at root, it's the page's only section heading, so it
+    keeps the more prominent st.header instead."""
     if not graph_keys:
         return
     if level == 0:
@@ -540,16 +599,22 @@ def _render_graphs(
 
 def _render_sidebar(
     feature_order: list[tuple[str, float]], df: pd.DataFrame, hole_hand_grid_available: bool,
-) -> tuple[dict[str, list[str]], list[str], list[str], list[str], bool]:
-    """Returns (filters, group_split_keys, table_split_keys, graph_keys,
-    collapsed). `filters` maps feature_key -> the bucket labels to keep for
-    it. Exact Hole Hand (_HOLE_HAND_GRID_KEY) gets a restricted options list
-    (Filter/Group split/Table split all rely on a single ordered
-    bucket-label scale, meaningless for its inherently 2D position -- see
+) -> tuple[dict[str, list[str]], list[str], list[str], bool]:
+    """Returns (filters, split_by_keys, graph_keys, collapsed). `filters`
+    maps feature_key -> the bucket labels to keep for it -- applies
+    globally, to every sub-strategy. `split_by_keys` (already resolved via
+    _resolve_split_by, so at most MAX_SPLIT_BY_FEATURES, or exactly
+    [_HOLE_HAND_GRID_KEY] if that was picked) becomes the *root*
+    sub-strategy's own Split By pair -- every other sub-strategy (added via
+    "Add sub-strategy") gets its own independent local Split By widget
+    instead (see _render_substrategy), defaulting to inherit whatever its
+    parent's current pair is. Exact Hole Hand (_HOLE_HAND_GRID_KEY) gets a
+    restricted options list (Filter relies on a single ordered bucket-label
+    scale, meaningless for its inherently 2D position -- see
     _HOLE_HAND_GRID_ROLES) and is disabled (greyed out, but still listed
     here like every other feature) whenever `hole_hand_grid_available` is
     False -- the rows currently in view (after the *global* filters below)
-    have no preflop samples for it to show."""
+    have no preflop samples for it to show at all."""
     st.sidebar.header("Features")
     st.sidebar.caption(
         "Ordered by mean |SHAP| contribution to the net's predictions, over whichever rows "
@@ -557,8 +622,7 @@ def _render_sidebar(
     )
 
     filters: dict[str, list[str]] = {}
-    group_split_keys: list[str] = []
-    table_split_keys: list[str] = []
+    split_by_keys: list[str] = []
     graph_keys: list[str] = []
 
     for key, importance in feature_order:
@@ -575,28 +639,32 @@ def _render_sidebar(
         if role == ROLE_FILTER:
             observed = _observed_categories(df, key)
             filters[key] = st.sidebar.multiselect("keep values", observed, default=observed, key=f"filter::{key}")
-        elif role == ROLE_GROUP_SPLIT:
-            group_split_keys.append(key)
-        elif role == ROLE_TABLE_SPLIT:
-            table_split_keys.append(key)
+        elif role == ROLE_SPLIT_BY:
+            split_by_keys.append(key)
         elif role == ROLE_GRAPH:
             graph_keys.append(key)
 
-    if len(table_split_keys) > MAX_TABLE_SPLIT_FEATURES:
-        kept, dropped = table_split_keys[:MAX_TABLE_SPLIT_FEATURES], table_split_keys[MAX_TABLE_SPLIT_FEATURES:]
-        kept_labels = ", ".join(cfr_features.feature_label(k) for k in kept)
+    resolved_split_by = _resolve_split_by(split_by_keys)
+    if resolved_split_by != split_by_keys:
+        dropped = [k for k in split_by_keys if k not in resolved_split_by]
         dropped_labels = ", ".join(cfr_features.feature_label(k) for k in dropped)
-        st.error(
-            f"Only {MAX_TABLE_SPLIT_FEATURES} features can be used as table splits at once -- "
-            f"using {kept_labels} (by SHAP rank) and ignoring {dropped_labels}. Change one "
-            "of those features' roles to use a different pair."
-        )
-        table_split_keys = kept
+        if _HOLE_HAND_GRID_KEY in split_by_keys:
+            st.error(
+                f"Exact Hole Hand is inherently 2D and fills both of Split By's slots by itself -- "
+                f"ignoring {dropped_labels}. Change one of those features' roles to use a different pair."
+            )
+        else:
+            kept_labels = ", ".join(cfr_features.feature_label(k) for k in resolved_split_by)
+            st.error(
+                f"Only {MAX_SPLIT_BY_FEATURES} features can be used as Split By at once -- "
+                f"using {kept_labels} (by SHAP rank) and ignoring {dropped_labels}. Change one "
+                "of those features' roles to use a different pair."
+            )
 
     st.sidebar.divider()
     collapsed = st.sidebar.toggle("Collapse actions to Fold / Call / Raise / All-In", value=False)
 
-    return filters, group_split_keys, table_split_keys, graph_keys, collapsed
+    return filters, resolved_split_by, graph_keys, collapsed
 
 
 def _filter_mask(df: pd.DataFrame, filters: dict[str, list[str]]) -> pd.Series:
@@ -640,24 +708,24 @@ def _render_active_filters(filters: dict[str, list[str]]) -> None:
         st.rerun()
 
 
-def _render_table(group_df: pd.DataFrame, table_split_keys: list[str], collapsed: bool) -> None:
+def _render_table(group_df: pd.DataFrame, split_by_keys: list[str], collapsed: bool) -> None:
     action_cols = _action_columns(collapsed)
     view = _with_action_view(group_df, collapsed)
 
-    if not table_split_keys:
+    if not split_by_keys:
         summary = view[action_cols].mean().to_frame("All rows").T
         counts = pd.DataFrame({"n": [len(view)]}, index=["All rows"])
-    elif len(table_split_keys) == 1:
-        idx_col = _feature_col(table_split_keys[0])
-        row_label = cfr_features.feature_label(table_split_keys[0])
+    elif len(split_by_keys) == 1:
+        idx_col = _feature_col(split_by_keys[0])
+        row_label = cfr_features.feature_label(split_by_keys[0])
         summary = view.groupby(idx_col, observed=True)[action_cols].mean()
         counts = view.groupby(idx_col, observed=True).size().to_frame("n")
         summary.index.name = row_label
         counts.index.name = row_label
     else:
-        row_col, col_col = _feature_col(table_split_keys[0]), _feature_col(table_split_keys[1])
-        row_label = cfr_features.feature_label(table_split_keys[0])
-        col_label = cfr_features.feature_label(table_split_keys[1])
+        row_col, col_col = _feature_col(split_by_keys[0]), _feature_col(split_by_keys[1])
+        row_label = cfr_features.feature_label(split_by_keys[0])
+        col_label = cfr_features.feature_label(split_by_keys[1])
         summary = pd.pivot_table(view, values=action_cols, index=row_col, columns=col_col, aggfunc="mean", observed=True)
         summary = summary.swaplevel(axis=1).sort_index(axis=1, level=0)
         counts = pd.pivot_table(view, values=action_cols[0], index=row_col, columns=col_col, aggfunc="count", observed=True)
@@ -683,153 +751,247 @@ def _heading_at_level(text: str, level: int) -> None:
         st.markdown(f"{'#' * min(level + 3, 6)} {text}")
 
 
-def _render_group_heading(text: str, level: int) -> None:
-    """A divider above every group heading (at every nesting level) --
-    rather than one between each group's own table and its graphs, which
-    is where a divider used to sit -- so each group's whole block (heading,
-    per-group controls, table, extra additions, graphs) reads as one
-    visually separated unit, ending right before the next group's own
-    divider+heading."""
-    st.divider()
-    _heading_at_level(text, level)
+_SUBSTRATEGY_CHILDREN_STATE_KEY = "substrategy_children"
 
 
-def _render_group_controls(
-    group_df: pd.DataFrame, key_prefix: str, checkpoint_path: str, max_samples: int,
-    filters: dict[str, list[str]], group_constraints: dict[str, list[str]], excluded_keys: set[str],
-    display_keys: list[str], collapsed: bool, level: int,
-) -> tuple[pd.DataFrame, list[str]]:
-    """The 4 per-group "Add ..." dropdowns beneath one group heading (see
-    _render_grouped): options are every displayed feature except
-    `excluded_keys` (whatever's already fixed as a group-split value here
-    or at an ancestor level -- those carry zero information within this
-    one group), ranked by each feature's own mean normalized SHAP
-    contribution *within this specific group* rather than the sidebar's
-    whole-reservoir ranking (_group_feature_importance). These are local
-    to this one group -- they add graphs/tables/filters/subgroups just
-    here, on top of whatever the sidebar's "global" role selections
-    already apply to every group. `level` is this group's own heading's
-    level, passed straight through to _render_graphs (as level + 1) so any
-    locally-added graphs' own "Graphs" heading sits one level below it,
-    same as the rest of this group's content.
+def _substrategy_children(key_prefix: str) -> list[str]:
+    """Ordered child sub-strategy ids currently nested directly under the
+    node at `key_prefix`, persisted in st.session_state -- unlike the old
+    automatic one-heading-per-observed-value nesting, which sub-strategies
+    exist and in what priority order is now explicit, user-managed state
+    (added one at a time via "Add sub-strategy"), not something derivable
+    from the data alone."""
+    return st.session_state.setdefault(_SUBSTRATEGY_CHILDREN_STATE_KEY, {}).setdefault(key_prefix, [])
 
-    Returns (local_df, local_subgroup_keys): local_df is `group_df`
-    narrowed by this group's own "Add filter" picks (independent of the
-    sidebar's global filters and of every sibling group's own local
-    filters -- each "keep values" multiselect is keyed off `key_prefix`,
-    so no two groups' filter widgets collide); local_subgroup_keys are the
-    features picked via "Add subgroup", spliced in ahead of whatever
-    global group-split keys still remain for this branch by the caller.
 
-    Exact Hole Hand (_HOLE_HAND_GRID_KEY) only ever supports being graphed
-    (see _render_sidebar), so it's excluded from "Add table"/"Add
-    filter"/"Add subgroup" unconditionally, and from "Add graph" too unless
-    this specific group's own rows have preflop data to show (see
-    _hole_hand_grid_available) -- matching the sidebar's disabled-when-
-    unavailable treatment, just via omission rather than a greyed-out
-    option, since a multiselect has no per-option disabled state."""
-    importance = _group_feature_importance(checkpoint_path, max_samples, filters, group_constraints)
-    options = [key for key, _ in importance if key not in excluded_keys]
-    non_graph_options = [k for k in options if k != _HOLE_HAND_GRID_KEY]
-    graph_options = options if _hole_hand_grid_available(group_df) else non_graph_options
-    # Same "Label  (SHAP 0.0000)" formatting as the sidebar's own role
-    # dropdowns (see _render_sidebar) -- this group's own importance
-    # ranking, not the sidebar's whole-reservoir one, since that's what
-    # `options` above is already ordered by.
-    importance_by_key = dict(importance)
+def _add_substrategy(key_prefix: str) -> None:
+    _substrategy_children(key_prefix).append(uuid.uuid4().hex[:8])
 
-    def _option_label(key: str) -> str:
+
+def _remove_substrategy(parent_key_prefix: str, child_id: str) -> None:
+    # Deliberately doesn't try to recursively purge that child's own
+    # descendant session_state/widget keys -- orphaned entries are inert
+    # (never read again once nothing points at them) and the rest of this
+    # app already doesn't bother with that kind of cleanup either (e.g. a
+    # role switched away from Filter leaves its old filter::key values
+    # sitting in session_state too).
+    children = _substrategy_children(parent_key_prefix)
+    if child_id in children:
+        children.remove(child_id)
+
+
+def _move_substrategy(parent_key_prefix: str, child_id: str, delta: int) -> None:
+    children = _substrategy_children(parent_key_prefix)
+    i = children.index(child_id)
+    j = i + delta
+    if 0 <= j < len(children):
+        children[i], children[j] = children[j], children[i]
+
+
+def _render_substrategy(
+    incoming_df: pd.DataFrame, key_prefix: str, checkpoint_path: str, max_samples: int,
+    display_keys: list[str], graph_keys: list[str], collapsed: bool, level: int, inherited_split_by: list[str],
+    parent_key_prefix: str | None = None, child_id: str | None = None,
+) -> pd.Index:
+    """Renders one sub-strategy node -- root (`parent_key_prefix` is None,
+    `incoming_df` already the sidebar-filtered pool, `inherited_split_by`
+    the sidebar's own resolved Split By pair, no heading) or a child added
+    via "Add sub-strategy" (its own local filters *are* its claim
+    condition -- see the module docstring) -- and every one of its own
+    further-nested children, in priority order. Returns `incoming_df`'s row
+    index this node claimed (after its own local filters, before any of its
+    own children's further claims) so the caller can subtract it from what
+    the *next* sibling sees, and from its own default-behaviour leftover
+    once every child of *this* node has had a turn.
+
+    Render order: heading + remove/move controls (children only) -> this
+    node's own local filters (children only -- these define what it
+    claims, so `node_df` here is its *full* claimed scope) -> "Add
+    sub-strategy" + every existing child, recursed in order, each one
+    seeing this node's rows minus every earlier sibling's own claim -> this
+    node's actual "default behaviour" (`node_df` minus every child's own
+    claim) -- Split By widget (inherited for root; local, independently
+    overridable, for a child), the prominent table+graph, and the
+    %SHAP-explained figure, all computed over that leftover, since the
+    prominent block *is* the default/else branch of the rule list -- then
+    every sidebar Graph-role feature's own chart (`graph_keys`, unchanged
+    from the sidebar, rendered at every node just like `display_keys`/
+    `collapsed`) and purely illustrative "Add table"/"Add graph" additions,
+    also over that same leftover."""
+    is_root = parent_key_prefix is None
+    own_level = 0 if is_root else level
+
+    if is_root:
+        node_df = incoming_df
+    else:
+        row_index = incoming_df.index.to_numpy()
+        importance = _shap_importance_for_rows(checkpoint_path, max_samples, _row_digest(row_index), row_index)
+        non_graph_options = [k for k, _ in importance if k != _HOLE_HAND_GRID_KEY]
+        importance_by_key = dict(importance)
+
+        def _claim_option_label(key: str) -> str:
+            return f"{cfr_features.feature_label(key)}  (SHAP {importance_by_key[key]:.4f})"
+
+        st.divider()
+        local_filter_keys = st.multiselect(
+            "Claim condition (Add filter)", options=non_graph_options, format_func=_claim_option_label,
+            key=f"{key_prefix}claim_filter_keys",
+        )
+        local_filters: dict[str, list[str]] = {}
+        for filter_key in local_filter_keys:
+            observed = _observed_categories(incoming_df, filter_key)
+            local_filters[filter_key] = st.multiselect(
+                f"{cfr_features.feature_label(filter_key)} -- keep values", options=observed, default=observed,
+                key=f"{key_prefix}claim_filter_values::{filter_key}",
+            )
+        node_df = _apply_filters(incoming_df, local_filters)
+
+        claim_desc = ", ".join(
+            f"{cfr_features.feature_label(k)} = {', '.join(v)}" for k, v in local_filters.items()
+        )
+        heading = claim_desc or "Sub-strategy (no filter set yet -- claims everything its parent hasn't)"
+        col_heading, col_up, col_down, col_remove = st.columns([10, 1, 1, 1])
+        with col_heading:
+            _heading_at_level(f"{heading}  (n={len(node_df):,})", level)
+        with col_up:
+            st.button(
+                "↑", key=f"{key_prefix}move_up", help="Move earlier (higher priority)",
+                on_click=_move_substrategy, args=(parent_key_prefix, child_id, -1),
+            )
+        with col_down:
+            st.button(
+                "↓", key=f"{key_prefix}move_down", help="Move later (lower priority)",
+                on_click=_move_substrategy, args=(parent_key_prefix, child_id, 1),
+            )
+        with col_remove:
+            st.button(
+                "✕", key=f"{key_prefix}remove", help="Remove this sub-strategy",
+                on_click=_remove_substrategy, args=(parent_key_prefix, child_id),
+            )
+
+    if node_df.empty:
+        st.warning("No rows match this sub-strategy's own claim filters.")
+        return node_df.index
+
+    st.button(
+        "Add sub-strategy", key=f"{key_prefix}add_substrategy",
+        on_click=_add_substrategy, args=(key_prefix,),
+    )
+
+    # Root's own heading doesn't consume a level (it has none), so its
+    # direct children start at level 0, same as root's own `own_level`;
+    # every deeper generation increments from its own parent's heading
+    # level, matching _heading_at_level's tiering.
+    child_level = 0 if is_root else own_level + 1
+    remaining_df = node_df
+    for this_child_id in list(_substrategy_children(key_prefix)):
+        child_key_prefix = f"{key_prefix}substrategy_{this_child_id}::"
+        claimed_index = _render_substrategy(
+            remaining_df, child_key_prefix, checkpoint_path, max_samples,
+            display_keys, graph_keys, collapsed, child_level, inherited_split_by,
+            parent_key_prefix=key_prefix, child_id=this_child_id,
+        )
+        remaining_df = remaining_df.drop(claimed_index)
+
+    default_df = remaining_df
+    default_row_index = default_df.index.to_numpy()
+    default_importance = _shap_importance_for_rows(
+        checkpoint_path, max_samples, _row_digest(default_row_index), default_row_index,
+    )
+    importance_by_key = dict(default_importance)
+
+    def _default_option_label(key: str) -> str:
         return f"{cfr_features.feature_label(key)}  (SHAP {importance_by_key[key]:.4f})"
 
-    col_graph, col_table, col_filter, col_subgroup = st.columns(4)
+    split_by_options = [k for k, _ in default_importance]
+    if is_root:
+        resolved_split_by = inherited_split_by
+    else:
+        chosen_split_by = st.multiselect(
+            "Split By (this sub-strategy's own 1-2 implementable features)",
+            options=split_by_options, default=[k for k in inherited_split_by if k in split_by_options],
+            format_func=_default_option_label, max_selections=MAX_SPLIT_BY_FEATURES,
+            key=f"{key_prefix}split_by",
+        )
+        resolved_split_by = _resolve_split_by(chosen_split_by)
+        if resolved_split_by != chosen_split_by:
+            dropped = [k for k in chosen_split_by if k not in resolved_split_by]
+            st.caption(
+                f"Exact Hole Hand is inherently 2D and fills both Split By slots by itself -- "
+                f"ignoring {', '.join(cfr_features.feature_label(k) for k in dropped)}."
+            )
+
+    st.markdown("**Default behaviour**" if not is_root else "**Overall default behaviour**")
+    if not default_df.empty:
+        if resolved_split_by == [_HOLE_HAND_GRID_KEY]:
+            if _hole_hand_grid_split_by_available(default_df):
+                figures = _hole_hand_grid_figures(default_df)
+                heat_cols = st.columns(2)
+                for i, fig in enumerate(figures):
+                    with heat_cols[i % 2]:
+                        st.plotly_chart(fig, key=f"{key_prefix}splitby_grid::{i}")
+            else:
+                postflop_mask = default_df[_HOLE_HAND_GRID_RAW_X_COL] < 0.0 if _HOLE_HAND_GRID_RAW_X_COL in default_df.columns else None
+                postflop_frac = float(postflop_mask.mean()) if postflop_mask is not None else 1.0
+                st.warning(
+                    "Exact Hole Hand needs this sub-strategy's default-behaviour rows to be 100% "
+                    f"preflop -- currently {postflop_frac:.0%} postflop. Add a Preflop claim filter "
+                    "here to use it."
+                )
+        else:
+            _render_table(default_df, resolved_split_by, collapsed)
+            if resolved_split_by:
+                if len(resolved_split_by) == 1:
+                    st.plotly_chart(
+                        _line_chart_figure(default_df, resolved_split_by[0], collapsed),
+                        key=f"{key_prefix}splitby_chart",
+                    )
+                else:
+                    heat_cols = st.columns(2)
+                    figs = _heatmap_figures(default_df, resolved_split_by[0], resolved_split_by[1])
+                    for i, fig in enumerate(figs):
+                        with heat_cols[i % 2]:
+                            st.plotly_chart(fig, key=f"{key_prefix}splitby_heat::{i}")
+
+        if resolved_split_by:
+            total = sum(v for _, v in default_importance)
+            chosen_total = sum(v for k, v in default_importance if k in resolved_split_by)
+            pct = (chosen_total / total * 100) if total > 0 else 0.0
+            st.metric("SHAP explained by Split By features", f"{pct:.0f}%")
+        else:
+            st.caption("Pick 1-2 Split By features above to define this sub-strategy's implementable rule.")
+
+    # Every sidebar Graph-role feature's own chart, unchanged from the
+    # sidebar and rendered at every sub-strategy node -- separate from the
+    # purely local "Add graph" extras just below (own key_prefix/level,
+    # matching how those two were already two independent calls before
+    # this rewrite). Uses `child_level` (0 at root -> the prominent
+    # st.header, since root has no heading of its own to sit below; one
+    # past a non-root node's own heading otherwise -- see
+    # _render_graphs' own docstring), not `own_level`: a non-root node's
+    # `own_level` is the level its *own* heading already renders at, so
+    # reusing it here would put "Graphs" at the same size as that heading
+    # instead of clearly subordinate to it.
+    _render_graphs(default_df, graph_keys, display_keys, collapsed, key_prefix, child_level)
+
+    st.caption("Additional (illustrative) analysis")
+    illustrative_options = [k for k in split_by_options if k != _HOLE_HAND_GRID_KEY]
+    graph_options = split_by_options if _hole_hand_grid_available(default_df) else illustrative_options
+    col_graph, col_table = st.columns(2)
     with col_graph:
-        local_graph_keys = st.multiselect(
-            "Add graph", options=graph_options, format_func=_option_label, key=f"{key_prefix}local_graph",
+        extra_graph_keys = st.multiselect(
+            "Add graph", options=graph_options, format_func=_default_option_label, key=f"{key_prefix}extra_graph",
         )
     with col_table:
-        local_table_keys = st.multiselect(
-            "Add table", options=non_graph_options, format_func=_option_label, key=f"{key_prefix}local_table",
+        extra_table_keys = st.multiselect(
+            "Add table", options=illustrative_options, format_func=_default_option_label, key=f"{key_prefix}extra_table",
         )
-    with col_filter:
-        local_filter_keys = st.multiselect(
-            "Add filter", options=non_graph_options, format_func=_option_label, key=f"{key_prefix}local_filter",
-        )
-    with col_subgroup:
-        local_subgroup_keys = st.multiselect(
-            "Add subgroup", options=non_graph_options, format_func=_option_label, key=f"{key_prefix}local_subgroup",
-        )
-
-    local_filters: dict[str, list[str]] = {}
-    for filter_key in local_filter_keys:
-        observed = _observed_categories(group_df, filter_key)
-        local_filters[filter_key] = st.multiselect(
-            f"{cfr_features.feature_label(filter_key)} -- keep values", options=observed, default=observed,
-            key=f"{key_prefix}local_filter_values::{filter_key}",
-        )
-    local_df = _apply_filters(group_df, local_filters)
-
-    if local_filters and local_df.empty:
-        st.warning("No rows match this group's own local filters.")
-        return local_df, []
-
-    for table_key in local_table_keys:
+    for table_key in extra_table_keys:
         st.caption(f"Extra table: {cfr_features.feature_label(table_key)}")
-        _render_table(local_df, [table_key], collapsed)
+        _render_table(default_df, [table_key], collapsed)
+    _render_graphs(default_df, extra_graph_keys, display_keys, collapsed, f"{key_prefix}extra::", own_level + 1)
 
-    cross_options = [k for k in display_keys if k not in excluded_keys]
-    _render_graphs(local_df, local_graph_keys, cross_options, collapsed, f"{key_prefix}local::", level + 1)
-
-    return local_df, local_subgroup_keys
-
-
-def _render_grouped(
-    df: pd.DataFrame, group_split_keys: list[str], table_split_keys: list[str], graph_keys: list[str],
-    display_keys: list[str], collapsed: bool, checkpoint_path: str, max_samples: int, filters: dict[str, list[str]],
-    level: int = 0, key_prefix: str = "", group_constraints: dict[str, list[str]] | None = None,
-) -> None:
-    """One heading per observed value of group_split_keys[0], each nested
-    under the previous one (see _render_group_heading) and recursed into
-    for the remaining group_split_keys -- so with several group splits
-    selected, a table sits under a chain of headings each naming just its
-    own feature/value (e.g. Street = Flop, then nested under it Position =
-    Late), rather than one flat heading repeating every key/value pair
-    above every leaf table. Every heading also gets its own set of
-    per-group "Add ..." controls (see _render_group_controls) immediately
-    below it, and recurses into any subgroup keys picked there ahead of
-    whatever global group_split_keys remain for this branch.
-
-    Once group_split_keys is exhausted, every Graph-role feature also gets
-    its own set of graphs here (see _render_graphs), computed over just
-    this leaf group's own rows -- so a "Graph" feature's chart/heatmaps
-    reflect each group split individually rather than one chart pooling
-    across every group."""
-    if group_constraints is None:
-        group_constraints = {}
-
-    if not group_split_keys:
-        _render_table(df, table_split_keys, collapsed)
-        _render_graphs(df, graph_keys, display_keys, collapsed, key_prefix, level)
-        return
-
-    key, *rest = group_split_keys
-    col = _feature_col(key)
-    label = cfr_features.feature_label(key)
-    for value, group_df in df.groupby(col, observed=True):
-        if len(group_df) == 0:
-            continue
-        _render_group_heading(f"{label} = {value}  (n={len(group_df):,})", level)
-
-        child_key_prefix = f"{key_prefix}{key}={value}::"
-        child_constraints = {**group_constraints, key: [str(value)]}
-        local_df, local_subgroup_keys = _render_group_controls(
-            group_df, child_key_prefix, checkpoint_path, max_samples, filters, child_constraints,
-            set(child_constraints) | set(rest), display_keys, collapsed, level,
-        )
-
-        _render_grouped(
-            local_df, local_subgroup_keys + rest, table_split_keys, graph_keys, display_keys, collapsed,
-            checkpoint_path, max_samples, filters, level + 1, child_key_prefix, child_constraints,
-        )
+    return node_df.index
 
 
 def main() -> None:
@@ -869,7 +1031,7 @@ def main() -> None:
     # this same rerun (same read-ahead trick as feature_importance above).
     hole_hand_grid_available = _hole_hand_grid_available(_apply_filters(df, current_filters))
 
-    filters, group_split_keys, table_split_keys, graph_keys, collapsed = _render_sidebar(
+    filters, split_by_keys, graph_keys, collapsed = _render_sidebar(
         feature_importance, df, hole_hand_grid_available,
     )
     filtered = _apply_filters(df, filters)
@@ -878,22 +1040,12 @@ def main() -> None:
         st.warning("No reservoir samples match the current filters.")
         st.stop()
 
-    # The global/top-level view is just another group -- the whole
-    # reservoir (post sidebar filters), with no group-defining constraints
-    # of its own -- so it gets the exact same "Add graph/table/filter/
-    # subgroup" row every subgroup heading gets (see _render_group_controls),
-    # not a bare table+graphs with no way to add to it. `excluded_keys` is
-    # every key already queued up as a global group split (group_split_keys)
-    # -- nothing's fixed to one value yet, but offering one of those again
-    # here would just be redundant with the split about to apply it below.
-    global_df, global_subgroup_keys = _render_group_controls(
-        filtered, "global::", checkpoint_path, int(max_samples), filters, {},
-        set(group_split_keys), display_keys, collapsed, 0,
-    )
-
-    _render_grouped(
-        global_df, global_subgroup_keys + group_split_keys, table_split_keys, graph_keys, display_keys, collapsed,
-        checkpoint_path, int(max_samples), filters,
+    # Root is just another sub-strategy node -- the whole reservoir (post
+    # sidebar filters), with no claim filters of its own and its Split By
+    # pair coming from the sidebar's own role selections rather than a
+    # local widget (see _render_substrategy).
+    _render_substrategy(
+        filtered, "root::", checkpoint_path, int(max_samples), display_keys, graph_keys, collapsed, 0, split_by_keys,
     )
 
 
