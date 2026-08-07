@@ -20,20 +20,37 @@ _FEATURE_KEYS = ("street_norm", "hole_suited", "hand_category_norm")
 _COLLAPSED_LABELS = ("Fold", "Call", "Raise", "All-In")
 
 
-def _shap_values_by_key(at: AppTest) -> dict[str, float]:
-    role_boxes = [sb for sb in at.sidebar.selectbox if sb.key and sb.key.startswith("role::")]
-    return {
-        sb.key.removeprefix("role::"): float(re.search(r"SHAP ([\d.]+)\)", sb.label).group(1))
-        for sb in role_boxes
-    }
-
-
 def _strip_shap_suffix(option: str) -> str:
-    """A "Add graph/table/filter" or "Split By" dropdown option's plain
+    """A "Add filter/graph/table" or "Split By" dropdown option's plain
     feature label, with its "  (SHAP 0.0000)" suffix (see
     _render_substrategy) removed -- so tests can check which features are
     offered without hardcoding an exact importance value."""
     return re.sub(r"\s+\(SHAP [\d.]+\)$", "", option)
+
+
+def _option_labels(widget) -> set[str]:
+    """The plain feature labels a SHAP-suffixed multiselect widget
+    currently offers (see _strip_shap_suffix) -- AppTest's own `.options`
+    already reflects the widget's format_func output, not the raw
+    feature-key identity."""
+    return {_strip_shap_suffix(o) for o in widget.options}
+
+
+def _shap_values_by_key(at: AppTest, key_prefix: str = "root::", feature_keys=_FEATURE_KEYS) -> dict[str, float]:
+    """Reads the "(SHAP 0.0000)" values off `key_prefix`'s own Split By
+    multiselect options -- computed over that node's current `default_df`
+    (see _render_substrategy), so it reflects whatever claim filters are
+    currently narrowing that node."""
+    label_to_key = {cfr_features.feature_label(k): k for k in feature_keys}
+    values: dict[str, float] = {}
+    for option in at.multiselect(key=f"{key_prefix}split_by").options:
+        match = re.match(r"^(.*)  \(SHAP ([\d.]+)\)$", option)
+        if not match:
+            continue
+        label, shap = match.groups()
+        if label in label_to_key:
+            values[label_to_key[label]] = float(shap)
+    return values
 
 
 def _batch_set(at: AppTest, values: dict[str, list[str]]) -> AppTest:
@@ -178,10 +195,11 @@ class TestAppLoadsWithoutError:
         at = _run_app()
         assert any("200 reservoir samples loaded" in c.value for c in at.caption)
 
-    def test_one_role_selectbox_per_configured_feature(self, synthetic_checkpoint):
+    def test_add_filter_lists_every_configured_feature(self, synthetic_checkpoint):
         at = _run_app()
-        role_boxes = [sb for sb in at.sidebar.selectbox if sb.key and sb.key.startswith("role::")]
-        assert {sb.key for sb in role_boxes} == {f"role::{k}" for k in _FEATURE_KEYS}
+        assert _option_labels(at.multiselect(key="root::claim_filter_keys")) == {
+            cfr_features.feature_label(k) for k in _FEATURE_KEYS
+        }
 
     def test_empty_reservoir_shows_warning_not_a_crash(self, empty_reservoir_checkpoint):
         at = _run_app()
@@ -195,74 +213,62 @@ class TestAppLoadsWithoutError:
         assert len(at.error) >= 1
 
 
-class TestSidebarRoles:
-    def test_marking_a_feature_as_split_by_renders_a_dataframe(self, synthetic_checkpoint):
+class TestRootIsJustAnotherSubstrategy:
+    """Root gets the exact same central controls as any sub-strategy added
+    via "Add sub-strategy" -- no separate sidebar version of any of them
+    (see the module docstring and _render_substrategy)."""
+
+    def test_root_gets_the_same_controls_as_any_child(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::hand_category_norm").set_value("Split By")
-        at.run(timeout=60)
         assert not at.exception
-        assert len(at.dataframe) > 0
+        assert at.multiselect(key="root::claim_filter_keys")
+        assert at.multiselect(key="root::split_by")
+        assert at.button(key="root::add_substrategy")
+        assert at.multiselect(key="root::extra_graph")
+        assert at.multiselect(key="root::extra_table")
 
-    def test_two_split_by_features_render_a_pivot_without_error(self, synthetic_checkpoint):
+    def test_root_has_no_remove_or_move_buttons(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::street_norm").set_value("Split By")
-        at.sidebar.selectbox(key="role::hand_category_norm").set_value("Split By")
-        at.run(timeout=60)
-        assert not at.exception
+        assert not any(b.key == "root::remove" for b in at.button)
+        assert not any(b.key == "root::move_up" for b in at.button)
+        assert not any(b.key == "root::move_down" for b in at.button)
 
-    def test_a_third_split_by_shows_an_error_but_does_not_crash(self, synthetic_checkpoint):
+    def test_root_heading_says_overall_strategy(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::street_norm").set_value("Split By")
-        at.sidebar.selectbox(key="role::hole_suited").set_value("Split By")
-        at.sidebar.selectbox(key="role::hand_category_norm").set_value("Split By")
-        at.run(timeout=60)
-        assert not at.exception
-        assert any("Only 2 features can be used as Split By" in e.value for e in at.error)
+        assert any(h.value.startswith("Overall Strategy") for h in at.header)
 
-    def test_deselecting_all_filter_values_shows_a_no_match_warning(self, synthetic_checkpoint):
+    def test_root_filter_narrows_its_own_scope_and_heading(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::hole_suited").set_value("Filter")
-        at.run(timeout=60)
-        at.sidebar.multiselect(key="filter::hole_suited").set_value([])
-        at.run(timeout=60)
-        assert not at.exception
-        assert len(at.warning) >= 1
+        at.multiselect(key="root::claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        observed = at.multiselect(key="root::claim_filter_values::street_norm").value
+        _batch_set(at, {"root::claim_filter_values::street_norm": observed[:1]})
 
-    def test_collapse_toggle_still_renders_without_error(self, synthetic_checkpoint):
+        assert not at.exception
+        header = next(h.value for h in at.header if h.value.startswith("Overall Strategy"))
+        assert observed[0] in header
+
+    def test_root_filter_yielding_zero_rows_shows_a_warning_and_stops_rendering(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::street_norm").set_value("Split By")
-        at.run(timeout=60)
-        at.sidebar.toggle[0].set_value(True)
-        at.run(timeout=60)
+        at.multiselect(key="root::claim_filter_keys").set_value(["hole_suited"]).run(timeout=60)
+        _batch_set(at, {"root::claim_filter_values::hole_suited": []})
+
         assert not at.exception
+        assert any("No rows match this sub-strategy's own claim filters." in w.value for w in at.warning)
+        assert not any(ms.key == "root::split_by" for ms in at.multiselect)
 
 
-class TestFilteredFeatureImportance:
+class TestSubstrategyShapImportance:
     def test_narrowing_a_filter_changes_reported_shap_values(self, synthetic_checkpoint):
         at = _run_app()
         before = _shap_values_by_key(at)
 
-        at.sidebar.selectbox(key="role::street_norm").set_value("Filter")
-        at.run(timeout=60)
-        observed = at.sidebar.multiselect(key="filter::street_norm").value
-        at.sidebar.multiselect(key="filter::street_norm").set_value(observed[:1])
-        at.run(timeout=60)
+        at.multiselect(key="root::claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        observed = at.multiselect(key="root::claim_filter_values::street_norm").value
+        _batch_set(at, {"root::claim_filter_values::street_norm": observed[:1]})
 
         after = _shap_values_by_key(at)
         assert not at.exception
         assert before != after
-
-    def test_zero_matching_rows_still_shows_every_role_selectbox(self, synthetic_checkpoint):
-        at = _run_app()
-        at.sidebar.selectbox(key="role::hole_suited").set_value("Filter")
-        at.run(timeout=60)
-        at.sidebar.multiselect(key="filter::hole_suited").set_value([])
-        at.run(timeout=60)
-
-        role_boxes = [sb for sb in at.sidebar.selectbox if sb.key and sb.key.startswith("role::")]
-        assert {sb.key for sb in role_boxes} == {f"role::{k}" for k in _FEATURE_KEYS}
-        shap_values = _shap_values_by_key(at)
-        assert all(v == 0.0 for v in shap_values.values())
 
     def test_feature_pinned_constant_by_the_filter_scores_exactly_zero(self, correlated_checkpoint):
         # Regression test: hand_category_norm is pinned to a single constant
@@ -278,10 +284,8 @@ class TestFilteredFeatureImportance:
         at = _run_app()
         unfiltered = _shap_values_by_key(at)
 
-        at.sidebar.selectbox(key="role::street_norm").set_value("Filter")
-        at.run(timeout=60)
-        at.sidebar.multiselect(key="filter::street_norm").set_value(["Preflop"])
-        at.run(timeout=60)
+        at.multiselect(key="root::claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        _batch_set(at, {"root::claim_filter_values::street_norm": ["Preflop"]})
 
         assert not at.exception
         filtered = _shap_values_by_key(at)
@@ -295,56 +299,25 @@ class TestFilteredFeatureImportance:
         assert filtered["hand_category_norm"] == 0.0  # constant, and so exactly uninformative, once filtered to Preflop
 
 
-class TestActiveFiltersWidget:
-    def test_no_widget_when_no_filters_active(self, synthetic_checkpoint):
-        at = _run_app()
-        active_widgets = [ms for ms in at.multiselect if ms.key and ms.key.startswith("active_filters::")]
-        assert len(active_widgets) == 0
-
-    def test_active_filter_shows_a_removable_tag_widget(self, synthetic_checkpoint):
-        at = _run_app()
-        at.sidebar.selectbox(key="role::hole_suited").set_value("Filter")
-        at.run(timeout=60)
-
-        active_widgets = [ms for ms in at.multiselect if ms.key and ms.key.startswith("active_filters::")]
-        assert len(active_widgets) == 1
-        assert active_widgets[0].value == ["hole_suited"]
-
-    def test_removing_a_tag_turns_that_filter_back_to_unused(self, synthetic_checkpoint):
-        at = _run_app()
-        at.sidebar.selectbox(key="role::hole_suited").set_value("Filter")
-        at.run(timeout=60)
-        active_widget = next(ms for ms in at.multiselect if ms.key and ms.key.startswith("active_filters::"))
-        active_widget.set_value([])
-        at.run(timeout=60)
-
-        assert not at.exception
-        assert at.sidebar.selectbox(key="role::hole_suited").value == "Unused"
-        active_widgets = [ms for ms in at.multiselect if ms.key and ms.key.startswith("active_filters::")]
-        assert len(active_widgets) == 0
-
-
 class TestGraphs:
     def test_marking_a_feature_as_graph_renders_one_line_chart(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::street_norm").set_value("Graph")
-        at.run(timeout=60)
+        at.multiselect(key="root::extra_graph").set_value(["street_norm"]).run(timeout=60)
 
         assert not at.exception
         charts = at.get("plotly_chart")
         assert len(charts) == 1
-        assert charts[0].id.endswith("graph_chart::street_norm")
+        assert charts[0].id.endswith("root::extra::graph_chart::street_norm")
 
-    def test_no_graphs_section_when_nothing_is_marked_graph(self, synthetic_checkpoint):
+    def test_no_graphs_section_when_nothing_is_added(self, synthetic_checkpoint):
         at = _run_app()
         assert not at.get("plotly_chart")
-        assert not any("Graphs" == h.value for h in at.header)
+        assert not any("Graphs" in m.value for m in at.markdown)
 
     def test_crossing_with_another_feature_adds_four_heatmaps(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::street_norm").set_value("Graph")
-        at.run(timeout=60)
-        at.multiselect(key="root::graph_cross::street_norm").set_value(["hand_category_norm"])
+        at.multiselect(key="root::extra_graph").set_value(["street_norm"]).run(timeout=60)
+        at.multiselect(key="root::extra::graph_cross::street_norm").set_value(["hand_category_norm"])
         at.run(timeout=60)
 
         assert not at.exception
@@ -355,17 +328,15 @@ class TestGraphs:
 
     def test_cross_dropdown_excludes_the_graphed_feature_itself(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::street_norm").set_value("Graph")
-        at.run(timeout=60)
+        at.multiselect(key="root::extra_graph").set_value(["street_norm"]).run(timeout=60)
 
-        cross = at.multiselect(key="root::graph_cross::street_norm")
+        cross = at.multiselect(key="root::extra::graph_cross::street_norm")
         assert "Betting Street" not in cross.options  # street_norm's own label -- can't cross a feature with itself
         assert set(cross.options) == {"Suited Hole Cards", "Hand Strength Tier"}
 
     def test_line_chart_has_one_trace_per_action_and_a_percent_y_axis(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::street_norm").set_value("Graph")
-        at.run(timeout=60)
+        at.multiselect(key="root::extra_graph").set_value(["street_norm"]).run(timeout=60)
 
         spec = json.loads(at.get("plotly_chart")[0].proto.spec)
         assert len(spec["data"]) == strategy.NUM_ACTION_CATEGORIES
@@ -374,8 +345,7 @@ class TestGraphs:
 
     def test_collapsing_actions_also_collapses_the_line_chart_to_four_traces(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::street_norm").set_value("Graph")
-        at.run(timeout=60)
+        at.multiselect(key="root::extra_graph").set_value(["street_norm"]).run(timeout=60)
         at.sidebar.toggle[0].set_value(True)
         at.run(timeout=60)
 
@@ -385,9 +355,8 @@ class TestGraphs:
 
     def test_heatmaps_always_use_the_four_simplified_actions_regardless_of_toggle(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::street_norm").set_value("Graph")
-        at.run(timeout=60)
-        at.multiselect(key="root::graph_cross::street_norm").set_value(["hand_category_norm"])
+        at.multiselect(key="root::extra_graph").set_value(["street_norm"]).run(timeout=60)
+        at.multiselect(key="root::extra::graph_cross::street_norm").set_value(["hand_category_norm"])
         at.run(timeout=60)
         at.sidebar.toggle[0].set_value(True)  # collapse toggle should only affect the line chart, not the heatmaps
         at.run(timeout=60)
@@ -400,80 +369,63 @@ class TestGraphs:
         )
         assert heatmap_titles == sorted(f"{label} rate" for label in _COLLAPSED_LABELS)
 
-    def test_root_graphs_section_uses_the_prominent_header(self, synthetic_checkpoint):
+    def test_graphs_heading_is_a_subordinate_markdown_heading_at_root(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::hole_suited").set_value("Graph")
-        at.run(timeout=60)
+        at.multiselect(key="root::extra_graph").set_value(["hole_suited"]).run(timeout=60)
 
         assert not at.exception
-        assert any(h.value == "Graphs" for h in at.header)
-        assert not any("Graphs" in m.value for m in at.markdown)
-
-    def test_substrategy_graphs_heading_is_one_level_below_its_own_heading(self, synthetic_checkpoint):
-        at = _run_app()
-        at.sidebar.selectbox(key="role::hole_suited").set_value("Graph")
-        at.run(timeout=60)
-        _add_substrategy(at, "root::")
-
-        assert not at.exception
-        # The sub-strategy's own heading is a subheader (level 0); "Graphs"
-        # for that same node should render one level smaller, as a markdown
-        # heading, not compete with it as another st.header/subheader.
-        assert not any(h.value == "Graphs" for h in at.subheader)
+        assert not any(h.value == "Graphs" for h in at.header)
         graphs_headings = [m.value for m in at.markdown if "Graphs" in m.value]
         assert len(graphs_headings) == 1
-        assert graphs_headings[0] == "#### Graphs"  # one level below level-0's implicit h3
+        assert graphs_headings[0] == "#### Graphs"
+
+    def test_graphs_heading_is_the_same_subordinate_level_for_a_substrategy(self, synthetic_checkpoint):
+        at = _run_app()
+        c0 = _add_substrategy(at, "root::")
+        at.multiselect(key=f"{c0}extra_graph").set_value(["hole_suited"]).run(timeout=60)
+
+        assert not at.exception
+        graphs_headings = [m.value for m in at.markdown if "Graphs" in m.value]
+        assert len(graphs_headings) == 1
+        assert graphs_headings[0] == "#### Graphs"
 
     def test_each_substrategy_gets_its_own_independently_keyed_graph(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::hole_suited").set_value("Graph")
-        at.run(timeout=60)
         c0 = _add_substrategy(at, "root::")
-        c1 = _add_substrategy(at, "root::")
-        # Give each sibling its own claim so both actually have rows left
-        # to render with -- an unfiltered first sibling would otherwise
-        # claim literally everything its parent has, leaving the second
-        # with nothing (see the waterfall semantics in the module
-        # docstring): a real "each gets its own view" scenario needs them
-        # to be distinguishable, not both left as an open-ended catch-all.
-        at.multiselect(key=f"{c0}claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
-        at.multiselect(key=f"{c1}claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
-        _batch_set(at, {
-            f"{c0}claim_filter_values::street_norm": ["Preflop"],
-            f"{c1}claim_filter_values::street_norm": ["Flop"],
-        })
+        # A single, unclaimed child is enough to prove key independence --
+        # not layering in a full disjoint-claim sibling waterfall here,
+        # since re-touching several already-set claim-filter multiselects
+        # in a later, unrelated batch is exactly the AppTest format_func
+        # round-trip quirk _batch_set's docstring warns about (confirmed
+        # during development: it silently reverts an earlier claim back to
+        # unclaimed), which this test has no need to risk.
+        _batch_set(at, {"root::extra_graph": ["hole_suited"], f"{c0}extra_graph": ["hole_suited"]})
 
         assert not at.exception
         charts = at.get("plotly_chart")
-        # root's own + one per sub-strategy.
-        assert len(charts) == 3
-        assert len({c.id for c in charts}) == 3
-        assert any(c.id.endswith("root::graph_chart::hole_suited") for c in charts)
-        assert any(c.id.endswith(f"{c0}graph_chart::hole_suited") for c in charts)
-        assert any(c.id.endswith(f"{c1}graph_chart::hole_suited") for c in charts)
+        assert len(charts) == 2
+        assert len({c.id for c in charts}) == 2
+        assert any(c.id.endswith("root::extra::graph_chart::hole_suited") for c in charts)
+        assert any(c.id.endswith(f"{c0}extra::graph_chart::hole_suited") for c in charts)
 
     def test_substrategy_cross_dropdown_is_independent_of_roots_own(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::hole_suited").set_value("Graph")
-        at.run(timeout=60)
         c0 = _add_substrategy(at, "root::")
+        _batch_set(at, {"root::extra_graph": ["hole_suited"], f"{c0}extra_graph": ["hole_suited"]})
 
         cross_widgets = {ms.key: ms for ms in at.multiselect if ms.key and "graph_cross::" in ms.key}
-        assert set(cross_widgets) == {"root::graph_cross::hole_suited", f"{c0}graph_cross::hole_suited"}
+        assert set(cross_widgets) == {"root::extra::graph_cross::hole_suited", f"{c0}extra::graph_cross::hole_suited"}
 
-        cross_widgets["root::graph_cross::hole_suited"].set_value(["hand_category_norm"])
+        cross_widgets["root::extra::graph_cross::hole_suited"].set_value(["hand_category_norm"])
         at.run(timeout=60)
 
         assert not at.exception
-        assert cross_widgets[f"{c0}graph_cross::hole_suited"].key in {
-            ms.key for ms in at.multiselect if ms.key and "graph_cross::" in ms.key
-        }
-        substrategy_cross = at.multiselect(key=f"{c0}graph_cross::hole_suited")
+        substrategy_cross = at.multiselect(key=f"{c0}extra::graph_cross::hole_suited")
         assert substrategy_cross.value == []  # unaffected by root's own selection
 
 
 class TestSubStrategies:
-    """The new priority-ordered "sub-strategy" mechanic (see
+    """The priority-ordered "sub-strategy" mechanic (see
     _render_substrategy's own docstring): "Add sub-strategy" creates an
     ordered child; each child's own claim filter takes rows away from its
     parent before the next sibling (or the parent's own default behaviour)
@@ -603,14 +555,15 @@ class TestSplitBy:
     prominent, implementable table+graph and %SHAP-explained figure (see
     _render_substrategy)."""
 
-    def test_root_split_by_comes_from_the_sidebar(self, synthetic_checkpoint):
+    def test_root_has_its_own_local_split_by_widget(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::hand_category_norm").set_value("Split By")
-        at.run(timeout=60)
+        assert at.multiselect(key="root::split_by")
+        assert len(at.dataframe) > 0
+
+    def test_root_split_by_renders_a_dataframe(self, synthetic_checkpoint):
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["hand_category_norm"]).run(timeout=60)
         assert not at.exception
-        # No local Split By widget at root -- the sidebar role assignment
-        # already is root's own choice.
-        assert not any(ms.key == "root::split_by" for ms in at.multiselect)
         assert len(at.dataframe) > 0
 
     def test_substrategy_has_its_own_local_split_by_widget(self, synthetic_checkpoint):
@@ -618,10 +571,9 @@ class TestSplitBy:
         c0 = _add_substrategy(at, "root::")
         assert at.multiselect(key=f"{c0}split_by")
 
-    def test_substrategy_split_by_defaults_to_inherit_the_sidebars_pick(self, synthetic_checkpoint):
+    def test_substrategy_split_by_defaults_to_inherit_its_parents_pick(self, synthetic_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::hand_category_norm").set_value("Split By")
-        at.run(timeout=60)
+        at.multiselect(key="root::split_by").set_value(["hand_category_norm"]).run(timeout=60)
         c0 = _add_substrategy(at, "root::")
         assert at.multiselect(key=f"{c0}split_by").value == ["hand_category_norm"]
 
@@ -667,6 +619,69 @@ class TestSplitBy:
         assert not at.exception
         assert any("Pick 1-2 Split By features" in c.value for c in at.caption)
         assert not any(m.label == "SHAP explained by Split By features" for m in at.metric)
+
+
+class TestNavigation:
+    """The sidebar's nested, clickable shorthand outline of the current
+    sub-strategy tree (see _render_navigation), replacing the old sidebar
+    feature dropdowns."""
+
+    def test_anchor_renders_before_root_heading(self, synthetic_checkpoint):
+        at = _run_app()
+        assert not at.exception
+        assert any(m.value == '<a name="root"></a>' for m in at.markdown)
+
+    def test_root_link_present_by_default(self, synthetic_checkpoint):
+        at = _run_app()
+        nav = next(m for m in at.sidebar.markdown if "Overall Strategy" in m.value)
+        assert "(#root)" in nav.value
+
+    def test_child_gets_its_own_indented_nested_link(self, synthetic_checkpoint):
+        at = _run_app()
+        c0 = _add_substrategy(at, "root::")
+        child_id = c0.rsplit("substrategy_", 1)[1].rstrip(":")
+
+        nav = next(m for m in at.sidebar.markdown if "Overall Strategy" in m.value)
+        assert f"(#root-substrategy_{child_id})" in nav.value
+        lines = nav.value.splitlines()
+        root_line = next(l for l in lines if "(#root)" in l)
+        child_line = next(l for l in lines if f"root-substrategy_{child_id}" in l)
+        assert not root_line.startswith(" ")
+        assert child_line.startswith("  ")
+
+    def test_unclaimed_child_label_says_unclaimed(self, synthetic_checkpoint):
+        at = _run_app()
+        _add_substrategy(at, "root::")
+        nav = next(m for m in at.sidebar.markdown if "Overall Strategy" in m.value)
+        assert "Sub-strategy (unclaimed)" in nav.value
+
+    def test_child_claim_shows_up_in_its_nav_label(self, synthetic_checkpoint):
+        at = _run_app()
+        c0 = _add_substrategy(at, "root::")
+        at.multiselect(key=f"{c0}claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        observed = at.multiselect(key=f"{c0}claim_filter_values::street_norm").value
+        _batch_set(at, {f"{c0}claim_filter_values::street_norm": observed[:1]})
+
+        nav = next(m for m in at.sidebar.markdown if "Overall Strategy" in m.value)
+        assert observed[0] in nav.value
+
+    def test_long_claim_description_gets_truncated_in_nav_but_not_in_heading(self, synthetic_checkpoint):
+        at = _run_app()
+        c0 = _add_substrategy(at, "root::")
+        at.multiselect(key=f"{c0}claim_filter_keys").set_value(["hand_category_norm"]).run(timeout=60)
+
+        assert not at.exception
+        observed = at.multiselect(key=f"{c0}claim_filter_values::hand_category_norm").value
+        full_desc = f"Hand Strength Tier = {', '.join(observed)}"
+        assert full_desc in at.subheader[0].value  # the real heading is never truncated
+
+        nav = next(m for m in at.sidebar.markdown if "Overall Strategy" in m.value)
+        child_line = next(l for l in nav.value.splitlines() if "substrategy_" in l)
+        if len(full_desc) > 40:
+            assert "…]" in child_line  # truncated with an ellipsis, right before the markdown link closes
+            assert full_desc not in child_line
+        else:
+            assert full_desc in child_line
 
 
 _HOLE_HAND_GRID_FEATURE_KEYS = ("street_norm", "hole_hand_grid_x_norm", "hole_hand_grid_y_norm")
@@ -767,32 +782,31 @@ def all_preflop_hole_hand_grid_checkpoint(_all_preflop_hole_hand_grid_checkpoint
 
 
 class TestExactHoleHand:
-    def test_appears_in_sidebar_with_restricted_roles(self, hole_hand_grid_checkpoint):
+    def test_excluded_from_add_filter_options(self, hole_hand_grid_checkpoint):
         at = _run_app()
         assert not at.exception
-        sb = at.sidebar.selectbox(key="role::hole_hand_grid_x_norm")
-        assert list(sb.proto.options) == ["Unused", "Split By", "Graph"]
-        assert not sb.proto.disabled  # some preflop rows are in view by default
+        assert "Exact Hole Hand" not in _option_labels(at.multiselect(key="root::claim_filter_keys"))
 
-    def test_second_axis_gets_no_selectbox_of_its_own(self, hole_hand_grid_checkpoint):
+    def test_available_as_split_by_when_preflop_rows_present(self, hole_hand_grid_checkpoint):
         at = _run_app()
-        role_keys = {sb.key for sb in at.sidebar.selectbox if sb.key}
-        assert "role::hole_hand_grid_y_norm" not in role_keys
-        assert "role::street_norm" in role_keys  # the ordinary feature still gets its own
+        assert not at.exception
+        assert "Exact Hole Hand" in _option_labels(at.multiselect(key="root::split_by"))
+
+    def test_second_axis_collapses_into_a_single_split_by_option(self, hole_hand_grid_checkpoint):
+        at = _run_app()
+        options = [o for o in at.multiselect(key="root::split_by").options if "Exact Hole Hand" in o]
+        assert len(options) == 1
 
     def test_not_displayed_by_default(self, hole_hand_grid_checkpoint):
         at = _run_app()
         assert not at.exception
         assert not at.get("plotly_chart")
-        assert not any(h.value == "Graphs" for h in at.header)
 
     def test_marking_as_graph_renders_heatmaps_in_the_graphs_section(self, hole_hand_grid_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::hole_hand_grid_x_norm").set_value("Graph")
-        at.run(timeout=60)
+        at.multiselect(key="root::extra_graph").set_value(["hole_hand_grid_x_norm"]).run(timeout=60)
 
         assert not at.exception
-        assert any(h.value == "Graphs" for h in at.header)
         charts = [c for c in at.get("plotly_chart") if "graph_chart::hole_hand_grid_x_norm::" in c.id]
         assert len(charts) == 4
         titles = sorted(json.loads(c.proto.spec)["layout"]["title"]["text"] for c in charts)
@@ -802,8 +816,7 @@ class TestExactHoleHand:
 
     def test_axes_run_ace_to_deuce_with_ace_at_top_left(self, hole_hand_grid_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::hole_hand_grid_x_norm").set_value("Graph")
-        at.run(timeout=60)
+        at.multiselect(key="root::extra_graph").set_value(["hole_hand_grid_x_norm"]).run(timeout=60)
 
         chart = next(c for c in at.get("plotly_chart") if "graph_chart::hole_hand_grid_x_norm::" in c.id)
         spec = json.loads(chart.proto.spec)
@@ -814,38 +827,32 @@ class TestExactHoleHand:
 
     def test_other_features_dont_offer_it_as_a_cross_target(self, hole_hand_grid_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::street_norm").set_value("Graph")
-        at.run(timeout=60)
+        at.multiselect(key="root::extra_graph").set_value(["street_norm"]).run(timeout=60)
 
-        cross = at.multiselect(key="root::graph_cross::street_norm")
+        cross = at.multiselect(key="root::extra::graph_cross::street_norm")
         assert "Exact Hole Hand" not in cross.options
 
     def test_absent_when_checkpoint_lacks_the_feature(self, synthetic_checkpoint):
         at = _run_app()
         assert not at.exception
-        role_keys = {sb.key for sb in at.sidebar.selectbox if sb.key}
-        assert "role::hole_hand_grid_x_norm" not in role_keys
+        assert "Exact Hole Hand" not in _option_labels(at.multiselect(key="root::split_by"))
 
-    def test_disabled_when_global_filter_excludes_every_preflop_row(self, hole_hand_grid_checkpoint):
+    def test_add_graph_excludes_it_when_the_filtered_view_has_no_preflop_rows(self, hole_hand_grid_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::street_norm").set_value("Filter")
-        at.run(timeout=60)
-        at.sidebar.multiselect(key="filter::street_norm").set_value(["River"])
-        at.run(timeout=60)
+        at.multiselect(key="root::claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        _batch_set(at, {"root::claim_filter_values::street_norm": ["River"]})
 
         assert not at.exception
-        sb = at.sidebar.selectbox(key="role::hole_hand_grid_x_norm")
-        assert sb.proto.disabled
+        assert "Exact Hole Hand" not in _option_labels(at.multiselect(key="root::extra_graph"))
 
-    def test_absent_when_every_row_is_postflop(self, tmp_path_factory, monkeypatch):
+    def test_add_graph_excludes_it_when_every_row_is_postflop(self, tmp_path_factory, monkeypatch):
         path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_all_postflop")), "checkpoint")
         _make_hole_hand_grid_checkpoint(path, np.random.default_rng(1), all_postflop=True)
         monkeypatch.setenv("CFR_EXPLORER_CHECKPOINT_PATH", path)
 
         at = _run_app()
         assert not at.exception
-        sb = at.sidebar.selectbox(key="role::hole_hand_grid_x_norm")
-        assert sb.proto.disabled
+        assert "Exact Hole Hand" not in _option_labels(at.multiselect(key="root::extra_graph"))
 
     def test_selectable_as_split_by(self, hole_hand_grid_checkpoint):
         at = _run_app()
@@ -891,11 +898,9 @@ class TestExactHoleHand:
         assert len(charts) == 0
         assert any("100% preflop" in w.value for w in at.warning)
 
-    def test_root_split_by_from_sidebar_also_fills_both_slots(self, hole_hand_grid_checkpoint):
+    def test_root_split_by_also_fills_both_slots(self, hole_hand_grid_checkpoint):
         at = _run_app()
-        at.sidebar.selectbox(key="role::hole_hand_grid_x_norm").set_value("Split By")
-        at.sidebar.selectbox(key="role::street_norm").set_value("Split By")
-        at.run(timeout=60)
+        at.multiselect(key="root::split_by").set_value(["hole_hand_grid_x_norm", "street_norm"]).run(timeout=60)
 
         assert not at.exception
-        assert any("fills both of Split By's slots by itself" in e.value for e in at.error)
+        assert any("fills both Split By slots by itself" in c.value for c in at.caption)

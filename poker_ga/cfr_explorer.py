@@ -5,15 +5,16 @@ features whose exact table+graph become its implementable rule, a
 %SHAP-explained figure showing how much predictive signal that
 simplification keeps, and its own further-nested child sub-strategies.
 
-Every feature gets a sidebar role: Unused, Filter (narrows every
-sub-strategy's rows globally), Split By (up to 2 features -- also what sets
-the *root* sub-strategy's own Split By pair), or Graph (an illustrative
-line/heatmap chart rendered under every sub-strategy). Beneath that, the
-root sub-strategy -- and every child added via "Add sub-strategy" -- gets
-its own local controls: its own filters (for a child, this *is* its claim
-condition -- see below), its own Split By pair (defaulting to inherit its
-parent's, independently overridable), and purely illustrative "Add
-table"/"Add graph" additions.
+Every sub-strategy -- including the root one, covering the whole loaded
+reservoir -- gets the exact same central controls: "Add filter" (for a
+child, this *is* its claim condition -- see below), "Split By" (1-2
+features, defaulting to inherit its parent's current pair, independently
+overridable), "Add sub-strategy", and purely illustrative "Add table"/"Add
+graph" additions. There's no separate global/sidebar version of any of
+these -- the sidebar is just page-level settings (checkpoint path, sample
+cap, the collapse toggle) plus a navigation tree (see _render_navigation)
+of clickable links, one per sub-strategy, for jumping around the page
+instead of scrolling.
 
 Sub-strategies claim rows in priority order: each child sees only its
 parent's rows minus whatever earlier siblings already claimed (via their
@@ -40,15 +41,14 @@ Exact Hole Hand (features.py's hole_hand_grid_x_norm, paired with
 hole_hand_grid_y_norm which collapses into it -- see
 cfr_features.display_feature_keys) is a partial exception: it's inherently
 2D, a position in the classic 13x13 preflop starting-hand grid rather than
-a single ordered scale, so Filter doesn't apply to it, and picking it as
-Split By fills *both* slots by itself (see _resolve_split_by) and only
-actually renders (as its own fixed set of heatmaps, in place of the usual
-table+line-chart -- see _hole_hand_grid_figures) once a sub-strategy's own
-rows are 100% preflop (see _hole_hand_grid_split_by_available). Its sidebar
-role is greyed out (disabled, but still listed alongside every other
-feature) whenever the rows currently in view have no preflop samples at
-all -- masked to a negative sentinel outside preflop (see
-features.extract_features), so it has nothing meaningful to plot there.
+a single ordered scale, so it's excluded from "Add filter"/"Add table"
+options, and picking it as Split By fills *both* slots by itself (see
+_resolve_split_by) and only actually renders (as its own fixed set of
+heatmaps, in place of the usual table+line-chart -- see
+_hole_hand_grid_figures) once a sub-strategy's own rows are 100% preflop
+(see _hole_hand_grid_split_by_available) -- masked to a negative sentinel
+outside preflop (see features.extract_features), so it has nothing
+meaningful to plot otherwise.
 """
 
 from __future__ import annotations
@@ -79,28 +79,19 @@ DEFAULT_MAX_SAMPLES = 1_000_000
 _FEATURE_COL_PREFIX = "feat::"
 _ACTION_COL_PREFIX = "action::"
 
-ROLE_UNUSED = "Unused"
-ROLE_FILTER = "Filter"
-ROLE_SPLIT_BY = "Split By"
-ROLE_GRAPH = "Graph"
-ROLES = (ROLE_UNUSED, ROLE_FILTER, ROLE_SPLIT_BY, ROLE_GRAPH)
 MAX_SPLIT_BY_FEATURES = 2
 
 # Exact Hole Hand: the display-representative key (features.py links
 # hole_hand_grid_y_norm to this one so display_feature_keys collapses them
-# into a single sidebar entry -- see that FeatureSpec's own docstring) and
-# its own second axis, plus the two raw (non-bucket-labeled) DataFrame
-# columns _build_dataframe stores its actual values under -- see
+# into a single entry in every dropdown -- see that FeatureSpec's own
+# docstring) and its own second axis, plus the two raw (non-bucket-labeled)
+# DataFrame columns _build_dataframe stores its actual values under -- see
 # _hole_hand_grid_figures for why a generic bucket-label column wouldn't
 # make sense for it the way it does for every other feature.
 _HOLE_HAND_GRID_KEY = "hole_hand_grid_x_norm"
 _HOLE_HAND_GRID_Y_KEY = "hole_hand_grid_y_norm"
 _HOLE_HAND_GRID_RAW_X_COL = "raw::hole_hand_grid_x_norm"
 _HOLE_HAND_GRID_RAW_Y_COL = "raw::hole_hand_grid_y_norm"
-# Filter relies on a feature having a single ordered bucket-label scale --
-# meaningless for an inherently 2D position, so its sidebar role is
-# restricted to these three (Split By is fine -- see _resolve_split_by).
-_HOLE_HAND_GRID_ROLES = (ROLE_UNUSED, ROLE_SPLIT_BY, ROLE_GRAPH)
 
 _COLLAPSED_LABELS = ("Fold", "Call", "Raise", "All-In")
 _COLLAPSED_GROUP_OF_ACTION = {
@@ -178,8 +169,8 @@ def _build_dataframe(checkpoint_path: str, max_samples: int) -> tuple[pd.DataFra
     columns instead -- see _hole_hand_grid_figures, which reads them
     directly. raw_features is the same rows' full net-input vectors
     (row-aligned with df, i.e. same order/positions), kept around so
-    _filtered_feature_importance can re-explain just the rows a filter
-    selects without re-touching the reservoir. Everything else the UI does
+    _shap_importance_for_rows can re-explain just the rows a sub-strategy
+    claims without re-touching the reservoir. Everything else the UI does
     is just pandas filtering/grouping over df, computed once."""
     net, net_config, reservoir = _load_checkpoint(checkpoint_path)
     rng = np.random.default_rng(0)
@@ -214,49 +205,6 @@ def _build_dataframe(checkpoint_path: str, max_samples: int) -> tuple[pd.DataFra
     return pd.DataFrame(data), features
 
 
-@st.cache_data(show_spinner="Ranking features by SHAP contribution for the current filters...")
-def _filtered_feature_importance(
-    checkpoint_path: str, max_samples: int, filters_key: tuple[tuple[str, tuple[str, ...]], ...],
-) -> list[tuple[str, float]]:
-    """One (feature_key, mean |SHAP|) pair per *displayed* feature (see
-    cfr_features.display_feature_keys/fold_child_contributions), explained
-    over only the reservoir rows matching `filters_key` -- a hashable
-    (feature_key, kept_bucket_labels) form of the sidebar's current
-    Filter-role selections, so this recomputes (and st.cache_data
-    invalidates) whenever a filter is added, removed, or changed. The
-    background reference is drawn from that *same* filtered pool, not the
-    whole loaded sample: a feature the filter holds constant (e.g.
-    num_overcards_norm within a preflop-only filter, where there's no
-    board yet so it's always exactly 0) then has x_i - background_i = 0 for
-    every interpolation point, so GradientExplainer attributes it ~0
-    contribution structurally -- not just on average after centering (see
-    cfr_networks._normalized_mean_abs_shap). Comparing against the whole
-    reservoir instead would draw background_i from rows where the feature
-    does vary (e.g. postflop hands), making x_i - background_i nonzero and
-    noisy per explained row in a way row-mean centering doesn't fully
-    cancel, letting an actually-constant-under-this-filter feature still
-    read as importantly-contributing.
-
-    Always returns exactly one entry per displayed feature -- including a
-    0.0 entry for every feature when the filters match zero rows -- rather
-    than the empty list mean_shap_contributions_for_samples would give back
-    for an empty explain pool: _render_sidebar iterates this same list to
-    decide which role/filter widgets to draw, so a feature dropping out of
-    it would silently make that feature's own controls (and whatever
-    filter it's set to) vanish from the sidebar."""
-    net, net_config, _reservoir = _load_checkpoint(checkpoint_path)
-    df, raw_features = _build_dataframe(checkpoint_path, max_samples)
-    filters = {key: list(values) for key, values in filters_key}
-    mask = _filter_mask(df, filters).to_numpy()
-    filtered_features = raw_features[mask]
-    contributions = cfr_networks.mean_shap_contributions_for_samples(
-        net, filtered_features, filtered_features, net_config.feature_keys, np.random.default_rng(0),
-    )
-    folded = dict(cfr_features.fold_child_contributions(contributions))
-    display_keys = cfr_features.display_feature_keys(net_config.feature_keys)
-    return sorted(((key, folded.get(key, 0.0)) for key in display_keys), key=lambda kv: -kv[1])
-
-
 def _row_digest(row_index: np.ndarray) -> str:
     """Cheap, stable hash of a set of row positions -- the actual
     st.cache_data key for _shap_importance_for_rows, since the row array
@@ -269,17 +217,18 @@ def _row_digest(row_index: np.ndarray) -> str:
 def _shap_importance_for_rows(
     checkpoint_path: str, max_samples: int, row_digest: str, _row_index: np.ndarray,
 ) -> list[tuple[str, float]]:
-    """SHAP importance (see _filtered_feature_importance) restricted to
-    exactly the rows at `_row_index` -- a sub-strategy's own claimed rows,
-    however they got there (its own filters, minus whatever earlier
-    siblings already claimed -- not representable as a simple
-    feature->kept-bucket-labels dict the way the sidebar's global filters
-    are, since claim-order exclusion isn't "pin one key to one value").
-    Used both for a sub-strategy's own "Add ..." dropdown ranking (in place
-    of the whole-reservoir sidebar ranking) and its %SHAP-explained figure.
-    Always one entry per displayed feature, 0.0 for every feature when
-    `_row_index` is empty -- see _filtered_feature_importance for why that
-    matters to callers that iterate this to build widgets."""
+    """Mean |SHAP| contribution per displayed feature (see
+    cfr_networks.mean_shap_contributions_for_samples/cfr_features.
+    fold_child_contributions/display_feature_keys), restricted to exactly
+    the rows at `_row_index` -- a sub-strategy's own claimed rows, however
+    they got there (its own filters, minus whatever earlier siblings
+    already claimed -- not representable as a simple
+    feature->kept-bucket-labels dict, since claim-order exclusion isn't
+    "pin one key to one value"). Used both for a sub-strategy's own
+    "Add ..." dropdown ranking and its %SHAP-explained figure. Always one
+    entry per displayed feature, 0.0 for every feature when `_row_index` is
+    empty, so a feature never silently drops out of a widget that iterates
+    this list to build its options."""
     net, net_config, _reservoir = _load_checkpoint(checkpoint_path)
     display_keys = cfr_features.display_feature_keys(net_config.feature_keys)
     if len(_row_index) == 0:
@@ -310,10 +259,9 @@ def _resolve_split_by(chosen_keys: list[str]) -> list[str]:
 
 def _hole_hand_grid_available(df: pd.DataFrame) -> bool:
     """Whether `df` has at least one preflop (unmasked) Exact Hole Hand
-    row -- used both to grey out its sidebar role (see _render_sidebar) and
-    to decide whether to offer it in a sub-strategy's own "Add graph"
-    dropdown (see _render_substrategy). False if the checkpoint wasn't
-    trained with the feature at all (no raw column to check)."""
+    row -- used to decide whether to offer it in a sub-strategy's own "Add
+    graph" dropdown (see _render_substrategy). False if the checkpoint
+    wasn't trained with the feature at all (no raw column to check)."""
     if _HOLE_HAND_GRID_RAW_X_COL not in df.columns:
         return False
     return bool((df[_HOLE_HAND_GRID_RAW_X_COL] >= 0.0).any())
@@ -321,11 +269,11 @@ def _hole_hand_grid_available(df: pd.DataFrame) -> bool:
 
 def _hole_hand_grid_split_by_available(df: pd.DataFrame) -> bool:
     """Whether *every* row of `df` is preflop (unmasked) Exact Hole Hand --
-    stricter than _hole_hand_grid_available's `.any()` (used for the
-    sidebar role / "Add graph" eligibility, where a partial view is still
-    fine to chart). Split By is meant to be exactly implementable, so
-    picking Exact Hole Hand there only actually renders once a
-    sub-strategy's own rows are 100% preflop -- see _render_substrategy."""
+    stricter than _hole_hand_grid_available's `.any()` (used for "Add
+    graph" eligibility, where a partial view is still fine to chart).
+    Split By is meant to be exactly implementable, so picking Exact Hole
+    Hand there only actually renders once a sub-strategy's own rows are
+    100% preflop -- see _render_substrategy."""
     if _HOLE_HAND_GRID_RAW_X_COL not in df.columns or df.empty:
         return False
     return bool((df[_HOLE_HAND_GRID_RAW_X_COL] >= 0.0).all())
@@ -336,22 +284,6 @@ def _observed_categories(df: pd.DataFrame, key: str) -> list[str]:
     sidebar only ever offers filter/observed values a person could actually
     select something for, not the feature's full theoretical value table."""
     return [c for c in cfr_features.bucket_categories(key) if c in set(df[_feature_col(key)])]
-
-
-def _current_filters_from_session_state(display_keys: list[str], df: pd.DataFrame) -> dict[str, list[str]]:
-    """Rebuilds the `filters` dict from whatever's already sitting in
-    st.session_state for each feature's role/filter widgets -- so
-    _filtered_feature_importance can be computed *before* _render_sidebar
-    re-creates those same widgets later in this same rerun. Safe to read
-    this early because Streamlit keeps a widget's session_state value
-    across reruns keyed by its own `key=`, independent of when in the
-    script that widget actually gets re-instantiated."""
-    filters: dict[str, list[str]] = {}
-    for key in display_keys:
-        if st.session_state.get(f"role::{key}") != ROLE_FILTER:
-            continue
-        filters[key] = st.session_state.get(f"filter::{key}", _observed_categories(df, key))
-    return filters
 
 
 def _action_columns(collapsed: bool) -> list[str]:
@@ -534,7 +466,8 @@ def _render_graphs(
     filtered: pd.DataFrame, graph_keys: list[str], display_keys: list[str], collapsed: bool, key_prefix: str = "",
     level: int = 0,
 ) -> None:
-    """One line chart per feature marked Graph, each paired with a
+    """One line chart per feature picked via a sub-strategy's own local
+    "Add graph" control (see _render_substrategy), each paired with a
     multiselect of other features to "cross" it with -- every feature
     picked there adds its own row of 4 heatmaps (this graphed feature as
     the x axis, the picked feature as the y axis, one heatmap per
@@ -549,18 +482,13 @@ def _render_graphs(
     independently-computed set of graphs over just its own rows) --
     without it, two nodes' widgets for the same graphed feature would
     collide on the same Streamlit widget key. `level` should already be
-    one past whatever sub-strategy heading this call's graphs belong to (0
-    at root) -- the "Graphs" heading here renders at exactly that level
-    (_heading_at_level), i.e. one level below its own node's heading, so it
-    always reads as a subsection of that sub-strategy rather than a sibling
-    of equal weight; at root, it's the page's only section heading, so it
-    keeps the more prominent st.header instead."""
+    one past whatever sub-strategy heading this call's graphs belong to --
+    the "Graphs" heading here renders at exactly that level
+    (_heading_at_level), so it always reads as a subsection of that
+    sub-strategy rather than a sibling of equal weight."""
     if not graph_keys:
         return
-    if level == 0:
-        st.header("Graphs")
-    else:
-        _heading_at_level("Graphs", level)
+    _heading_at_level("Graphs", level)
 
     for key in graph_keys:
         if key == _HOLE_HAND_GRID_KEY:
@@ -597,76 +525,6 @@ def _render_graphs(
                     st.plotly_chart(heatmap_fig, key=f"{key_prefix}graph_heat::{key}::{cross_key}::{i}")
 
 
-def _render_sidebar(
-    feature_order: list[tuple[str, float]], df: pd.DataFrame, hole_hand_grid_available: bool,
-) -> tuple[dict[str, list[str]], list[str], list[str], bool]:
-    """Returns (filters, split_by_keys, graph_keys, collapsed). `filters`
-    maps feature_key -> the bucket labels to keep for it -- applies
-    globally, to every sub-strategy. `split_by_keys` (already resolved via
-    _resolve_split_by, so at most MAX_SPLIT_BY_FEATURES, or exactly
-    [_HOLE_HAND_GRID_KEY] if that was picked) becomes the *root*
-    sub-strategy's own Split By pair -- every other sub-strategy (added via
-    "Add sub-strategy") gets its own independent local Split By widget
-    instead (see _render_substrategy), defaulting to inherit whatever its
-    parent's current pair is. Exact Hole Hand (_HOLE_HAND_GRID_KEY) gets a
-    restricted options list (Filter relies on a single ordered bucket-label
-    scale, meaningless for its inherently 2D position -- see
-    _HOLE_HAND_GRID_ROLES) and is disabled (greyed out, but still listed
-    here like every other feature) whenever `hole_hand_grid_available` is
-    False -- the rows currently in view (after the *global* filters below)
-    have no preflop samples for it to show at all."""
-    st.sidebar.header("Features")
-    st.sidebar.caption(
-        "Ordered by mean |SHAP| contribution to the net's predictions, over whichever rows "
-        "currently pass your Filter selections below (recomputed whenever a filter changes)."
-    )
-
-    filters: dict[str, list[str]] = {}
-    split_by_keys: list[str] = []
-    graph_keys: list[str] = []
-
-    for key, importance in feature_order:
-        label = f"{cfr_features.feature_label(key)}  (SHAP {importance:.4f})"
-        if key == _HOLE_HAND_GRID_KEY:
-            role = st.sidebar.selectbox(
-                label, _HOLE_HAND_GRID_ROLES, key=f"role::{key}", help=cfr_features.feature_description(key),
-                disabled=not hole_hand_grid_available,
-            )
-        else:
-            role = st.sidebar.selectbox(
-                label, ROLES, key=f"role::{key}", help=cfr_features.feature_description(key),
-            )
-        if role == ROLE_FILTER:
-            observed = _observed_categories(df, key)
-            filters[key] = st.sidebar.multiselect("keep values", observed, default=observed, key=f"filter::{key}")
-        elif role == ROLE_SPLIT_BY:
-            split_by_keys.append(key)
-        elif role == ROLE_GRAPH:
-            graph_keys.append(key)
-
-    resolved_split_by = _resolve_split_by(split_by_keys)
-    if resolved_split_by != split_by_keys:
-        dropped = [k for k in split_by_keys if k not in resolved_split_by]
-        dropped_labels = ", ".join(cfr_features.feature_label(k) for k in dropped)
-        if _HOLE_HAND_GRID_KEY in split_by_keys:
-            st.error(
-                f"Exact Hole Hand is inherently 2D and fills both of Split By's slots by itself -- "
-                f"ignoring {dropped_labels}. Change one of those features' roles to use a different pair."
-            )
-        else:
-            kept_labels = ", ".join(cfr_features.feature_label(k) for k in resolved_split_by)
-            st.error(
-                f"Only {MAX_SPLIT_BY_FEATURES} features can be used as Split By at once -- "
-                f"using {kept_labels} (by SHAP rank) and ignoring {dropped_labels}. Change one "
-                "of those features' roles to use a different pair."
-            )
-
-    st.sidebar.divider()
-    collapsed = st.sidebar.toggle("Collapse actions to Fold / Call / Raise / All-In", value=False)
-
-    return filters, resolved_split_by, graph_keys, collapsed
-
-
 def _filter_mask(df: pd.DataFrame, filters: dict[str, list[str]]) -> pd.Series:
     mask = pd.Series(True, index=df.index)
     for key, values in filters.items():
@@ -676,36 +534,6 @@ def _filter_mask(df: pd.DataFrame, filters: dict[str, list[str]]) -> pd.Series:
 
 def _apply_filters(df: pd.DataFrame, filters: dict[str, list[str]]) -> pd.DataFrame:
     return df[_filter_mask(df, filters)]
-
-
-def _render_active_filters(filters: dict[str, list[str]]) -> None:
-    """A quick-remove control for the central section, just above the
-    tables: every feature currently marked as a Filter shows up as one tag
-    in a multiselect, and Streamlit renders each selected tag with its own
-    small "x" -- clicking it off here has the same effect as switching that
-    feature's role back to Unused in the sidebar, without having to go find
-    it there (the sidebar list is SHAP-ordered, so a given feature isn't
-    always where you last left it).
-
-    Keyed on the *current* set of active filter keys (rather than one fixed
-    key) so a change in which features are filters -- made either here or
-    in the sidebar -- always starts this widget from a fresh, fully-checked
-    default instead of risking a stale selection left over from a
-    since-removed filter."""
-    if not filters:
-        return
-    active_keys = list(filters.keys())
-    widget_key = "active_filters::" + "|".join(sorted(active_keys))
-    kept_keys = st.multiselect(
-        "Active filters (click a tag's ✕ to turn that filter off)",
-        options=active_keys, default=active_keys, format_func=cfr_features.feature_label,
-        key=widget_key,
-    )
-    removed_keys = set(active_keys) - set(kept_keys)
-    if removed_keys:
-        for key in removed_keys:
-            st.session_state[f"role::{key}"] = ROLE_UNUSED
-        st.rerun()
 
 
 def _render_table(group_df: pd.DataFrame, split_by_keys: list[str], collapsed: bool) -> None:
@@ -737,6 +565,18 @@ def _render_table(group_df: pd.DataFrame, split_by_keys: list[str], collapsed: b
     st.dataframe((summary * 100).round(1).astype(str) + "%")
     with st.expander(f"Sample counts (total n={len(view):,})"):
         st.dataframe(counts)
+
+
+def _anchor_id(key_prefix: str) -> str:
+    """A stable, HTML-safe in-page anchor id for the sub-strategy node at
+    `key_prefix` (e.g. "root::" -> "root",
+    "root::substrategy_ab12cd34::" -> "root-substrategy_ab12cd34") -- used
+    by _render_substrategy (to mark each node's own heading) and
+    _render_navigation (to link to it). Safe to splice into an
+    unsafe_allow_html anchor tag since `key_prefix` is always built from
+    this app's own code-controlled strings (the literal "root::" plus
+    uuid4 hex child ids -- see _add_substrategy), never user input."""
+    return key_prefix.rstrip(":").replace("::", "-")
 
 
 def _heading_at_level(text: str, level: int) -> None:
@@ -790,65 +630,73 @@ def _move_substrategy(parent_key_prefix: str, child_id: str, delta: int) -> None
 
 def _render_substrategy(
     incoming_df: pd.DataFrame, key_prefix: str, checkpoint_path: str, max_samples: int,
-    display_keys: list[str], graph_keys: list[str], collapsed: bool, level: int, inherited_split_by: list[str],
+    display_keys: list[str], collapsed: bool, level: int,
     parent_key_prefix: str | None = None, child_id: str | None = None,
 ) -> pd.Index:
     """Renders one sub-strategy node -- root (`parent_key_prefix` is None,
-    `incoming_df` already the sidebar-filtered pool, `inherited_split_by`
-    the sidebar's own resolved Split By pair, no heading) or a child added
-    via "Add sub-strategy" (its own local filters *are* its claim
-    condition -- see the module docstring) -- and every one of its own
-    further-nested children, in priority order. Returns `incoming_df`'s row
-    index this node claimed (after its own local filters, before any of its
-    own children's further claims) so the caller can subtract it from what
-    the *next* sibling sees, and from its own default-behaviour leftover
-    once every child of *this* node has had a turn.
+    `incoming_df` the whole loaded reservoir, heading "Overall Strategy")
+    or a child added via "Add sub-strategy" (its own local filters *are*
+    its claim condition -- see the module docstring) -- and every one of
+    its own further-nested children, in priority order. Every node gets
+    identical controls; root differs only in having no Remove/Move
+    buttons, a plain "Add filter" label instead of "Claim condition (Add
+    filter)", and a prominent st.header instead of a level-sized
+    _heading_at_level heading. Returns `incoming_df`'s row index this node
+    claimed (after its own local filters, before any of its own children's
+    further claims) so the caller can subtract it from what the *next*
+    sibling sees, and from its own default-behaviour leftover once every
+    child of *this* node has had a turn.
 
-    Render order: heading + remove/move controls (children only) -> this
-    node's own local filters (children only -- these define what it
-    claims, so `node_df` here is its *full* claimed scope) -> "Add
-    sub-strategy" + every existing child, recursed in order, each one
-    seeing this node's rows minus every earlier sibling's own claim -> this
-    node's actual "default behaviour" (`node_df` minus every child's own
-    claim) -- Split By widget (inherited for root; local, independently
-    overridable, for a child), the prominent table+graph, and the
+    Render order: this node's own local filters (define what it claims, so
+    `node_df` here is its *full* claimed scope) -> anchor + heading (+
+    remove/move controls for a child) -> "Add sub-strategy" + every
+    existing child, recursed in order, each one seeing this node's rows
+    minus every earlier sibling's own claim -> this node's actual "default
+    behaviour" (`node_df` minus every child's own claim) -- Split By
+    widget (own local widget, defaulting to inherit whatever its parent's
+    *current* Split By pair is via a direct st.session_state read, since a
+    child renders -- and needs its own default -- before its parent's own
+    Split By widget runs this same script pass; root has no parent, so it
+    just defaults to nothing), the prominent table+graph, and the
     %SHAP-explained figure, all computed over that leftover, since the
     prominent block *is* the default/else branch of the rule list -- then
-    every sidebar Graph-role feature's own chart (`graph_keys`, unchanged
-    from the sidebar, rendered at every node just like `display_keys`/
-    `collapsed`) and purely illustrative "Add table"/"Add graph" additions,
-    also over that same leftover."""
+    purely illustrative "Add table"/"Add graph" additions, also over that
+    same leftover."""
     is_root = parent_key_prefix is None
     own_level = 0 if is_root else level
 
-    if is_root:
-        node_df = incoming_df
-    else:
-        row_index = incoming_df.index.to_numpy()
-        importance = _shap_importance_for_rows(checkpoint_path, max_samples, _row_digest(row_index), row_index)
-        non_graph_options = [k for k, _ in importance if k != _HOLE_HAND_GRID_KEY]
-        importance_by_key = dict(importance)
+    row_index = incoming_df.index.to_numpy()
+    importance = _shap_importance_for_rows(checkpoint_path, max_samples, _row_digest(row_index), row_index)
+    non_graph_options = [k for k, _ in importance if k != _HOLE_HAND_GRID_KEY]
+    importance_by_key = dict(importance)
 
-        def _claim_option_label(key: str) -> str:
-            return f"{cfr_features.feature_label(key)}  (SHAP {importance_by_key[key]:.4f})"
+    def _claim_option_label(key: str) -> str:
+        return f"{cfr_features.feature_label(key)}  (SHAP {importance_by_key[key]:.4f})"
 
+    if not is_root:
         st.divider()
-        local_filter_keys = st.multiselect(
-            "Claim condition (Add filter)", options=non_graph_options, format_func=_claim_option_label,
-            key=f"{key_prefix}claim_filter_keys",
+    filter_label = "Add filter" if is_root else "Claim condition (Add filter)"
+    local_filter_keys = st.multiselect(
+        filter_label, options=non_graph_options, format_func=_claim_option_label,
+        key=f"{key_prefix}claim_filter_keys",
+    )
+    local_filters: dict[str, list[str]] = {}
+    for filter_key in local_filter_keys:
+        observed = _observed_categories(incoming_df, filter_key)
+        local_filters[filter_key] = st.multiselect(
+            f"{cfr_features.feature_label(filter_key)} -- keep values", options=observed, default=observed,
+            key=f"{key_prefix}claim_filter_values::{filter_key}",
         )
-        local_filters: dict[str, list[str]] = {}
-        for filter_key in local_filter_keys:
-            observed = _observed_categories(incoming_df, filter_key)
-            local_filters[filter_key] = st.multiselect(
-                f"{cfr_features.feature_label(filter_key)} -- keep values", options=observed, default=observed,
-                key=f"{key_prefix}claim_filter_values::{filter_key}",
-            )
-        node_df = _apply_filters(incoming_df, local_filters)
+    node_df = _apply_filters(incoming_df, local_filters)
 
-        claim_desc = ", ".join(
-            f"{cfr_features.feature_label(k)} = {', '.join(v)}" for k, v in local_filters.items()
-        )
+    claim_desc = ", ".join(
+        f"{cfr_features.feature_label(k)} = {', '.join(v)}" for k, v in local_filters.items()
+    )
+    st.markdown(f'<a name="{_anchor_id(key_prefix)}"></a>', unsafe_allow_html=True)
+    if is_root:
+        heading = f"Overall Strategy ({claim_desc})" if claim_desc else "Overall Strategy"
+        st.header(f"{heading}  (n={len(node_df):,})")
+    else:
         heading = claim_desc or "Sub-strategy (no filter set yet -- claims everything its parent hasn't)"
         col_heading, col_up, col_down, col_remove = st.columns([10, 1, 1, 1])
         with col_heading:
@@ -888,7 +736,7 @@ def _render_substrategy(
         child_key_prefix = f"{key_prefix}substrategy_{this_child_id}::"
         claimed_index = _render_substrategy(
             remaining_df, child_key_prefix, checkpoint_path, max_samples,
-            display_keys, graph_keys, collapsed, child_level, inherited_split_by,
+            display_keys, collapsed, child_level,
             parent_key_prefix=key_prefix, child_id=this_child_id,
         )
         remaining_df = remaining_df.drop(claimed_index)
@@ -904,22 +752,27 @@ def _render_substrategy(
         return f"{cfr_features.feature_label(key)}  (SHAP {importance_by_key[key]:.4f})"
 
     split_by_options = [k for k, _ in default_importance]
-    if is_root:
-        resolved_split_by = inherited_split_by
-    else:
-        chosen_split_by = st.multiselect(
-            "Split By (this sub-strategy's own 1-2 implementable features)",
-            options=split_by_options, default=[k for k in inherited_split_by if k in split_by_options],
-            format_func=_default_option_label, max_selections=MAX_SPLIT_BY_FEATURES,
-            key=f"{key_prefix}split_by",
+    # A child defaults to inherit whatever its parent's *current* Split By
+    # pair is, read directly from session_state rather than threaded as a
+    # parameter -- the parent's own Split By widget (below, in the
+    # parent's own call to this function) hasn't run yet this script pass
+    # by the time a child needs its default (children render, and claim
+    # their own rows, before their parent's own Split By widget does).
+    # Root has no parent to inherit from.
+    inherited_split_by = [] if is_root else st.session_state.get(f"{parent_key_prefix}split_by", [])
+    chosen_split_by = st.multiselect(
+        "Split By (this sub-strategy's own 1-2 implementable features)",
+        options=split_by_options, default=[k for k in inherited_split_by if k in split_by_options],
+        format_func=_default_option_label, max_selections=MAX_SPLIT_BY_FEATURES,
+        key=f"{key_prefix}split_by",
+    )
+    resolved_split_by = _resolve_split_by(chosen_split_by)
+    if resolved_split_by != chosen_split_by:
+        dropped = [k for k in chosen_split_by if k not in resolved_split_by]
+        st.caption(
+            f"Exact Hole Hand is inherently 2D and fills both Split By slots by itself -- "
+            f"ignoring {', '.join(cfr_features.feature_label(k) for k in dropped)}."
         )
-        resolved_split_by = _resolve_split_by(chosen_split_by)
-        if resolved_split_by != chosen_split_by:
-            dropped = [k for k in chosen_split_by if k not in resolved_split_by]
-            st.caption(
-                f"Exact Hole Hand is inherently 2D and fills both Split By slots by itself -- "
-                f"ignoring {', '.join(cfr_features.feature_label(k) for k in dropped)}."
-            )
 
     st.markdown("**Default behaviour**" if not is_root else "**Overall default behaviour**")
     if not default_df.empty:
@@ -961,19 +814,6 @@ def _render_substrategy(
         else:
             st.caption("Pick 1-2 Split By features above to define this sub-strategy's implementable rule.")
 
-    # Every sidebar Graph-role feature's own chart, unchanged from the
-    # sidebar and rendered at every sub-strategy node -- separate from the
-    # purely local "Add graph" extras just below (own key_prefix/level,
-    # matching how those two were already two independent calls before
-    # this rewrite). Uses `child_level` (0 at root -> the prominent
-    # st.header, since root has no heading of its own to sit below; one
-    # past a non-root node's own heading otherwise -- see
-    # _render_graphs' own docstring), not `own_level`: a non-root node's
-    # `own_level` is the level its *own* heading already renders at, so
-    # reusing it here would put "Graphs" at the same size as that heading
-    # instead of clearly subordinate to it.
-    _render_graphs(default_df, graph_keys, display_keys, collapsed, key_prefix, child_level)
-
     st.caption("Additional (illustrative) analysis")
     illustrative_options = [k for k in split_by_options if k != _HOLE_HAND_GRID_KEY]
     graph_options = split_by_options if _hole_hand_grid_available(default_df) else illustrative_options
@@ -992,6 +832,58 @@ def _render_substrategy(
     _render_graphs(default_df, extra_graph_keys, display_keys, collapsed, f"{key_prefix}extra::", own_level + 1)
 
     return node_df.index
+
+
+def _shorthand_description(key_prefix: str) -> str:
+    """The same claim-condition text this node's own heading shows (see
+    _render_substrategy's `claim_desc`), rebuilt straight out of
+    st.session_state instead of threaded through as a return value --
+    _render_navigation runs once, after the whole sub-strategy tree has
+    already rendered this script pass, so every node's own filter widgets'
+    session_state is already fresh by the time this reads it."""
+    filter_keys = st.session_state.get(f"{key_prefix}claim_filter_keys", [])
+    parts = [
+        f"{cfr_features.feature_label(key)} = {', '.join(st.session_state.get(f'{key_prefix}claim_filter_values::{key}', []))}"
+        for key in filter_keys
+    ]
+    return ", ".join(parts)
+
+
+def _truncate(text: str, limit: int = 40) -> str:
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _nav_label(key_prefix: str, is_root: bool) -> str:
+    desc = _truncate(_shorthand_description(key_prefix))
+    if is_root:
+        return f"Overall Strategy ({desc})" if desc else "Overall Strategy"
+    return desc or "Sub-strategy (unclaimed)"
+
+
+def _navigation_lines(key_prefix: str, is_root: bool, depth: int) -> list[str]:
+    """One markdown link-list line for the node at `key_prefix`, plus one
+    more (indented one level deeper) for each of its own children,
+    recursively -- flattened into a single list rather than nested Python
+    lists so the caller can join them into one markdown string, since
+    st.markdown only renders a nested bullet list correctly when the whole
+    thing is one call sharing consistent indentation, not several separate
+    calls."""
+    lines = [f"{'  ' * depth}- [{_nav_label(key_prefix, is_root)}](#{_anchor_id(key_prefix)})"]
+    for child_id in _substrategy_children(key_prefix):
+        lines.extend(_navigation_lines(f"{key_prefix}substrategy_{child_id}::", False, depth + 1))
+    return lines
+
+
+def _render_navigation() -> None:
+    """The sidebar's nested, clickable shorthand outline of the current
+    sub-strategy tree -- rendered after (in code order) _render_substrategy
+    has already drawn the whole tree in the main body this same script
+    pass, even though it visually appears in the sidebar, so every node's
+    anchor already exists on the page and every node's own session_state
+    (for its shorthand label) is already fresh."""
+    st.sidebar.header("Navigation")
+    st.sidebar.caption("Jump to any sub-strategy.")
+    st.sidebar.markdown("\n".join(_navigation_lines("root::", True, 0)))
 
 
 def main() -> None:
@@ -1017,36 +909,19 @@ def main() -> None:
     st.caption(f"{len(df):,} reservoir samples loaded.")
 
     display_keys = cfr_features.display_feature_keys(net_config.feature_keys)
-    current_filters = _current_filters_from_session_state(display_keys, df)
-    # Rendered (and, on a tag removal, may st.rerun()) before _render_sidebar
-    # below instantiates the matching role::key widgets -- session_state for
-    # an already-instantiated widget can't be reassigned this same run.
-    _render_active_filters(current_filters)
 
-    filters_key = tuple(sorted((key, tuple(values)) for key, values in current_filters.items()))
-    feature_importance = _filtered_feature_importance(checkpoint_path, int(max_samples), filters_key)
-    # Whether Exact Hole Hand's sidebar role should be enabled -- based on
-    # the *global* filters already in place (see _current_filters_from_
-    # session_state), not yet the ones _render_sidebar is about to collect
-    # this same rerun (same read-ahead trick as feature_importance above).
-    hole_hand_grid_available = _hole_hand_grid_available(_apply_filters(df, current_filters))
+    st.sidebar.divider()
+    collapsed = st.sidebar.toggle("Collapse actions to Fold / Call / Raise / All-In", value=False)
 
-    filters, split_by_keys, graph_keys, collapsed = _render_sidebar(
-        feature_importance, df, hole_hand_grid_available,
-    )
-    filtered = _apply_filters(df, filters)
+    # Root is just another sub-strategy node -- the whole loaded reservoir,
+    # with its own local "Add filter"/"Split By" controls exactly like any
+    # child (see _render_substrategy's module docstring).
+    _render_substrategy(df, "root::", checkpoint_path, int(max_samples), display_keys, collapsed, 0)
 
-    if filtered.empty:
-        st.warning("No reservoir samples match the current filters.")
-        st.stop()
-
-    # Root is just another sub-strategy node -- the whole reservoir (post
-    # sidebar filters), with no claim filters of its own and its Split By
-    # pair coming from the sidebar's own role selections rather than a
-    # local widget (see _render_substrategy).
-    _render_substrategy(
-        filtered, "root::", checkpoint_path, int(max_samples), display_keys, graph_keys, collapsed, 0, split_by_keys,
-    )
+    # Rendered after the tree above so it can read each node's own
+    # session_state (filter picks, child list) freshly populated by the
+    # widgets that just ran -- see _render_navigation.
+    _render_navigation()
 
 
 main()
