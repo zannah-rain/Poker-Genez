@@ -82,10 +82,33 @@ def _substrategy_child_prefix(at: AppTest, parent_prefix: str, index: int = -1) 
 
 
 def _add_substrategy(at: AppTest, parent_prefix: str) -> str:
-    """Clicks "Add sub-strategy" under `parent_prefix` and returns the new
-    child's own key_prefix."""
+    """Clicks "Add sub-strategy" under `parent_prefix` (which must
+    currently be the selected/rendered node, for its own button to exist)
+    and returns the new child's own key_prefix -- which, since adding a
+    sub-strategy also auto-selects it (see _add_substrategy in
+    cfr_explorer.py), is now the *currently selected* node too, so its own
+    widgets are immediately available without a separate _select call."""
     at.button(key=f"{parent_prefix}add_substrategy").click().run(timeout=60)
     return _substrategy_child_prefix(at, parent_prefix)
+
+
+def _select(at: AppTest, key_prefix: str) -> AppTest:
+    """Switches the central column to show `key_prefix`'s own page --
+    equivalent to clicking that node's sidebar/quick-jump button (see
+    _select_node in cfr_explorer.py), done here by setting session_state
+    directly, matching how this file already reaches into
+    at.session_state["substrategy_children"] elsewhere."""
+    at.session_state["selected_substrategy"] = key_prefix
+    at.run(timeout=60)
+    return at
+
+
+def _own_heading(at: AppTest) -> str:
+    """The currently selected sub-strategy's own heading text -- every
+    node's heading (root or not) is a plain st.header now (see
+    _render_substrategy), and at.header also always picks up the
+    sidebar's own "Navigation" header, so this filters that one out."""
+    return next(h.value for h in at.header if h.value != "Navigation")
 
 
 def _make_checkpoint(path: str, rng: np.random.Generator, num_samples: int = 200) -> None:
@@ -369,59 +392,54 @@ class TestGraphs:
         )
         assert heatmap_titles == sorted(f"{label} rate" for label in _COLLAPSED_LABELS)
 
-    def test_graphs_heading_is_a_subordinate_markdown_heading_at_root(self, synthetic_checkpoint):
+    def test_graphs_heading_renders_as_a_subheader_at_root(self, synthetic_checkpoint):
         at = _run_app()
         at.multiselect(key="root::extra_graph").set_value(["hole_suited"]).run(timeout=60)
 
         assert not at.exception
-        assert not any(h.value == "Graphs" for h in at.header)
-        graphs_headings = [m.value for m in at.markdown if "Graphs" in m.value]
-        assert len(graphs_headings) == 1
-        assert graphs_headings[0] == "#### Graphs"
+        assert any(h.value == "Graphs" for h in at.subheader)
 
-    def test_graphs_heading_is_the_same_subordinate_level_for_a_substrategy(self, synthetic_checkpoint):
+    def test_graphs_heading_renders_as_a_subheader_for_a_substrategy(self, synthetic_checkpoint):
         at = _run_app()
         c0 = _add_substrategy(at, "root::")
         at.multiselect(key=f"{c0}extra_graph").set_value(["hole_suited"]).run(timeout=60)
 
         assert not at.exception
-        graphs_headings = [m.value for m in at.markdown if "Graphs" in m.value]
-        assert len(graphs_headings) == 1
-        assert graphs_headings[0] == "#### Graphs"
+        assert any(h.value == "Graphs" for h in at.subheader)
 
     def test_each_substrategy_gets_its_own_independently_keyed_graph(self, synthetic_checkpoint):
         at = _run_app()
-        c0 = _add_substrategy(at, "root::")
-        # A single, unclaimed child is enough to prove key independence --
-        # not layering in a full disjoint-claim sibling waterfall here,
-        # since re-touching several already-set claim-filter multiselects
-        # in a later, unrelated batch is exactly the AppTest format_func
-        # round-trip quirk _batch_set's docstring warns about (confirmed
-        # during development: it silently reverts an earlier claim back to
-        # unclaimed), which this test has no need to risk.
-        _batch_set(at, {"root::extra_graph": ["hole_suited"], f"{c0}extra_graph": ["hole_suited"]})
-
+        c0 = _add_substrategy(at, "root::")  # auto-selected
+        at.multiselect(key=f"{c0}extra_graph").set_value(["hole_suited"]).run(timeout=60)
         assert not at.exception
-        charts = at.get("plotly_chart")
-        assert len(charts) == 2
-        assert len({c.id for c in charts}) == 2
-        assert any(c.id.endswith("root::extra::graph_chart::hole_suited") for c in charts)
-        assert any(c.id.endswith(f"{c0}extra::graph_chart::hole_suited") for c in charts)
+        c0_charts = at.get("plotly_chart")
+        assert len(c0_charts) == 1
+        assert c0_charts[0].id.endswith(f"{c0}extra::graph_chart::hole_suited")
+
+        _select(at, "root::")
+        at.multiselect(key="root::extra_graph").set_value(["hole_suited"]).run(timeout=60)
+        assert not at.exception
+        root_charts = at.get("plotly_chart")
+        assert len(root_charts) == 1
+        assert root_charts[0].id.endswith("root::extra::graph_chart::hole_suited")
+
+        assert root_charts[0].id != c0_charts[0].id
 
     def test_substrategy_cross_dropdown_is_independent_of_roots_own(self, synthetic_checkpoint):
         at = _run_app()
-        c0 = _add_substrategy(at, "root::")
-        _batch_set(at, {"root::extra_graph": ["hole_suited"], f"{c0}extra_graph": ["hole_suited"]})
+        c0 = _add_substrategy(at, "root::")  # auto-selected
 
-        cross_widgets = {ms.key: ms for ms in at.multiselect if ms.key and "graph_cross::" in ms.key}
-        assert set(cross_widgets) == {"root::extra::graph_cross::hole_suited", f"{c0}extra::graph_cross::hole_suited"}
-
-        cross_widgets["root::extra::graph_cross::hole_suited"].set_value(["hand_category_norm"])
+        _select(at, "root::")
+        at.multiselect(key="root::extra_graph").set_value(["hole_suited"]).run(timeout=60)
+        at.multiselect(key="root::extra::graph_cross::hole_suited").set_value(["hand_category_norm"])
         at.run(timeout=60)
+        assert not at.exception
 
+        _select(at, c0)
+        at.multiselect(key=f"{c0}extra_graph").set_value(["hole_suited"]).run(timeout=60)
         assert not at.exception
         substrategy_cross = at.multiselect(key=f"{c0}extra::graph_cross::hole_suited")
-        assert substrategy_cross.value == []  # unaffected by root's own selection
+        assert substrategy_cross.value == []  # unaffected by root's own earlier selection
 
 
 class TestSubStrategies:
@@ -439,20 +457,20 @@ class TestSubStrategies:
         at = _run_app()
         c0 = _add_substrategy(at, "root::")
         assert not at.exception
-        assert len(at.subheader) == 1
-        assert "no filter set yet" in at.subheader[0].value
+        assert "no filter set yet" in _own_heading(at)
         assert at.multiselect(key=f"{c0}claim_filter_keys")
         assert at.multiselect(key=f"{c0}split_by")
         assert at.button(key=f"{c0}add_substrategy")
         assert at.button(key=f"{c0}remove")
         assert at.button(key=f"{c0}move_up")
         assert at.button(key=f"{c0}move_down")
+        assert at.button(key=f"{c0}back")
 
     def test_unclaimed_substrategy_sees_every_row_its_parent_has(self, synthetic_checkpoint):
         at = _run_app()
-        c0 = _add_substrategy(at, "root::")
+        _add_substrategy(at, "root::")
         assert not at.exception
-        assert "(n=200)" in at.subheader[0].value
+        assert "(n=200)" in _own_heading(at)
 
     def test_claim_filter_narrows_the_heading_count_and_names_the_feature(self, synthetic_checkpoint):
         at = _run_app()
@@ -462,27 +480,23 @@ class TestSubStrategies:
         _batch_set(at, {f"{c0}claim_filter_values::street_norm": observed[:1]})
 
         assert not at.exception
-        assert observed[0] in at.subheader[0].value
-        assert "no filter set yet" not in at.subheader[0].value
+        assert observed[0] in _own_heading(at)
+        assert "no filter set yet" not in _own_heading(at)
 
     def test_second_sibling_only_sees_rows_the_first_did_not_claim(self, synthetic_checkpoint):
         at = _run_app()
         c0 = _add_substrategy(at, "root::")
-        c1 = _add_substrategy(at, "root::")
+        at.multiselect(key=f"{c0}claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        _batch_set(at, {f"{c0}claim_filter_values::street_norm": ["Preflop"]})
+        c0_n = int(re.search(r"n=([\d,]+)", _own_heading(at)).group(1).replace(",", ""))
 
-        _batch_set(at, {
-            f"{c0}claim_filter_keys": ["street_norm"],
-            f"{c1}claim_filter_keys": ["street_norm"],
-        })
-        _batch_set(at, {
-            f"{c0}claim_filter_values::street_norm": ["Preflop"],
-            f"{c1}claim_filter_values::street_norm": ["Flop"],
-        })
+        _select(at, "root::")
+        c1 = _add_substrategy(at, "root::")
+        at.multiselect(key=f"{c1}claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        _batch_set(at, {f"{c1}claim_filter_values::street_norm": ["Flop"]})
+        c1_n = int(re.search(r"n=([\d,]+)", _own_heading(at)).group(1).replace(",", ""))
 
         assert not at.exception
-        subheaders = [h.value for h in at.subheader]
-        c0_n = int(re.search(r"n=([\d,]+)", subheaders[0]).group(1).replace(",", ""))
-        c1_n = int(re.search(r"n=([\d,]+)", subheaders[1]).group(1).replace(",", ""))
         assert c0_n > 0
         assert c1_n > 0
         # Preflop and Flop are disjoint street buckets -- the second
@@ -502,9 +516,11 @@ class TestSubStrategies:
     def test_remove_deletes_the_substrategy(self, synthetic_checkpoint):
         at = _run_app()
         c0 = _add_substrategy(at, "root::")
+        _select(at, "root::")
         _add_substrategy(at, "root::")
         assert len(at.session_state["substrategy_children"]["root::"]) == 2
 
+        _select(at, c0)
         at.button(key=f"{c0}remove").click().run(timeout=60)
 
         assert not at.exception
@@ -514,7 +530,8 @@ class TestSubStrategies:
     def test_move_up_swaps_priority_order(self, synthetic_checkpoint):
         at = _run_app()
         _add_substrategy(at, "root::")
-        _add_substrategy(at, "root::")
+        _select(at, "root::")
+        _add_substrategy(at, "root::")  # 2nd child now selected
         ids_before = list(at.session_state["substrategy_children"]["root::"])
 
         second_prefix = f"root::substrategy_{ids_before[1]}::"
@@ -527,10 +544,12 @@ class TestSubStrategies:
     def test_move_down_swaps_priority_order(self, synthetic_checkpoint):
         at = _run_app()
         _add_substrategy(at, "root::")
+        _select(at, "root::")
         _add_substrategy(at, "root::")
         ids_before = list(at.session_state["substrategy_children"]["root::"])
 
         first_prefix = f"root::substrategy_{ids_before[0]}::"
+        _select(at, first_prefix)
         at.button(key=f"{first_prefix}move_down").click().run(timeout=60)
 
         assert not at.exception
@@ -544,10 +563,13 @@ class TestSubStrategies:
 
         assert not at.exception
         assert at.multiselect(key=f"{grandchild}claim_filter_keys")
-        assert len(at.subheader) == 1  # only c0 (level 0) -- grandchild nests one level deeper
-        # The grandchild's own "no filter set yet" heading renders as a
-        # markdown heading (level 1), not another subheader.
-        assert any("no filter set yet" in m.value for m in at.markdown)
+        assert "no filter set yet" in _own_heading(at)
+        # "Back to parent" from the grandchild goes to c0, not root directly
+        # -- confirming it really is nested one level under c0, not a
+        # second direct child of root.
+        at.button(key=f"{grandchild}back").click().run(timeout=60)
+        assert not at.exception
+        assert at.session_state["selected_substrategy"] == c0
 
 
 class TestSplitBy:
@@ -622,38 +644,32 @@ class TestSplitBy:
 
 
 class TestNavigation:
-    """The sidebar's nested, clickable shorthand outline of the current
-    sub-strategy tree (see _render_navigation), replacing the old sidebar
-    feature dropdowns."""
+    """The sidebar's nested outline of the current sub-strategy tree
+    doubles as the switcher that controls which single node's own content
+    shows in the central column (see _render_navigation/_render_substrategy)
+    -- clicking a node there re-renders the page to show it, rather than
+    scrolling to it."""
 
-    def test_anchor_renders_before_root_heading(self, synthetic_checkpoint):
+    def test_root_button_present_and_selected_by_default(self, synthetic_checkpoint):
         at = _run_app()
         assert not at.exception
-        assert any(m.value == '<a name="root"></a>' for m in at.markdown)
+        root_btn = at.sidebar.button(key="nav::root::")
+        assert root_btn.label == "Overall Strategy"
+        assert root_btn.proto.type == "primary"
 
-    def test_root_link_present_by_default(self, synthetic_checkpoint):
+    def test_child_gets_its_own_indented_nav_button_and_becomes_selected(self, synthetic_checkpoint):
         at = _run_app()
-        nav = next(m for m in at.sidebar.markdown if "Overall Strategy" in m.value)
-        assert "(#root)" in nav.value
+        c0 = _add_substrategy(at, "root::")  # auto-selected
 
-    def test_child_gets_its_own_indented_nested_link(self, synthetic_checkpoint):
-        at = _run_app()
-        c0 = _add_substrategy(at, "root::")
-        child_id = c0.rsplit("substrategy_", 1)[1].rstrip(":")
-
-        nav = next(m for m in at.sidebar.markdown if "Overall Strategy" in m.value)
-        assert f"(#root-substrategy_{child_id})" in nav.value
-        lines = nav.value.splitlines()
-        root_line = next(l for l in lines if "(#root)" in l)
-        child_line = next(l for l in lines if f"root-substrategy_{child_id}" in l)
-        assert not root_line.startswith(" ")
-        assert child_line.startswith("  ")
+        child_btn = at.sidebar.button(key=f"nav::{c0}")
+        assert child_btn.label.lstrip("\xa0") != child_btn.label  # indented one level deeper than root
+        assert child_btn.proto.type == "primary"
+        assert at.sidebar.button(key="nav::root::").proto.type == "secondary"
 
     def test_unclaimed_child_label_says_unclaimed(self, synthetic_checkpoint):
         at = _run_app()
-        _add_substrategy(at, "root::")
-        nav = next(m for m in at.sidebar.markdown if "Overall Strategy" in m.value)
-        assert "Sub-strategy (unclaimed)" in nav.value
+        c0 = _add_substrategy(at, "root::")
+        assert at.sidebar.button(key=f"nav::{c0}").label.strip() == "Sub-strategy (unclaimed)"
 
     def test_child_claim_shows_up_in_its_nav_label(self, synthetic_checkpoint):
         at = _run_app()
@@ -662,8 +678,7 @@ class TestNavigation:
         observed = at.multiselect(key=f"{c0}claim_filter_values::street_norm").value
         _batch_set(at, {f"{c0}claim_filter_values::street_norm": observed[:1]})
 
-        nav = next(m for m in at.sidebar.markdown if "Overall Strategy" in m.value)
-        assert observed[0] in nav.value
+        assert observed[0] in at.sidebar.button(key=f"nav::{c0}").label
 
     def test_long_claim_description_gets_truncated_in_nav_but_not_in_heading(self, synthetic_checkpoint):
         at = _run_app()
@@ -673,15 +688,157 @@ class TestNavigation:
         assert not at.exception
         observed = at.multiselect(key=f"{c0}claim_filter_values::hand_category_norm").value
         full_desc = f"Hand Strength Tier = {', '.join(observed)}"
-        assert full_desc in at.subheader[0].value  # the real heading is never truncated
+        assert full_desc in _own_heading(at)  # the real heading is never truncated
 
-        nav = next(m for m in at.sidebar.markdown if "Overall Strategy" in m.value)
-        child_line = next(l for l in nav.value.splitlines() if "substrategy_" in l)
+        nav_label = at.sidebar.button(key=f"nav::{c0}").label
         if len(full_desc) > 40:
-            assert "…]" in child_line  # truncated with an ellipsis, right before the markdown link closes
-            assert full_desc not in child_line
+            assert nav_label.rstrip().endswith("…")
+            assert full_desc not in nav_label
         else:
-            assert full_desc in child_line
+            assert full_desc in nav_label
+
+    def test_clicking_a_nav_button_switches_the_central_view(self, synthetic_checkpoint):
+        at = _run_app()
+        _add_substrategy(at, "root::")  # navigates away from root
+
+        at.sidebar.button(key="nav::root::").click().run(timeout=60)
+
+        assert not at.exception
+        assert at.session_state["selected_substrategy"] == "root::"
+        assert _own_heading(at).startswith("Overall Strategy")
+
+    def test_only_the_selected_nodes_own_controls_are_present(self, synthetic_checkpoint):
+        at = _run_app()
+        c0 = _add_substrategy(at, "root::")  # auto-selected
+        assert not any(ms.key == "root::claim_filter_keys" for ms in at.multiselect)
+        assert any(ms.key == f"{c0}claim_filter_keys" for ms in at.multiselect)
+
+        at.sidebar.button(key="nav::root::").click().run(timeout=60)
+
+        assert not at.exception
+        assert any(ms.key == "root::claim_filter_keys" for ms in at.multiselect)
+        assert not any(ms.key == f"{c0}claim_filter_keys" for ms in at.multiselect)
+
+    def test_back_to_parent_button_switches_selection_upward(self, synthetic_checkpoint):
+        at = _run_app()
+        c0 = _add_substrategy(at, "root::")
+
+        at.button(key=f"{c0}back").click().run(timeout=60)
+
+        assert not at.exception
+        assert at.session_state["selected_substrategy"] == "root::"
+        assert _own_heading(at).startswith("Overall Strategy")
+
+    def test_central_quick_jump_button_switches_to_a_child(self, synthetic_checkpoint):
+        at = _run_app()
+        c0 = _add_substrategy(at, "root::")
+        child_id = c0.rsplit("substrategy_", 1)[1].rstrip(":")
+        _select(at, "root::")
+
+        jump_btn = at.button(key=f"root::jump::{child_id}")
+        jump_btn.click().run(timeout=60)
+
+        assert not at.exception
+        assert at.session_state["selected_substrategy"] == c0
+
+    def test_removing_the_selected_node_redirects_to_its_parent(self, synthetic_checkpoint):
+        at = _run_app()
+        c0 = _add_substrategy(at, "root::")
+
+        at.button(key=f"{c0}remove").click().run(timeout=60)
+
+        assert not at.exception
+        assert at.session_state["selected_substrategy"] == "root::"
+        assert _own_heading(at).startswith("Overall Strategy")
+
+    def test_removing_an_ancestor_of_the_selected_node_also_redirects(self, synthetic_checkpoint):
+        at = _run_app()
+        c0 = _add_substrategy(at, "root::")
+        grandchild = _add_substrategy(at, c0)
+        assert at.session_state["selected_substrategy"] == grandchild
+
+        _select(at, c0)
+        at.button(key=f"{c0}remove").click().run(timeout=60)
+
+        assert not at.exception
+        assert at.session_state["selected_substrategy"] == "root::"
+
+
+class TestStickyStateAcrossNavigation:
+    """Regression coverage for a real bug found during development: since
+    only the currently selected node's own widgets render each script run
+    (see _render_substrategy), Streamlit forgets a *widget's own*
+    session_state the instant its st.xxx(key=...) call stops executing for
+    even one run -- confirmed directly against a fresh AppTest session,
+    not just this app's own code. Left unhandled, navigating away from a
+    node and back would silently reset its claim filters (breaking the
+    waterfall row-claiming math for every sibling/descendant that depends
+    on it) and its Split By/extras choices (a confusing UI regression).
+    cfr_explorer.py fixes this with a set of small sticky-storage helpers
+    (_local_filters_from_state/_split_by_from_state/_sticky_multiselect)
+    that persist a widget's current value in a plain, non-widget
+    session_state dict the widget's own render always keeps up to date."""
+
+    def test_claim_filter_survives_navigating_away_and_back(self, synthetic_checkpoint):
+        at = _run_app()
+        c0 = _add_substrategy(at, "root::")
+        at.multiselect(key=f"{c0}claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        observed = at.multiselect(key=f"{c0}claim_filter_values::street_norm").value
+        _batch_set(at, {f"{c0}claim_filter_values::street_norm": observed[:1]})
+        heading_before = _own_heading(at)
+
+        _select(at, "root::")
+        _select(at, c0)
+
+        assert not at.exception
+        assert _own_heading(at) == heading_before
+        assert at.multiselect(key=f"{c0}claim_filter_keys").value == ["street_norm"]
+        assert at.multiselect(key=f"{c0}claim_filter_values::street_norm").value == observed[:1]
+
+    def test_first_siblings_claim_still_subtracted_after_revisiting_it(self, synthetic_checkpoint):
+        # The exact scenario that caught the underlying bug: c0's own
+        # claim must still be subtracted from what c1 sees, even after a
+        # run where c0's own widgets didn't render at all.
+        at = _run_app()
+        c0 = _add_substrategy(at, "root::")
+        at.multiselect(key=f"{c0}claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        _batch_set(at, {f"{c0}claim_filter_values::street_norm": ["Preflop"]})
+
+        _select(at, "root::")
+        c1 = _add_substrategy(at, "root::")
+        at.multiselect(key=f"{c1}claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        _batch_set(at, {f"{c1}claim_filter_values::street_norm": ["Flop"]})
+        # Revisit c0 (a no-op read, but exercises the exact code path that
+        # broke -- rendering some *other* node after c0's own widgets have
+        # gone a run without executing).
+        _select(at, c0)
+        _select(at, c1)
+
+        assert not at.exception
+        c1_n = int(re.search(r"n=([\d,]+)", _own_heading(at)).group(1).replace(",", ""))
+        assert 0 < c1_n < 200  # nonzero, and strictly less than the parent's full pool
+
+    def test_split_by_survives_navigating_away_and_back(self, synthetic_checkpoint):
+        at = _run_app()
+        c0 = _add_substrategy(at, "root::")
+        at.multiselect(key=f"{c0}split_by").set_value(["street_norm"]).run(timeout=60)
+
+        _select(at, "root::")
+        _select(at, c0)
+
+        assert not at.exception
+        assert at.multiselect(key=f"{c0}split_by").value == ["street_norm"]
+
+    def test_extra_graph_survives_navigating_away_and_back(self, synthetic_checkpoint):
+        at = _run_app()
+        at.multiselect(key="root::extra_graph").set_value(["street_norm"]).run(timeout=60)
+
+        _add_substrategy(at, "root::")
+        _select(at, "root::")
+
+        assert not at.exception
+        assert at.multiselect(key="root::extra_graph").value == ["street_norm"]
+        assert len(at.get("plotly_chart")) == 1
 
 
 _HOLE_HAND_GRID_FEATURE_KEYS = ("street_norm", "hole_hand_grid_x_norm", "hole_hand_grid_y_norm")

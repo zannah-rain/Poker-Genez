@@ -11,10 +11,15 @@ child, this *is* its claim condition -- see below), "Split By" (1-2
 features, defaulting to inherit its parent's current pair, independently
 overridable), "Add sub-strategy", and purely illustrative "Add table"/"Add
 graph" additions. There's no separate global/sidebar version of any of
-these -- the sidebar is just page-level settings (checkpoint path, sample
-cap, the collapse toggle) plus a navigation tree (see _render_navigation)
-of clickable links, one per sub-strategy, for jumping around the page
-instead of scrolling.
+these.
+
+Only *one* sub-strategy's own content is ever on screen at a time (see
+_render_substrategy) -- the sidebar's nested navigation tree (see
+_render_navigation) doubles as a switcher: clicking a node there re-renders
+the central column to show that node instead of scrolling to it. A node's
+own page also lists its direct children as quick-jump buttons, and "Add
+sub-strategy" jumps straight to the new child, so drilling down never
+requires the sidebar; "← Back to parent" is the way back up.
 
 Sub-strategies claim rows in priority order: each child sees only its
 parent's rows minus whatever earlier siblings already claimed (via their
@@ -509,7 +514,6 @@ def _hole_hand_grid_figures(df: pd.DataFrame) -> list[go.Figure]:
 
 def _render_graphs(
     filtered: pd.DataFrame, graph_keys: list[str], display_keys: list[str], collapsed: bool, key_prefix: str = "",
-    level: int = 0,
 ) -> None:
     """One line chart per feature picked via a sub-strategy's own local
     "Add graph" control (see _render_substrategy), each paired with a
@@ -526,14 +530,10 @@ def _render_graphs(
     calls this once per sub-strategy node (so every node gets its own,
     independently-computed set of graphs over just its own rows) --
     without it, two nodes' widgets for the same graphed feature would
-    collide on the same Streamlit widget key. `level` should already be
-    one past whatever sub-strategy heading this call's graphs belong to --
-    the "Graphs" heading here renders at exactly that level
-    (_heading_at_level), so it always reads as a subsection of that
-    sub-strategy rather than a sibling of equal weight."""
+    collide on the same Streamlit widget key."""
     if not graph_keys:
         return
-    _heading_at_level("Graphs", level)
+    st.subheader("Graphs")
 
     for key in graph_keys:
         if key == _HOLE_HAND_GRID_KEY:
@@ -552,9 +552,10 @@ def _render_graphs(
         col_controls, col_chart = st.columns([1, 3])
         with col_controls:
             st.markdown(f"**{cfr_features.feature_label(key)}**")
-            cross_keys = st.multiselect(
+            cross_keys = _sticky_multiselect(
                 "Cross with other features (adds heatmaps below)",
-                options=other_keys, format_func=cfr_features.feature_label, key=f"{key_prefix}graph_cross::{key}",
+                other_keys, key=f"{key_prefix}graph_cross::{key}", default=[],
+                format_func=cfr_features.feature_label,
             )
         with col_chart:
             st.plotly_chart(_line_chart_figure(filtered, key, collapsed), key=f"{key_prefix}graph_chart::{key}")
@@ -612,31 +613,8 @@ def _render_table(group_df: pd.DataFrame, split_by_keys: list[str], collapsed: b
         st.dataframe(counts)
 
 
-def _anchor_id(key_prefix: str) -> str:
-    """A stable, HTML-safe in-page anchor id for the sub-strategy node at
-    `key_prefix` (e.g. "root::" -> "root",
-    "root::substrategy_ab12cd34::" -> "root-substrategy_ab12cd34") -- used
-    by _render_substrategy (to mark each node's own heading) and
-    _render_navigation (to link to it). Safe to splice into an
-    unsafe_allow_html anchor tag since `key_prefix` is always built from
-    this app's own code-controlled strings (the literal "root::" plus
-    uuid4 hex child ids -- see _add_substrategy), never user input."""
-    return key_prefix.rstrip(":").replace("::", "-")
-
-
-def _heading_at_level(text: str, level: int) -> None:
-    """level 0 uses st.subheader (matching this app's single-group-split
-    behavior before nesting existed); each level below that drops one
-    further markdown heading size, capped at h6, so a chain of several
-    nested headings still reads as a strict hierarchy instead of running
-    out of distinct sizes."""
-    if level == 0:
-        st.subheader(text)
-    else:
-        st.markdown(f"{'#' * min(level + 3, 6)} {text}")
-
-
 _SUBSTRATEGY_CHILDREN_STATE_KEY = "substrategy_children"
+_SELECTED_SUBSTRATEGY_STATE_KEY = "selected_substrategy"
 
 
 def _substrategy_children(key_prefix: str) -> list[str]:
@@ -649,8 +627,52 @@ def _substrategy_children(key_prefix: str) -> list[str]:
     return st.session_state.setdefault(_SUBSTRATEGY_CHILDREN_STATE_KEY, {}).setdefault(key_prefix, [])
 
 
+def _child_key_prefix(parent_key_prefix: str, child_id: str) -> str:
+    return f"{parent_key_prefix}substrategy_{child_id}::"
+
+
+def _parent_key_prefix_and_child_id(key_prefix: str) -> tuple[str | None, str | None]:
+    """(None, None) for root ("root::", which has no parent); otherwise
+    (parent_key_prefix, child_id), split off `key_prefix`'s own last
+    "substrategy_<id>::" segment. Purely a string operation -- key_prefix
+    is always built from "root::" plus one such segment per generation
+    (see _child_key_prefix/_add_substrategy), never user input."""
+    if key_prefix == "root::":
+        return None, None
+    parent_prefix, _, tail = key_prefix.rpartition("substrategy_")
+    return parent_prefix, tail.rstrip(":")
+
+
+def _ancestor_prefixes(key_prefix: str) -> list[str]:
+    """Every prefix from "root::" up to and including `key_prefix` itself,
+    in root-to-leaf order -- e.g. "root::substrategy_ab::substrategy_cd::"
+    -> ["root::", "root::substrategy_ab::", "root::substrategy_ab::substrategy_cd::"]."""
+    prefixes = [key_prefix]
+    while True:
+        parent, _ = _parent_key_prefix_and_child_id(prefixes[-1])
+        if parent is None:
+            break
+        prefixes.append(parent)
+    return list(reversed(prefixes))
+
+
+def _selected_node() -> str:
+    return st.session_state.get(_SELECTED_SUBSTRATEGY_STATE_KEY, "root::")
+
+
+def _select_node(key_prefix: str) -> None:
+    st.session_state[_SELECTED_SUBSTRATEGY_STATE_KEY] = key_prefix
+
+
 def _add_substrategy(key_prefix: str) -> None:
-    _substrategy_children(key_prefix).append(uuid.uuid4().hex[:8])
+    children = _substrategy_children(key_prefix)
+    new_id = uuid.uuid4().hex[:8]
+    children.append(new_id)
+    # Jump straight to the new sub-strategy -- otherwise "Add sub-strategy"
+    # would leave the view unchanged (only the currently selected node ever
+    # renders -- see _render_substrategy), with no visible sign anything
+    # happened short of checking the sidebar.
+    _select_node(_child_key_prefix(key_prefix, new_id))
 
 
 def _remove_substrategy(parent_key_prefix: str, child_id: str) -> None:
@@ -663,6 +685,13 @@ def _remove_substrategy(parent_key_prefix: str, child_id: str) -> None:
     children = _substrategy_children(parent_key_prefix)
     if child_id in children:
         children.remove(child_id)
+    removed_prefix = _child_key_prefix(parent_key_prefix, child_id)
+    # If the removed node (or any descendant of it) was the one currently
+    # on screen, its own key_prefix no longer refers to anything -- back
+    # out to the parent rather than leave the view pointed at a node that
+    # no longer exists.
+    if _selected_node().startswith(removed_prefix):
+        _select_node(parent_key_prefix)
 
 
 def _move_substrategy(parent_key_prefix: str, child_id: str, delta: int) -> None:
@@ -673,50 +702,150 @@ def _move_substrategy(parent_key_prefix: str, child_id: str, delta: int) -> None
         children[i], children[j] = children[j], children[i]
 
 
+# Streamlit forgets a *widget's own* session_state entry the moment its
+# st.xxx(key=...) call stops executing for even one script run (e.g. a
+# sub-strategy node that isn't the one currently selected -- confirmed
+# directly: st.session_state[widget_key] raises KeyError, "did you forget
+# to initialize it", after a run where that widget's call site didn't
+# execute). Since only the selected node's own widgets render each run
+# (see _render_substrategy), that would silently reset every OTHER node's
+# own claim filters/Split By pick/extras back to their defaults the moment
+# you navigate away from them -- breaking both the waterfall row-claiming
+# math (an ancestor's or earlier sibling's claim, no longer "remembered",
+# would stop being subtracted at all) and the UI (a revisited node's
+# controls would appear to have forgotten your earlier choices). The fix:
+# every widget below that some OTHER node's computation or a later
+# revisit depends on is "sticky" -- its current value is copied into one
+# of these plain (non-widget) session_state dicts right after it renders,
+# and that copy (not the widget's own, unreliable session_state entry) is
+# what both this node's *own* `default=` on a later re-render, and any
+# OTHER node's read of it, actually use.
+_SUBSTRATEGY_CLAIMS_STATE_KEY = "substrategy_claims"
+_SUBSTRATEGY_SPLIT_BY_STATE_KEY = "substrategy_split_by"
+_WIDGET_VALUE_SHADOW_STATE_KEY = "widget_value_shadow"
+
+
+def _local_filters_from_state(key_prefix: str) -> dict[str, list[str]]:
+    """This node's own local claim filters -- the sticky copy persisted
+    the last time its real "Add filter"/"keep values" widgets rendered
+    (see the module-level comment above and _render_substrategy). `{}`
+    (claims everything, its own true default) for a node that's never
+    been visited yet."""
+    return st.session_state.setdefault(_SUBSTRATEGY_CLAIMS_STATE_KEY, {}).get(key_prefix, {})
+
+
+def _set_local_filters(key_prefix: str, filters: dict[str, list[str]]) -> None:
+    st.session_state.setdefault(_SUBSTRATEGY_CLAIMS_STATE_KEY, {})[key_prefix] = filters
+
+
+def _split_by_from_state(key_prefix: str) -> list[str]:
+    """This node's own (unresolved, possibly not-yet-capped-at-2) Split By
+    pick -- the sticky copy persisted the last time its real Split By
+    widget rendered. `[]` for root or a node that's never been visited."""
+    return st.session_state.setdefault(_SUBSTRATEGY_SPLIT_BY_STATE_KEY, {}).get(key_prefix, [])
+
+
+def _set_split_by(key_prefix: str, split_by: list[str]) -> None:
+    st.session_state.setdefault(_SUBSTRATEGY_SPLIT_BY_STATE_KEY, {})[key_prefix] = split_by
+
+
+def _sticky_multiselect(label: str, options: list[str], key: str, default: list[str], **kwargs) -> list[str]:
+    """st.multiselect that remembers its own value across the widget not
+    rendering for a run or more, via _WIDGET_VALUE_SHADOW_STATE_KEY (see
+    the module-level comment above) -- for widgets whose value nothing
+    *else* needs to read (unlike claim filters/Split By, which get their
+    own dedicated sticky stores above so their reads can skip the
+    `default=` fallback dance this does). `default` is this widget's
+    fallback the *first* time it's ever instantiated (no sticky value yet)
+    -- e.g. "every observed value" for a fresh "keep values" widget."""
+    shadow = st.session_state.setdefault(_WIDGET_VALUE_SHADOW_STATE_KEY, {})
+    previous = [v for v in shadow.get(key, default) if v in options]
+    value = st.multiselect(label, options=options, default=previous, key=key, **kwargs)
+    shadow[key] = value
+    return value
+
+
+def _resolve_incoming_df(root_df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
+    """The dataframe pool visible to the node at `key_prefix`, BEFORE its
+    own local claim filters -- `root_df` itself for root, or otherwise its
+    parent's own claimed scope minus whatever earlier siblings (at every
+    ancestor level along the way) have already claimed. Purely a
+    st.session_state walk (see _local_filters_from_state), no widgets
+    rendered -- lets the currently selected node's own real widgets start
+    from the right pool without any of its ancestors needing to render too
+    (only the selected node renders -- see _render_substrategy)."""
+    prefixes = _ancestor_prefixes(key_prefix)  # root-to-leaf, key_prefix itself last
+    node_df = root_df  # becomes "the previous ancestor's own node_df" each iteration
+    incoming_df = root_df
+    for prefix in prefixes:
+        parent_prefix, this_id = _parent_key_prefix_and_child_id(prefix)
+        if parent_prefix is None:
+            incoming_df = root_df
+        else:
+            remaining = node_df
+            for sibling_id in _substrategy_children(parent_prefix):
+                if sibling_id == this_id:
+                    break
+                sibling_prefix = _child_key_prefix(parent_prefix, sibling_id)
+                claimed = _apply_filters(remaining, _local_filters_from_state(sibling_prefix))
+                remaining = remaining.drop(claimed.index)
+            incoming_df = remaining
+        if prefix == key_prefix:
+            return incoming_df
+        node_df = _apply_filters(incoming_df, _local_filters_from_state(prefix))
+    return incoming_df
+
+
+def _resolve_default_df(node_df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
+    """`node_df` (the currently selected node's own full claimed scope)
+    minus whatever its own *direct* children have already claimed (via
+    _local_filters_from_state, one per child) -- this node's actual
+    "default behaviour" leftover, without rendering any child (only the
+    selected node renders -- see _render_substrategy)."""
+    remaining = node_df
+    for child_id in _substrategy_children(key_prefix):
+        child_prefix = _child_key_prefix(key_prefix, child_id)
+        claimed = _apply_filters(remaining, _local_filters_from_state(child_prefix))
+        remaining = remaining.drop(claimed.index)
+    return remaining
+
+
 def _render_substrategy(
-    incoming_df: pd.DataFrame, key_prefix: str, checkpoint_path: str, max_samples: int,
-    display_keys: list[str], collapsed: bool, level: int,
-    parent_key_prefix: str | None = None, child_id: str | None = None,
-) -> pd.Index:
-    """Renders one sub-strategy node -- root (`parent_key_prefix` is None,
-    `incoming_df` the whole loaded reservoir, heading "Overall Strategy")
-    or a child added via "Add sub-strategy" (its own local filters *are*
-    its claim condition -- see the module docstring) -- and every one of
-    its own further-nested children, in priority order. Every node gets
-    identical controls; root differs only in having no Remove/Move
-    buttons, a plain "Add filter" label instead of "Claim condition (Add
-    filter)", and a prominent st.header instead of a level-sized
-    _heading_at_level heading. Returns `incoming_df`'s row index this node
-    claimed (after its own local filters, before any of its own children's
-    further claims) so the caller can subtract it from what the *next*
-    sibling sees, and from its own default-behaviour leftover once every
-    child of *this* node has had a turn.
+    root_df: pd.DataFrame, key_prefix: str, checkpoint_path: str, max_samples: int,
+    display_keys: list[str], collapsed: bool,
+) -> None:
+    """Renders the *currently selected* sub-strategy node's own page --
+    root ("root::", heading "Overall Strategy") or any node added via "Add
+    sub-strategy" (its own local filters *are* its claim condition -- see
+    the module docstring) -- and nothing else: every other node in the
+    tree is reached by switching selection (a sidebar nav button, one of
+    this node's own "Sub-strategies" quick-jump buttons, or "Back to
+    parent"), not by scrolling. `root_df` is the whole loaded reservoir,
+    unfiltered -- this node's own ancestors and earlier siblings are
+    resolved from st.session_state alone (see _resolve_incoming_df),
+    without any of them needing to render.
 
     Render order: this node's own local filters (define what it claims, so
-    `node_df` here is its *full* claimed scope) -> anchor + heading (+
-    remove/move controls for a child) -> "Add sub-strategy" + every
-    existing child, recursed in order, each one seeing this node's rows
-    minus every earlier sibling's own claim -> this node's actual "default
-    behaviour" (`node_df` minus every child's own claim) -- Split By
-    widget (own local widget, defaulting to inherit whatever its parent's
-    *current* Split By pair is via a direct st.session_state read, since a
-    child renders -- and needs its own default -- before its parent's own
-    Split By widget runs this same script pass; root has no parent, so it
-    just defaults to nothing), the prominent table+graph, and the
-    %SHAP-explained figure, all computed over that leftover, since the
-    prominent block *is* the default/else branch of the rule list -- then
-    purely illustrative "Add table"/"Add graph" additions, also over that
-    same leftover."""
+    `node_df` here is its *full* claimed scope) -> heading (+ back/
+    remove/move controls for a non-root node) -> "Add sub-strategy" + a
+    quick-jump button per existing child -> this node's actual "default
+    behaviour" (`node_df` minus every child's own claim, via
+    _resolve_default_df) -- Split By widget (own local widget, defaulting
+    to inherit whatever its parent's *current* Split By pair is via a
+    direct st.session_state read; root has no parent, so it just defaults
+    to nothing), the prominent table+graph, and the %SHAP-explained
+    figure, all computed over that leftover, since the prominent block
+    *is* the default/else branch of the rule list -- then purely
+    illustrative "Add table"/"Add graph" additions, also over that same
+    leftover."""
+    parent_key_prefix, child_id = _parent_key_prefix_and_child_id(key_prefix)
     is_root = parent_key_prefix is None
-    own_level = 0 if is_root else level
+    incoming_df = _resolve_incoming_df(root_df, key_prefix)
 
     # This node's own SHAP views (both calls below) assume its *parent's*
     # own Split By grouping is already "priced in" -- see
-    # _group_labels_for_rows/cfr_networks._normalized_mean_abs_shap. Read
-    # early (a plain session_state lookup, safe regardless of widget
-    # render order) since it's also `chosen_split_by`'s own inherited
-    # default further down.
-    parent_split_by = [] if is_root else st.session_state.get(f"{parent_key_prefix}split_by", [])
+    # _group_labels_for_rows/cfr_networks._normalized_mean_abs_shap.
+    parent_split_by = [] if is_root else _split_by_from_state(parent_key_prefix)
     parent_group_by_keys = tuple(_resolve_split_by(parent_split_by))
 
     row_index = incoming_df.index.to_numpy()
@@ -730,25 +859,30 @@ def _render_substrategy(
         return f"{cfr_features.feature_label(key)}  (SHAP {importance_by_key[key]:.4f})"
 
     if not is_root:
+        st.button("← Back to parent", key=f"{key_prefix}back", on_click=_select_node, args=(parent_key_prefix,))
         st.divider()
+    previous_claim = _local_filters_from_state(key_prefix)
     filter_label = "Add filter" if is_root else "Claim condition (Add filter)"
     local_filter_keys = st.multiselect(
         filter_label, options=non_graph_options, format_func=_claim_option_label,
+        default=[k for k in previous_claim if k in non_graph_options],
         key=f"{key_prefix}claim_filter_keys",
     )
     local_filters: dict[str, list[str]] = {}
     for filter_key in local_filter_keys:
         observed = _observed_categories(incoming_df, filter_key)
+        previous_values = previous_claim.get(filter_key, observed)
         local_filters[filter_key] = st.multiselect(
-            f"{cfr_features.feature_label(filter_key)} -- keep values", options=observed, default=observed,
+            f"{cfr_features.feature_label(filter_key)} -- keep values", options=observed,
+            default=[v for v in previous_values if v in observed],
             key=f"{key_prefix}claim_filter_values::{filter_key}",
         )
     node_df = _apply_filters(incoming_df, local_filters)
+    _set_local_filters(key_prefix, local_filters)
 
     claim_desc = ", ".join(
         f"{cfr_features.feature_label(k)} = {', '.join(v)}" for k, v in local_filters.items()
     )
-    st.markdown(f'<a name="{_anchor_id(key_prefix)}"></a>', unsafe_allow_html=True)
     if is_root:
         heading = f"Overall Strategy ({claim_desc})" if claim_desc else "Overall Strategy"
         st.header(f"{heading}  (n={len(node_df):,})")
@@ -756,7 +890,7 @@ def _render_substrategy(
         heading = claim_desc or "Sub-strategy (no filter set yet -- claims everything its parent hasn't)"
         col_heading, col_up, col_down, col_remove = st.columns([10, 1, 1, 1])
         with col_heading:
-            _heading_at_level(f"{heading}  (n={len(node_df):,})", level)
+            st.header(f"{heading}  (n={len(node_df):,})")
         with col_up:
             st.button(
                 "↑", key=f"{key_prefix}move_up", help="Move earlier (higher priority)",
@@ -775,29 +909,26 @@ def _render_substrategy(
 
     if node_df.empty:
         st.warning("No rows match this sub-strategy's own claim filters.")
-        return node_df.index
+        return
 
     st.button(
         "Add sub-strategy", key=f"{key_prefix}add_substrategy",
         on_click=_add_substrategy, args=(key_prefix,),
     )
 
-    # Root's own heading doesn't consume a level (it has none), so its
-    # direct children start at level 0, same as root's own `own_level`;
-    # every deeper generation increments from its own parent's heading
-    # level, matching _heading_at_level's tiering.
-    child_level = 0 if is_root else own_level + 1
-    remaining_df = node_df
-    for this_child_id in list(_substrategy_children(key_prefix)):
-        child_key_prefix = f"{key_prefix}substrategy_{this_child_id}::"
-        claimed_index = _render_substrategy(
-            remaining_df, child_key_prefix, checkpoint_path, max_samples,
-            display_keys, collapsed, child_level,
-            parent_key_prefix=key_prefix, child_id=this_child_id,
-        )
-        remaining_df = remaining_df.drop(claimed_index)
+    existing_children = _substrategy_children(key_prefix)
+    if existing_children:
+        st.caption("Sub-strategies (click to view):")
+        child_cols = st.columns(min(len(existing_children), 4))
+        for i, this_child_id in enumerate(existing_children):
+            child_prefix = _child_key_prefix(key_prefix, this_child_id)
+            with child_cols[i % len(child_cols)]:
+                st.button(
+                    _nav_label(child_prefix, False), key=f"{key_prefix}jump::{this_child_id}",
+                    on_click=_select_node, args=(child_prefix,), use_container_width=True,
+                )
 
-    default_df = remaining_df
+    default_df = _resolve_default_df(node_df, key_prefix)
     default_row_index = default_df.index.to_numpy()
     default_importance = _shap_importance_for_rows(
         checkpoint_path, max_samples, _row_digest(default_row_index), default_row_index,
@@ -809,18 +940,20 @@ def _render_substrategy(
         return f"{cfr_features.feature_label(key)}  (SHAP {importance_by_key[key]:.4f})"
 
     split_by_options = [k for k, _ in default_importance]
-    # A child defaults to inherit whatever its parent's *current* Split By
-    # pair is (`parent_split_by`, read above) -- the parent's own Split By
-    # widget (below, in the parent's own call to this function) hasn't run
-    # yet this script pass by the time a child needs its default (children
-    # render, and claim their own rows, before their parent's own Split By
-    # widget does). Root has no parent to inherit from.
+    # The very first time this node is ever visited, default to inherit
+    # whatever its parent's *current* Split By pair is (`parent_split_by`,
+    # read above); once it's been visited at least once, remember its own
+    # choice instead (own_previous_split_by), even if that choice happens
+    # to equal an earlier default -- root has no parent to inherit from.
+    own_previous_split_by = _split_by_from_state(key_prefix)
+    split_by_default = own_previous_split_by if own_previous_split_by else parent_split_by
     chosen_split_by = st.multiselect(
         "Split By (this sub-strategy's own 1-2 implementable features)",
-        options=split_by_options, default=[k for k in parent_split_by if k in split_by_options],
+        options=split_by_options, default=[k for k in split_by_default if k in split_by_options],
         format_func=_default_option_label, max_selections=MAX_SPLIT_BY_FEATURES,
         key=f"{key_prefix}split_by",
     )
+    _set_split_by(key_prefix, chosen_split_by)
     resolved_split_by = _resolve_split_by(chosen_split_by)
     if resolved_split_by != chosen_split_by:
         dropped = [k for k in chosen_split_by if k not in resolved_split_by]
@@ -874,32 +1007,33 @@ def _render_substrategy(
     graph_options = split_by_options if _hole_hand_grid_available(default_df) else illustrative_options
     col_graph, col_table = st.columns(2)
     with col_graph:
-        extra_graph_keys = st.multiselect(
-            "Add graph", options=graph_options, format_func=_default_option_label, key=f"{key_prefix}extra_graph",
+        extra_graph_keys = _sticky_multiselect(
+            "Add graph", graph_options, key=f"{key_prefix}extra_graph", default=[],
+            format_func=_default_option_label,
         )
     with col_table:
-        extra_table_keys = st.multiselect(
-            "Add table", options=illustrative_options, format_func=_default_option_label, key=f"{key_prefix}extra_table",
+        extra_table_keys = _sticky_multiselect(
+            "Add table", illustrative_options, key=f"{key_prefix}extra_table", default=[],
+            format_func=_default_option_label,
         )
     for table_key in extra_table_keys:
         st.caption(f"Extra table: {cfr_features.feature_label(table_key)}")
         _render_table(default_df, [table_key], collapsed)
-    _render_graphs(default_df, extra_graph_keys, display_keys, collapsed, f"{key_prefix}extra::", own_level + 1)
-
-    return node_df.index
+    _render_graphs(default_df, extra_graph_keys, display_keys, collapsed, f"{key_prefix}extra::")
 
 
 def _shorthand_description(key_prefix: str) -> str:
-    """The same claim-condition text this node's own heading shows (see
-    _render_substrategy's `claim_desc`), rebuilt straight out of
-    st.session_state instead of threaded through as a return value --
-    _render_navigation runs once, after the whole sub-strategy tree has
-    already rendered this script pass, so every node's own filter widgets'
-    session_state is already fresh by the time this reads it."""
-    filter_keys = st.session_state.get(f"{key_prefix}claim_filter_keys", [])
+    """The same claim-condition text this node's own heading would show if
+    it were the currently selected/rendered node (see _render_substrategy's
+    `claim_desc`), rebuilt from the sticky claims store (_local_filters_from_state)
+    instead of that node's own (possibly long-forgotten -- see the
+    module-level comment above _local_filters_from_state) widget state --
+    used for every OTHER node's own label in the sidebar nav tree and the
+    "Sub-strategies" quick-jump buttons, none of which actually render
+    that node's own widgets this script pass."""
     parts = [
-        f"{cfr_features.feature_label(key)} = {', '.join(st.session_state.get(f'{key_prefix}claim_filter_values::{key}', []))}"
-        for key in filter_keys
+        f"{cfr_features.feature_label(key)} = {', '.join(values)}"
+        for key, values in _local_filters_from_state(key_prefix).items()
     ]
     return ", ".join(parts)
 
@@ -915,30 +1049,34 @@ def _nav_label(key_prefix: str, is_root: bool) -> str:
     return desc or "Sub-strategy (unclaimed)"
 
 
-def _navigation_lines(key_prefix: str, is_root: bool, depth: int) -> list[str]:
-    """One markdown link-list line for the node at `key_prefix`, plus one
-    more (indented one level deeper) for each of its own children,
-    recursively -- flattened into a single list rather than nested Python
-    lists so the caller can join them into one markdown string, since
-    st.markdown only renders a nested bullet list correctly when the whole
-    thing is one call sharing consistent indentation, not several separate
-    calls."""
-    lines = [f"{'  ' * depth}- [{_nav_label(key_prefix, is_root)}](#{_anchor_id(key_prefix)})"]
+def _render_navigation_node(key_prefix: str, is_root: bool, depth: int) -> None:
+    """One sidebar button for the node at `key_prefix` -- clicking it
+    switches the central column to show that node (see _select_node) --
+    plus one more, indented one level deeper, for each of its own
+    children, recursively. The currently selected node's own button
+    renders as `type="primary"` so it stands out from the rest of the
+    tree."""
+    is_selected = _selected_node() == key_prefix
+    indent = " " * (depth * 4)  # non-breaking spaces -- regular spaces collapse in rendered HTML
+    st.sidebar.button(
+        f"{indent}{_nav_label(key_prefix, is_root)}", key=f"nav::{key_prefix}",
+        type="primary" if is_selected else "secondary",
+        on_click=_select_node, args=(key_prefix,), use_container_width=True,
+    )
     for child_id in _substrategy_children(key_prefix):
-        lines.extend(_navigation_lines(f"{key_prefix}substrategy_{child_id}::", False, depth + 1))
-    return lines
+        _render_navigation_node(_child_key_prefix(key_prefix, child_id), False, depth + 1)
 
 
 def _render_navigation() -> None:
-    """The sidebar's nested, clickable shorthand outline of the current
-    sub-strategy tree -- rendered after (in code order) _render_substrategy
-    has already drawn the whole tree in the main body this same script
-    pass, even though it visually appears in the sidebar, so every node's
-    anchor already exists on the page and every node's own session_state
-    (for its shorthand label) is already fresh."""
+    """The sidebar's nested outline of the current sub-strategy tree,
+    doubling as the switcher that controls which single node
+    _render_substrategy shows in the central column -- rendered after (in
+    code order) _render_substrategy has already run this script pass, so
+    every node's own session_state (for its shorthand label, and for
+    which node is currently selected) is already fresh."""
     st.sidebar.header("Navigation")
-    st.sidebar.caption("Jump to any sub-strategy.")
-    st.sidebar.markdown("\n".join(_navigation_lines("root::", True, 0)))
+    st.sidebar.caption("Click a sub-strategy to view it.")
+    _render_navigation_node("root::", True, 0)
 
 
 def main() -> None:
@@ -968,14 +1106,15 @@ def main() -> None:
     st.sidebar.divider()
     collapsed = st.sidebar.toggle("Collapse actions to Fold / Call / Raise / All-In", value=False)
 
-    # Root is just another sub-strategy node -- the whole loaded reservoir,
-    # with its own local "Add filter"/"Split By" controls exactly like any
-    # child (see _render_substrategy's module docstring).
-    _render_substrategy(df, "root::", checkpoint_path, int(max_samples), display_keys, collapsed, 0)
+    # Only the currently selected sub-strategy renders its own content in
+    # the central column -- every other node is reached by switching
+    # selection instead of scrolling (see _render_substrategy/
+    # _render_navigation's module docstring).
+    _render_substrategy(df, _selected_node(), checkpoint_path, int(max_samples), display_keys, collapsed)
 
-    # Rendered after the tree above so it can read each node's own
-    # session_state (filter picks, child list) freshly populated by the
-    # widgets that just ran -- see _render_navigation.
+    # Rendered after the selected node above so it reflects this run's
+    # freshly updated session_state (filter picks, child list, selection)
+    # -- see _render_navigation.
     _render_navigation()
 
 
