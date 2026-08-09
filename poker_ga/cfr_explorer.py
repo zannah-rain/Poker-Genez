@@ -213,9 +213,42 @@ def _row_digest(row_index: np.ndarray) -> str:
     return hashlib.sha1(np.ascontiguousarray(row_index).tobytes()).hexdigest()
 
 
+def _group_labels_for_rows(df: pd.DataFrame, row_index: np.ndarray, group_by_keys: tuple[str, ...]) -> np.ndarray | None:
+    """One group-identifying value per row at `row_index`, defined by
+    `group_by_keys` -- a parent sub-strategy's own *resolved* Split By
+    pair (see _resolve_split_by) -- for _shap_importance_for_rows to center
+    a sub-strategy's own SHAP contributions per parent-group instead of
+    over its whole row set (see cfr_networks._normalized_mean_abs_shap).
+    None if `group_by_keys` is empty (no parent grouping in effect, e.g.
+    root, or a parent with no Split By chosen yet).
+
+    Exact Hole Hand (_HOLE_HAND_GRID_KEY) is handled separately since it
+    has no ordinary bucket-label column (see _build_dataframe): grouped by
+    its own 13x13 grid cell instead, with every masked (postflop) row
+    grouped together under one shared "masked" label -- a raw
+    (x, y) < 0 pair is a sentinel, not a real grid position, so binning it
+    into a grid cell (which would land it at cell (0, 0), colliding with a
+    real AA reading) would be wrong."""
+    if not group_by_keys:
+        return None
+    if group_by_keys == (_HOLE_HAND_GRID_KEY,):
+        x = df[_HOLE_HAND_GRID_RAW_X_COL].to_numpy()
+        y = df[_HOLE_HAND_GRID_RAW_Y_COL].to_numpy()
+        size = HOLE_HAND_GRID_SIZE
+        cols = np.rint(np.clip(x, 0.0, 1.0) * (size - 1)).astype(int)
+        rows = np.rint(np.clip(y, 0.0, 1.0) * (size - 1)).astype(int)
+        cell = rows * size + cols
+        labels = np.where(x < 0.0, -1, cell)
+        return labels[row_index]
+    columns = [df[_feature_col(key)].to_numpy().astype(str) for key in group_by_keys]
+    combined = columns[0] if len(columns) == 1 else np.char.add(np.char.add(columns[0], "|"), columns[1])
+    return combined[row_index]
+
+
 @st.cache_data(show_spinner="Ranking features by SHAP contribution for this sub-strategy...")
 def _shap_importance_for_rows(
     checkpoint_path: str, max_samples: int, row_digest: str, _row_index: np.ndarray,
+    group_by_keys: tuple[str, ...] = (),
 ) -> list[tuple[str, float]]:
     """Mean |SHAP| contribution per displayed feature (see
     cfr_networks.mean_shap_contributions_for_samples/cfr_features.
@@ -228,15 +261,27 @@ def _shap_importance_for_rows(
     "Add ..." dropdown ranking and its %SHAP-explained figure. Always one
     entry per displayed feature, 0.0 for every feature when `_row_index` is
     empty, so a feature never silently drops out of a widget that iterates
-    this list to build its options."""
+    this list to build its options.
+
+    `group_by_keys` (a parent sub-strategy's own resolved Split By pair --
+    see _render_substrategy) makes this sub-strategy's own view assume that
+    parent grouping is already "priced in": each row's contribution is
+    centered against its own group's mean (see _group_labels_for_rows/
+    cfr_networks._normalized_mean_abs_shap) instead of the whole row set's
+    mean, so a feature the parent's grouping already fully explains (e.g.
+    Exact Hole Hand fully determining Hole Suited) scores ~0 here too,
+    rather than getting credited again for signal the parent's own
+    grouping already accounts for."""
     net, net_config, _reservoir = _load_checkpoint(checkpoint_path)
     display_keys = cfr_features.display_feature_keys(net_config.feature_keys)
     if len(_row_index) == 0:
         return [(key, 0.0) for key in display_keys]
-    _df, raw_features = _build_dataframe(checkpoint_path, max_samples)
+    df, raw_features = _build_dataframe(checkpoint_path, max_samples)
     selected = raw_features[_row_index]
+    group_labels = _group_labels_for_rows(df, _row_index, group_by_keys)
     contributions = cfr_networks.mean_shap_contributions_for_samples(
         net, selected, selected, net_config.feature_keys, np.random.default_rng(0),
+        explain_group_labels=group_labels,
     )
     folded = dict(cfr_features.fold_child_contributions(contributions))
     return sorted(((key, folded.get(key, 0.0)) for key in display_keys), key=lambda kv: -kv[1])
@@ -665,8 +710,19 @@ def _render_substrategy(
     is_root = parent_key_prefix is None
     own_level = 0 if is_root else level
 
+    # This node's own SHAP views (both calls below) assume its *parent's*
+    # own Split By grouping is already "priced in" -- see
+    # _group_labels_for_rows/cfr_networks._normalized_mean_abs_shap. Read
+    # early (a plain session_state lookup, safe regardless of widget
+    # render order) since it's also `chosen_split_by`'s own inherited
+    # default further down.
+    parent_split_by = [] if is_root else st.session_state.get(f"{parent_key_prefix}split_by", [])
+    parent_group_by_keys = tuple(_resolve_split_by(parent_split_by))
+
     row_index = incoming_df.index.to_numpy()
-    importance = _shap_importance_for_rows(checkpoint_path, max_samples, _row_digest(row_index), row_index)
+    importance = _shap_importance_for_rows(
+        checkpoint_path, max_samples, _row_digest(row_index), row_index, group_by_keys=parent_group_by_keys,
+    )
     non_graph_options = [k for k, _ in importance if k != _HOLE_HAND_GRID_KEY]
     importance_by_key = dict(importance)
 
@@ -745,6 +801,7 @@ def _render_substrategy(
     default_row_index = default_df.index.to_numpy()
     default_importance = _shap_importance_for_rows(
         checkpoint_path, max_samples, _row_digest(default_row_index), default_row_index,
+        group_by_keys=parent_group_by_keys,
     )
     importance_by_key = dict(default_importance)
 
@@ -753,16 +810,14 @@ def _render_substrategy(
 
     split_by_options = [k for k, _ in default_importance]
     # A child defaults to inherit whatever its parent's *current* Split By
-    # pair is, read directly from session_state rather than threaded as a
-    # parameter -- the parent's own Split By widget (below, in the
-    # parent's own call to this function) hasn't run yet this script pass
-    # by the time a child needs its default (children render, and claim
-    # their own rows, before their parent's own Split By widget does).
-    # Root has no parent to inherit from.
-    inherited_split_by = [] if is_root else st.session_state.get(f"{parent_key_prefix}split_by", [])
+    # pair is (`parent_split_by`, read above) -- the parent's own Split By
+    # widget (below, in the parent's own call to this function) hasn't run
+    # yet this script pass by the time a child needs its default (children
+    # render, and claim their own rows, before their parent's own Split By
+    # widget does). Root has no parent to inherit from.
     chosen_split_by = st.multiselect(
         "Split By (this sub-strategy's own 1-2 implementable features)",
-        options=split_by_options, default=[k for k in inherited_split_by if k in split_by_options],
+        options=split_by_options, default=[k for k in parent_split_by if k in split_by_options],
         format_func=_default_option_label, max_selections=MAX_SPLIT_BY_FEATURES,
         key=f"{key_prefix}split_by",
     )

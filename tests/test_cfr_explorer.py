@@ -904,3 +904,101 @@ class TestExactHoleHand:
 
         assert not at.exception
         assert any("fills both Split By slots by itself" in c.value for c in at.caption)
+
+
+_GROUP_RELATIVE_FEATURE_KEYS = ("hole_hand_grid_x_norm", "hole_hand_grid_y_norm", "hole_suited")
+
+
+def _make_group_relative_checkpoint(path: str, rng: np.random.Generator) -> None:
+    """A checkpoint whose feature set includes Exact Hole Hand alongside
+    `hole_suited`, deterministically derived from Exact Hole Hand's own
+    grid position (upper-right of the diagonal, matching the real "suited"
+    convention -- see features.hole_hand_grid_label) -- every row preflop,
+    so Exact Hole Hand's Split By is available with no claim filter first
+    needed. Regression coverage for "a sub-strategy's own SHAP view should
+    assume its parent's own Split By grouping is already priced in" (see
+    cfr_explorer._group_labels_for_rows/_render_substrategy): once a
+    parent sub-strategy splits by Exact Hole Hand, hole_suited -- fully
+    determined by it -- should score exactly 0.0000 SHAP for any
+    sub-strategy underneath, instead of sharing credit for the same signal."""
+    feature_dim = len(cfr_features.feature_indices(_GROUP_RELATIVE_FEATURE_KEYS))
+    x_idx = _GROUP_RELATIVE_FEATURE_KEYS.index("hole_hand_grid_x_norm")
+    y_idx = _GROUP_RELATIVE_FEATURE_KEYS.index("hole_hand_grid_y_norm")
+    suited_idx = _GROUP_RELATIVE_FEATURE_KEYS.index("hole_suited")
+    net = cfr_networks.AdvantageNet(input_dim=feature_dim, hidden_sizes=(16, 16))
+    net_config = cfr_networks.AdvantageNetConfig(
+        feature_keys=_GROUP_RELATIVE_FEATURE_KEYS, hidden_sizes=(16, 16), table_size=3,
+    )
+    cfr_networks.save(net, net_config, path)
+
+    num_samples = 300
+    reservoir = cfr_reservoir.ReservoirBuffer(
+        capacity=num_samples, feature_dim=feature_dim, num_actions=strategy.NUM_ACTION_CATEGORIES, rng=rng,
+    )
+    for _ in range(num_samples):
+        feats = rng.random(feature_dim).astype(np.float32)
+        feats[x_idx] = rng.integers(0, 13) / 12.0
+        feats[y_idx] = rng.integers(0, 13) / 12.0
+        feats[suited_idx] = 1.0 if feats[x_idx] > feats[y_idx] else 0.0
+        regrets = rng.normal(size=strategy.NUM_ACTION_CATEGORIES).astype(np.float32)
+        legal_mask = rng.random(strategy.NUM_ACTION_CATEGORIES) > 0.3
+        legal_mask[strategy.ACTION_CALL] = True
+        reservoir.add(feats, regrets, legal_mask, float(rng.integers(1, 10)))
+    reservoir.save(path)
+
+
+@pytest.fixture(scope="module")
+def _group_relative_checkpoint_path(tmp_path_factory) -> str:
+    path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_group_relative")), "checkpoint")
+    _make_group_relative_checkpoint(path, np.random.default_rng(0))
+    return path
+
+
+@pytest.fixture
+def group_relative_checkpoint(_group_relative_checkpoint_path, monkeypatch):
+    monkeypatch.setenv("CFR_EXPLORER_CHECKPOINT_PATH", _group_relative_checkpoint_path)
+    return _group_relative_checkpoint_path
+
+
+class TestGroupRelativeShap:
+    """A sub-strategy's own SHAP view assumes its *parent's* own Split By
+    grouping is already priced in (see _group_labels_for_rows). In this
+    checkpoint's synthetic data, Exact Hole Hand fully determines
+    hole_suited, so once a parent splits by Exact Hole Hand, a child
+    underneath it should show exactly 0.0000 SHAP for hole_suited instead
+    of sharing credit for the same signal Exact Hole Hand already explains."""
+
+    def test_hole_suited_shows_nonzero_shap_with_no_parent_grouping(self, group_relative_checkpoint):
+        at = _run_app()
+        assert not at.exception
+        option = next(o for o in at.multiselect(key="root::split_by").options if o.startswith("Suited Hole Cards"))
+        shap_value = float(re.search(r"SHAP ([\d.]+)\)", option).group(1))
+        assert shap_value > 0.0
+
+    def test_hole_suited_drops_to_exactly_zero_under_an_exact_hole_hand_parent_split(
+        self, group_relative_checkpoint,
+    ):
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["hole_hand_grid_x_norm"]).run(timeout=60)
+        c0 = _add_substrategy(at, "root::")
+
+        assert not at.exception
+        option = next(o for o in at.multiselect(key=f"{c0}split_by").options if o.startswith("Suited Hole Cards"))
+        assert option.endswith("(SHAP 0.0000)")
+
+    def test_a_grandchild_under_an_unrelated_parent_split_keeps_a_nonzero_shap(
+        self, group_relative_checkpoint,
+    ):
+        # Sanity check for the other direction: a child added under a
+        # parent that has *not* split by Exact Hole Hand (root's own
+        # default, unset Split By) should see hole_suited's ordinary,
+        # nonzero SHAP -- confirming the zeroing above is specifically a
+        # consequence of the parent's own grouping, not some unconditional
+        # side effect of merely being a non-root node.
+        at = _run_app()
+        c0 = _add_substrategy(at, "root::")
+
+        assert not at.exception
+        option = next(o for o in at.multiselect(key=f"{c0}split_by").options if o.startswith("Suited Hole Cards"))
+        shap_value = float(re.search(r"SHAP ([\d.]+)\)", option).group(1))
+        assert shap_value > 0.0

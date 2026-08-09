@@ -269,3 +269,94 @@ class TestMeanShapContributionsForSamplesMaskedFeatures:
         # higher than a feature that's never masked and never matters.
         assert result["nuts_flush_draw"] <= control_floor * 3 + 0.05
         assert result["combo_draw"] <= control_floor * 3 + 0.05
+
+
+class TestMeanShapContributionsForSamplesExplainGroupLabels:
+    """Coverage for "a sub-strategy's own SHAP view should assume its
+    parent's own Split By grouping is already priced in" (see
+    cfr_explorer._group_labels_for_rows/_render_substrategy): a feature the
+    parent's grouping fully determines (e.g. Hole Suited, fully determined
+    by Exact Hole Hand) should score exactly 0 for any sub-strategy
+    underneath it, not share credit with the grouping feature itself."""
+
+    def test_feature_fully_determined_by_the_group_scores_exactly_zero(self):
+        rng = np.random.default_rng(0)
+        n = 2000
+        # `group` stands in for a parent's own Split By feature (e.g.
+        # Exact Hole Hand); `derived` stands in for a feature it fully
+        # determines (e.g. Hole Suited) -- literally the same reading.
+        # `control` is an honest, uncorrelated feature.
+        group = (rng.random(n) < 0.5).astype(np.float64)
+        derived = group.copy()
+        control = rng.random(n)
+        target = 15.0 * group + rng.normal(scale=0.5, size=n)
+
+        X = np.stack([group, derived, control], axis=1).astype(np.float32)
+        y = np.stack([target, target], axis=1).astype(np.float32)
+        keys = ("street_norm", "hole_suited", "spr_norm")  # real, non-maskable keys; standing in for group/derived/control
+
+        torch.manual_seed(0)
+        net = AdvantageNet(input_dim=3, hidden_sizes=(32, 32), output_dim=2, dropout=0.0)
+        optimizer = torch.optim.Adam(net.parameters(), lr=2e-3, weight_decay=1e-5)
+        Xt, yt = torch.from_numpy(X), torch.from_numpy(y)
+        net.train()
+        train_rng = np.random.default_rng(0)
+        for _ in range(1200):
+            idx = train_rng.integers(0, n, size=256)
+            pred = net(Xt[idx])
+            loss = ((pred - yt[idx]) ** 2).mean()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        net.eval()
+
+        explain_group_labels = group.astype(str)
+
+        ungrouped = dict(mean_shap_contributions_for_samples(
+            net, X, X, keys, np.random.default_rng(0), sample_size=200, background_size=20, nsamples=10,
+        ))
+        grouped = dict(mean_shap_contributions_for_samples(
+            net, X, X, keys, np.random.default_rng(0), sample_size=200, background_size=20, nsamples=10,
+            explain_group_labels=explain_group_labels,
+        ))
+
+        # Without grouping, `hole_suited` (a perfect duplicate of the
+        # genuinely important `street_norm`) shares in that importance --
+        # the entangled-feature problem this feature is meant to fix.
+        assert ungrouped["hole_suited"] > 1.0
+        # Grouped by the parent's own feature, both it and the feature it
+        # fully determines become an exactly-constant reading within any
+        # one (masking pattern, group) stratum -- background and explain
+        # alike -- so they score exactly 0.
+        assert grouped["street_norm"] == 0.0
+        assert grouped["hole_suited"] == 0.0
+        # The honest, uncorrelated control feature stays far below the
+        # entangled features' *ungrouped* score -- not pinned to an exact
+        # value, since restricting background to a same-group subset (a
+        # smaller, less varied interpolation pool) shifts a GradientExplainer
+        # reading by some amount for any feature, grouped or not.
+        assert grouped["spr_norm"] < ungrouped["hole_suited"]
+
+    def test_group_labels_none_takes_the_same_code_path_as_omitting_it(self):
+        # Both should skip the stratify-by-group branch entirely (see
+        # `if explain_group_labels is None`) -- not compared for exact
+        # numeric equality, since shap.GradientExplainer's own internal
+        # sampling advances global torch RNG state between calls, so two
+        # calls in the same process never reproduce bit-for-bit regardless
+        # of this function's own logic.
+        rng = np.random.default_rng(0)
+        net = AdvantageNet(input_dim=4, hidden_sizes=(8,))
+        features = _filled_reservoir(capacity=30, feature_dim=4, rng=rng).features
+        keys = ("hand_category_norm", "street_norm", "spr_norm", "pot_type_norm")
+
+        with_explicit_none = dict(mean_shap_contributions_for_samples(
+            net, features, features, keys, np.random.default_rng(0),
+            sample_size=10, background_size=5, nsamples=5, explain_group_labels=None,
+        ))
+        without_the_argument = dict(mean_shap_contributions_for_samples(
+            net, features, features, keys, np.random.default_rng(0),
+            sample_size=10, background_size=5, nsamples=5,
+        ))
+        assert set(with_explicit_none) == set(without_the_argument)
+        for key in with_explicit_none:
+            assert with_explicit_none[key] == pytest.approx(without_the_argument[key], abs=0.05)

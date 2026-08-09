@@ -167,6 +167,7 @@ def mean_shap_contributions_for_samples(
     net: AdvantageNet, explain_features: np.ndarray, background_features: np.ndarray,
     feature_keys: tuple[str, ...], rng: np.random.Generator,
     sample_size: int = 200, background_size: int = 20, nsamples: int = 20,
+    explain_group_labels: np.ndarray | None = None,
 ) -> list[tuple[str, float]]:
     """Normalized mean |SHAP value| per feature (see _normalized_mean_abs_shap;
     shap.GradientExplainer's Expected Gradients approximation -- exact
@@ -179,6 +180,22 @@ def mean_shap_contributions_for_samples(
     the rows that pass the sidebar's current filters. `sample_size`/
     `background_size` bound the cost to roughly constant regardless of pool
     size.
+
+    `explain_group_labels`, if given, has one entry per row of BOTH
+    `explain_features` and `background_features` (the two are always the
+    same array, in the same row order, in this codebase's one caller --
+    cfr_explorer.py's self-referential explain=background call) -- e.g. a
+    parent sub-strategy's own resolved Split By group (see cfr_explorer.
+    _group_labels_for_rows). It stratifies on top of (not instead of) the
+    masking-pattern stratification below: each combined (masking pattern,
+    group) stratum is explained using ONLY a background sharing that exact
+    combination, by the same reasoning as the masking-only case just below
+    -- a feature the parent's own grouping fully determines (e.g. Hole
+    Suited, fully determined by Exact Hole Hand) is then an
+    exactly-constant reading for the whole stratum, background and explain
+    alike, so x_i - background_i is exactly 0 for it at every
+    interpolation point and it scores exactly 0, rather than sharing
+    credit with whatever the parent's own grouping feature explains.
 
     Computed separately per distinct masking pattern (see
     cfr_features.unmasked_validity/_validity_codes -- in practice, one
@@ -211,29 +228,42 @@ def mean_shap_contributions_for_samples(
     explain_codes = _validity_codes(cfr_features.unmasked_validity(feature_keys, explain_features))
     background_codes = _validity_codes(cfr_features.unmasked_validity(feature_keys, background_features))
 
+    if explain_group_labels is None:
+        explain_strata = explain_codes
+        background_strata = background_codes
+    else:
+        # background_strata reuses explain_group_labels (see docstring
+        # above) -- combining as strings rather than e.g. packing into a
+        # single int keeps this agnostic to whatever type group labels
+        # happen to be (str for an ordinary bucket-label grouping, int for
+        # Exact Hole Hand's grid-cell grouping -- see cfr_explorer.
+        # _group_labels_for_rows).
+        explain_strata = np.char.add(np.char.add(explain_codes.astype(str), ":"), explain_group_labels.astype(str))
+        background_strata = np.char.add(np.char.add(background_codes.astype(str), ":"), explain_group_labels.astype(str))
+
     net.eval()
     totals = np.zeros(len(feature_keys))
     total_weight = 0
-    for code in np.unique(explain_codes):
-        code_explain_idx = np.flatnonzero(explain_codes == code)
-        code_background_idx = np.flatnonzero(background_codes == code)
-        if len(code_background_idx) == 0:
-            # No same-masking-pattern background available for this
-            # stratum -- skip it rather than fall back to a background that
-            # would reintroduce the exact mismatch this is meant to avoid.
+    for stratum in np.unique(explain_strata):
+        stratum_explain_idx = np.flatnonzero(explain_strata == stratum)
+        stratum_background_idx = np.flatnonzero(background_strata == stratum)
+        if len(stratum_background_idx) == 0:
+            # No same-stratum background available -- skip rather than
+            # fall back to a background that would reintroduce the exact
+            # mismatch this is meant to avoid.
             continue
 
         # Each stratum's own share of sample_size, proportional to its
         # share of the explain pool, so the total explain rows used across
         # every stratum stays close to sample_size regardless of how many
-        # distinct masking patterns are present.
-        stratum_n = max(1, round(sample_size * len(code_explain_idx) / len(explain_codes)))
-        explain_n = min(stratum_n, len(code_explain_idx))
-        explain_idx = rng.choice(code_explain_idx, size=explain_n, replace=False)
+        # distinct strata are present.
+        stratum_n = max(1, round(sample_size * len(stratum_explain_idx) / len(explain_strata)))
+        explain_n = min(stratum_n, len(stratum_explain_idx))
+        explain_idx = rng.choice(stratum_explain_idx, size=explain_n, replace=False)
         x = torch.from_numpy(explain_features[explain_idx])
 
-        background_n = min(background_size, len(code_background_idx))
-        background_idx = rng.choice(code_background_idx, size=background_n, replace=False)
+        background_n = min(background_size, len(stratum_background_idx))
+        background_idx = rng.choice(stratum_background_idx, size=background_n, replace=False)
         background = torch.from_numpy(background_features[background_idx])
 
         explainer = shap.GradientExplainer(net, background)
