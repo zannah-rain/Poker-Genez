@@ -2,8 +2,9 @@
 into a human-*implementable* one: a tree of "sub-strategies", each an
 ordered, filtered slice of the reservoir with its own 1-2 "Split By"
 features whose exact table+graph become its implementable rule, a
-%SHAP-explained figure showing how much predictive signal that
-simplification keeps, and its own further-nested child sub-strategies.
+"Decision variance explained by Split By features on claimed samples"
+metric showing how much predictive signal that simplification keeps, and
+its own further-nested child sub-strategies.
 
 Every sub-strategy -- including the root one, covering the whole loaded
 reservoir -- gets the exact same central controls: "Add filter" (for a
@@ -253,7 +254,7 @@ def _group_labels_for_rows(df: pd.DataFrame, row_index: np.ndarray, group_by_key
 @st.cache_data(show_spinner="Ranking features by SHAP contribution for this sub-strategy...")
 def _shap_importance_for_rows(
     checkpoint_path: str, max_samples: int, row_digest: str, _row_index: np.ndarray,
-    group_by_keys: tuple[str, ...] = (),
+    background_digest: str, _background_row_index: np.ndarray, group_by_keys: tuple[str, ...] = (),
 ) -> list[tuple[str, float]]:
     """Mean |SHAP| contribution per displayed feature (see
     cfr_networks.mean_shap_contributions_for_samples/cfr_features.
@@ -268,25 +269,36 @@ def _shap_importance_for_rows(
     empty, so a feature never silently drops out of a widget that iterates
     this list to build its options.
 
+    `_background_row_index` is ordinarily the same as `_row_index`
+    (self-referential -- explains and backgrounds against its own rows),
+    but callers pass a *wider* pool -- see _render_substrategy -- when
+    `group_by_keys` is set, so a parent's grouping gets corrected for
+    using the parent's own broader sample rather than this (possibly much
+    narrower) sub-strategy's own rows -- see cfr_networks.
+    mean_shap_contributions_for_samples for why that distinction matters.
+
     `group_by_keys` (a parent sub-strategy's own resolved Split By pair --
     see _render_substrategy) makes this sub-strategy's own view assume that
     parent grouping is already "priced in": each row's contribution is
-    centered against its own group's mean (see _group_labels_for_rows/
-    cfr_networks._normalized_mean_abs_shap) instead of the whole row set's
-    mean, so a feature the parent's grouping already fully explains (e.g.
-    Exact Hole Hand fully determining Hole Suited) scores ~0 here too,
-    rather than getting credited again for signal the parent's own
-    grouping already accounts for."""
+    centered against its own group's mean, computed over
+    `_background_row_index` (see _group_labels_for_rows/cfr_networks.
+    _normalized_mean_abs_shap), instead of over its whole row set's own
+    mean, so a feature the parent's grouping already fully (and uniformly,
+    across the parent's whole sample) explains scores ~0 here too, rather
+    than getting credited again for signal the parent's own grouping
+    already accounts for."""
     net, net_config, _reservoir = _load_checkpoint(checkpoint_path)
     display_keys = cfr_features.display_feature_keys(net_config.feature_keys)
     if len(_row_index) == 0:
         return [(key, 0.0) for key in display_keys]
     df, raw_features = _build_dataframe(checkpoint_path, max_samples)
     selected = raw_features[_row_index]
-    group_labels = _group_labels_for_rows(df, _row_index, group_by_keys)
+    background = raw_features[_background_row_index]
+    explain_group_labels = _group_labels_for_rows(df, _row_index, group_by_keys)
+    background_group_labels = _group_labels_for_rows(df, _background_row_index, group_by_keys)
     contributions = cfr_networks.mean_shap_contributions_for_samples(
-        net, selected, selected, net_config.feature_keys, np.random.default_rng(0),
-        explain_group_labels=group_labels,
+        net, selected, background, net_config.feature_keys, np.random.default_rng(0),
+        explain_group_labels=explain_group_labels, background_group_labels=background_group_labels,
     )
     folded = dict(cfr_features.fold_child_contributions(contributions))
     return sorted(((key, folded.get(key, 0.0)) for key in display_keys), key=lambda kv: -kv[1])
@@ -613,6 +625,80 @@ def _render_table(group_df: pd.DataFrame, split_by_keys: list[str], collapsed: b
         st.dataframe(counts)
 
 
+def _decision_variance_explained(
+    df: pd.DataFrame, default_df: pd.DataFrame, parent_node_df: pd.DataFrame | None,
+    parent_group_by_keys: tuple[str, ...], resolved_split_by: list[str], collapsed: bool,
+) -> float | None:
+    """"Decision variance explained by Split By features on claimed
+    samples" (see _render_substrategy) -- the fraction of variance in the
+    net's own predicted action-probability vectors, across this node's
+    own claimed-and-not-further-claimed rows (`default_df`), that grouping
+    those rows by `resolved_split_by` (this node's own chosen Split By
+    feature(s)) explains -- a standard ANOVA/eta-squared "variance
+    explained by grouping" statistic, computed directly on the model's own
+    decisions rather than via SHAP attribution. SHAP can't cleanly answer
+    this particular question: _shap_importance_for_rows corrects for a
+    parent's own grouping by restricting SHAP's own background to rows
+    sharing the same group value, which forces a feature's own direct
+    attribution toward 0 whenever it *is* the grouping feature itself,
+    structurally, regardless of whether reusing it here captures real,
+    additional signal -- exactly the "shows 0% even though a different,
+    narrower rule is genuinely being applied" bug this function exists to
+    avoid. None if `resolved_split_by` is empty (nothing chosen yet to
+    measure).
+
+    Before measuring that, each row's own predicted vector first has
+    whatever the *parent's* own Split By grouping (`parent_group_by_keys`)
+    already predicts for it subtracted off -- computed from
+    `parent_node_df` (the parent's own full claimed scope, not just this
+    node's narrower `default_df`; see _resolve_node_df), i.e. the "global/
+    default strategy" already implied by having reached this node at all.
+    That keeps a node that happens to share its parent's own Split By
+    feature honest: if the feature's relationship to the decision is the
+    same within this node's own claimed rows as it is across the parent's
+    whole domain, there's nothing *left* for grouping by it again to
+    explain (this reads ~0%, correctly) -- but if this node's own narrower
+    claim genuinely interacts with that feature (a locally different
+    relationship), grouping the leftover residual by it *does* explain a
+    real share of what remains (reads meaningfully above 0%, also
+    correctly). No parent grouping in effect (root, or a parent with no
+    Split By chosen) leaves the baseline as the plain grand mean --
+    ordinary, unadjusted ANOVA."""
+    if not resolved_split_by:
+        return None
+    action_cols = _action_columns(collapsed)
+    default_view = _with_action_view(default_df, collapsed)
+    default_index = default_df.index.to_numpy()
+    default_actions = default_view[action_cols].to_numpy()
+
+    if parent_group_by_keys and parent_node_df is not None and not parent_node_df.empty:
+        parent_view = _with_action_view(parent_node_df, collapsed)
+        parent_labels = _group_labels_for_rows(df, parent_node_df.index.to_numpy(), parent_group_by_keys)
+        parent_group_means = pd.DataFrame(parent_view[action_cols].to_numpy(), index=parent_labels).groupby(level=0).mean()
+        own_parent_labels = _group_labels_for_rows(df, default_index, parent_group_by_keys)
+        baseline = parent_group_means.reindex(own_parent_labels).to_numpy()
+        # A group observed among this node's own rows but never observed
+        # in the parent's own claimed scope shouldn't normally happen
+        # (this node's own rows are a subset of the parent's) -- fall back
+        # to the parent's own grand mean rather than propagate a NaN.
+        missing = np.isnan(baseline).any(axis=1)
+        if missing.any():
+            baseline[missing] = parent_view[action_cols].mean().to_numpy()
+    else:
+        baseline = np.broadcast_to(default_actions.mean(axis=0), default_actions.shape)
+
+    residual = default_actions - baseline
+    total_variance = float((residual ** 2).sum(axis=1).mean())
+    if total_variance <= 0.0:
+        return 0.0
+
+    own_labels = _group_labels_for_rows(df, default_index, tuple(resolved_split_by))
+    own_group_means = pd.DataFrame(residual, index=own_labels).groupby(level=0).transform("mean").to_numpy()
+    within_group_variance = float(((residual - own_group_means) ** 2).sum(axis=1).mean())
+
+    return max(0.0, 1.0 - within_group_variance / total_variance) * 100
+
+
 _SUBSTRATEGY_CHILDREN_STATE_KEY = "substrategy_children"
 _SELECTED_SUBSTRATEGY_STATE_KEY = "selected_substrategy"
 
@@ -796,6 +882,24 @@ def _resolve_incoming_df(root_df: pd.DataFrame, key_prefix: str) -> pd.DataFrame
     return incoming_df
 
 
+def _resolve_node_df(root_df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
+    """A node's own full claimed scope -- _resolve_incoming_df's pool, with
+    that same node's own local claim filters applied on top (the one
+    further step _resolve_incoming_df deliberately stops short of, since
+    the currently selected node applies its own filters via its real,
+    interactive widgets instead). Used to find a node's *parent's* own
+    full claimed scope: the background pool a sub-strategy's own SHAP
+    computation should draw from when correcting for a grouping the
+    parent's Split By already applies (see _render_substrategy) --
+    deliberately the parent's full node_df, not its narrower default_df
+    (which excludes every child, including whichever one is asking), since
+    the parent's own Split By is conceptually a rule over its whole
+    domain, not just whatever's left after every child has carved its own
+    share out of it."""
+    incoming_df = _resolve_incoming_df(root_df, key_prefix)
+    return _apply_filters(incoming_df, _local_filters_from_state(key_prefix))
+
+
 def _resolve_default_df(node_df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
     """`node_df` (the currently selected node's own full claimed scope)
     minus whatever its own *direct* children have already claimed (via
@@ -833,24 +937,57 @@ def _render_substrategy(
     _resolve_default_df) -- Split By widget (own local widget, defaulting
     to inherit whatever its parent's *current* Split By pair is via a
     direct st.session_state read; root has no parent, so it just defaults
-    to nothing), the prominent table+graph, and the %SHAP-explained
-    figure, all computed over that leftover, since the prominent block
-    *is* the default/else branch of the rule list -- then purely
-    illustrative "Add table"/"Add graph" additions, also over that same
-    leftover."""
+    to nothing), the prominent table+graph, and the "Decision variance
+    explained by Split By features on claimed samples" metric, all
+    computed over that leftover, since the prominent block *is* the
+    default/else branch of the rule list -- then purely illustrative
+    "Add table"/"Add graph" additions, also over that same leftover.
+
+    Both SHAP views this node computes (`importance`, over its own
+    incoming pool, for "Add filter"; `default_importance`, over its own
+    claimed-and-not-further-claimed leftover, for Split By/the variance
+    metric) correct for whatever grouping this node's own *parent*
+    already applies (`parent_group_by_keys`) by centering against
+    `parent_node_df` -- the parent's own full claimed scope (see
+    _resolve_node_df), not this node's own rows. That distinction matters:
+    if the correction used this node's own (possibly much narrower) rows
+    instead, a feature merely *constant* within that narrow slice would
+    always score 0 regardless of whether the parent's grouping actually
+    explains it there -- e.g. a child sharing its parent's own Split By
+    feature, filtered down to a small subset, would always show 0%
+    "explained" even though that narrower rule can genuinely capture real,
+    additional signal the parent's broader-population analysis doesn't.
+    Centering against the parent's own full sample instead means a
+    feature only reads as "already explained" when the parent's grouping
+    is *uniformly* true across the parent's whole domain, not just within
+    whatever this node happens to have claimed."""
     parent_key_prefix, child_id = _parent_key_prefix_and_child_id(key_prefix)
     is_root = parent_key_prefix is None
     incoming_df = _resolve_incoming_df(root_df, key_prefix)
 
     # This node's own SHAP views (both calls below) assume its *parent's*
     # own Split By grouping is already "priced in" -- see
-    # _group_labels_for_rows/cfr_networks._normalized_mean_abs_shap.
+    # _group_labels_for_rows/cfr_networks._normalized_mean_abs_shap. The
+    # background pool for that correction is the *parent's* own full
+    # claimed scope (see _resolve_node_df), not this node's own (possibly
+    # much narrower) rows -- a feature the parent's grouping only
+    # partially/locally explains should still show up as informative here,
+    # not collapse to 0 just because it's constant within this node's own
+    # narrow sample.
     parent_split_by = [] if is_root else _split_by_from_state(parent_key_prefix)
     parent_group_by_keys = tuple(_resolve_split_by(parent_split_by))
+    parent_node_df = None if is_root else _resolve_node_df(root_df, parent_key_prefix)
+
+    def _background_index(explain_index: np.ndarray) -> np.ndarray:
+        if parent_group_by_keys and parent_node_df is not None:
+            return parent_node_df.index.to_numpy()
+        return explain_index
 
     row_index = incoming_df.index.to_numpy()
+    background_index = _background_index(row_index)
     importance = _shap_importance_for_rows(
-        checkpoint_path, max_samples, _row_digest(row_index), row_index, group_by_keys=parent_group_by_keys,
+        checkpoint_path, max_samples, _row_digest(row_index), row_index,
+        _row_digest(background_index), background_index, group_by_keys=parent_group_by_keys,
     )
     non_graph_options = [k for k, _ in importance if k != _HOLE_HAND_GRID_KEY]
     importance_by_key = dict(importance)
@@ -930,9 +1067,10 @@ def _render_substrategy(
 
     default_df = _resolve_default_df(node_df, key_prefix)
     default_row_index = default_df.index.to_numpy()
+    default_background_index = _background_index(default_row_index)
     default_importance = _shap_importance_for_rows(
         checkpoint_path, max_samples, _row_digest(default_row_index), default_row_index,
-        group_by_keys=parent_group_by_keys,
+        _row_digest(default_background_index), default_background_index, group_by_keys=parent_group_by_keys,
     )
     importance_by_key = dict(default_importance)
 
@@ -995,10 +1133,10 @@ def _render_substrategy(
                             st.plotly_chart(fig, key=f"{key_prefix}splitby_heat::{i}")
 
         if resolved_split_by:
-            total = sum(v for _, v in default_importance)
-            chosen_total = sum(v for k, v in default_importance if k in resolved_split_by)
-            pct = (chosen_total / total * 100) if total > 0 else 0.0
-            st.metric("SHAP explained by Split By features", f"{pct:.0f}%")
+            pct = _decision_variance_explained(
+                root_df, default_df, parent_node_df, parent_group_by_keys, resolved_split_by, collapsed,
+            )
+            st.metric("Decision variance explained by Split By features on claimed samples", f"{pct:.0f}%")
         else:
             st.caption("Pick 1-2 Split By features above to define this sub-strategy's implementable rule.")
 

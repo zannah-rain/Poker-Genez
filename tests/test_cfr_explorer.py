@@ -179,7 +179,7 @@ def _make_correlated_checkpoint(path: str, rng: np.random.Generator, num_samples
     street_idx = _FEATURE_KEYS.index("street_norm")
     hand_idx = _FEATURE_KEYS.index("hand_category_norm")
     with torch.no_grad():
-        net.model[0].weight[:, hand_idx] *= 20.0  # give it an outsized true effect over the whole reservoir
+        net.hidden[0].block[0].weight[:, hand_idx] *= 20.0  # give it an outsized true effect over the whole reservoir
     net_config = cfr_networks.AdvantageNetConfig(feature_keys=_FEATURE_KEYS, hidden_sizes=(8, 8), table_size=3)
     cfr_networks.save(net, net_config, path)
     reservoir = cfr_reservoir.ReservoirBuffer(
@@ -626,12 +626,12 @@ class TestSplitBy:
     def test_shap_explained_metric_appears_once_split_by_is_set(self, synthetic_checkpoint):
         at = _run_app()
         c0 = _add_substrategy(at, "root::")
-        assert not any(m.label == "SHAP explained by Split By features" for m in at.metric)
+        assert not any(m.label == "Decision variance explained by Split By features on claimed samples" for m in at.metric)
 
         at.multiselect(key=f"{c0}split_by").set_value(["street_norm"]).run(timeout=60)
 
         assert not at.exception
-        metrics = [m for m in at.metric if m.label == "SHAP explained by Split By features"]
+        metrics = [m for m in at.metric if m.label == "Decision variance explained by Split By features on claimed samples"]
         assert len(metrics) == 1
         assert metrics[0].value.endswith("%")
 
@@ -640,7 +640,7 @@ class TestSplitBy:
         _add_substrategy(at, "root::")
         assert not at.exception
         assert any("Pick 1-2 Split By features" in c.value for c in at.caption)
-        assert not any(m.label == "SHAP explained by Split By features" for m in at.metric)
+        assert not any(m.label == "Decision variance explained by Split By features on claimed samples" for m in at.metric)
 
 
 class TestNavigation:
@@ -1159,3 +1159,154 @@ class TestGroupRelativeShap:
         option = next(o for o in at.multiselect(key=f"{c0}split_by").options if o.startswith("Suited Hole Cards"))
         shap_value = float(re.search(r"SHAP ([\d.]+)\)", option).group(1))
         assert shap_value > 0.0
+
+
+_INTERACTION_FEATURE_KEYS = ("hole_suited", "street_norm")
+
+
+def _make_interaction_checkpoint(path: str, interaction: bool, n: int = 8000, seed: int = 0) -> None:
+    """A checkpoint whose net is trained on a signal (isolated to a single
+    action category, so regret-matching doesn't blur it across several
+    near-tied outputs) that's a function of `hole_suited` -- REVERSED
+    specifically on the Flop street when `interaction` is True, identical
+    across every street when it's False.
+
+    Regression coverage for "Decision variance explained by Split By
+    features on claimed samples" (see cfr_explorer._decision_variance_explained):
+    a child sub-strategy claiming Flop, sharing its parent's own Split By
+    (hole_suited), should read meaningfully above 0% when `interaction` is
+    True -- the parent's own (population-wide, blended-across-streets)
+    per-hole_suited baseline does NOT correctly predict Flop's own
+    (reversed) relationship, so grouping the Flop-only residual by
+    hole_suited again explains real, additional variance -- and should
+    read near 0% when `interaction` is False, since there the parent's own
+    baseline already predicts Flop's behavior just as well as any other
+    street's."""
+    feature_dim = len(cfr_features.feature_indices(_INTERACTION_FEATURE_KEYS))
+    suited_idx = _INTERACTION_FEATURE_KEYS.index("hole_suited")
+    street_idx = _INTERACTION_FEATURE_KEYS.index("street_norm")
+    rng = np.random.default_rng(seed)
+    suited = (rng.random(n) < 0.5).astype(np.float32)
+    street_choice = rng.integers(0, 4, size=n)
+    street = np.array([0.0, 1 / 3, 2 / 3, 1.0], dtype=np.float32)[street_choice]
+    is_flop = street_choice == 1
+    signal = np.where(is_flop, -20.0 * suited, 20.0 * suited) if interaction else 20.0 * suited
+
+    X = np.zeros((n, feature_dim), dtype=np.float32)
+    X[:, suited_idx] = suited
+    X[:, street_idx] = street
+    y = np.zeros((n, strategy.NUM_ACTION_CATEGORIES), dtype=np.float32)
+    y[:, 0] = signal + rng.normal(scale=0.1, size=n)  # isolate the signal to one action
+    y[:, 1:] = rng.normal(scale=0.1, size=(n, strategy.NUM_ACTION_CATEGORIES - 1))
+
+    torch.manual_seed(0)
+    net = cfr_networks.AdvantageNet(input_dim=feature_dim, hidden_sizes=(32, 32), dropout=0.0)
+    optimizer = torch.optim.Adam(net.parameters(), lr=2e-3, weight_decay=1e-4)
+    Xt, yt = torch.from_numpy(X), torch.from_numpy(y)
+    net.train()
+    train_rng = np.random.default_rng(0)
+    for _ in range(2000):
+        idx = train_rng.integers(0, n, size=256)
+        pred = net(Xt[idx])
+        loss = ((pred - yt[idx]) ** 2).mean()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    net.eval()
+
+    net_config = cfr_networks.AdvantageNetConfig(
+        feature_keys=_INTERACTION_FEATURE_KEYS, hidden_sizes=(32, 32), table_size=3,
+    )
+    cfr_networks.save(net, net_config, path)
+
+    reservoir = cfr_reservoir.ReservoirBuffer(
+        capacity=n, feature_dim=feature_dim, num_actions=strategy.NUM_ACTION_CATEGORIES, rng=rng,
+    )
+    for i in range(n):
+        regrets = rng.normal(size=strategy.NUM_ACTION_CATEGORIES).astype(np.float32)
+        legal_mask = rng.random(strategy.NUM_ACTION_CATEGORIES) > 0.3
+        legal_mask[strategy.ACTION_CALL] = True
+        reservoir.add(X[i], regrets, legal_mask, float(rng.integers(1, 10)))
+    reservoir.save(path)
+
+
+@pytest.fixture(scope="module")
+def _interaction_checkpoint_path(tmp_path_factory) -> str:
+    path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_interaction")), "checkpoint")
+    _make_interaction_checkpoint(path, interaction=True)
+    return path
+
+
+@pytest.fixture
+def interaction_checkpoint(_interaction_checkpoint_path, monkeypatch):
+    monkeypatch.setenv("CFR_EXPLORER_CHECKPOINT_PATH", _interaction_checkpoint_path)
+    return _interaction_checkpoint_path
+
+
+@pytest.fixture(scope="module")
+def _no_interaction_checkpoint_path(tmp_path_factory) -> str:
+    path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_no_interaction")), "checkpoint")
+    _make_interaction_checkpoint(path, interaction=False)
+    return path
+
+
+@pytest.fixture
+def no_interaction_checkpoint(_no_interaction_checkpoint_path, monkeypatch):
+    monkeypatch.setenv("CFR_EXPLORER_CHECKPOINT_PATH", _no_interaction_checkpoint_path)
+    return _no_interaction_checkpoint_path
+
+
+def _decision_variance_metric_value(at: AppTest) -> int:
+    metric = next(m for m in at.metric if "Decision variance" in m.label)
+    return int(metric.value.rstrip("%"))
+
+
+class TestDecisionVarianceExplained:
+    """Regression coverage for a real bug reported in production use: a
+    child sub-strategy sharing its parent's own Split By feature, but with
+    its own claim filter narrowing it to a subset, always read 0% "SHAP
+    explained by Split By features" -- misleading, since a narrower rule
+    over that same feature can genuinely capture real, additional signal
+    the parent's broader-population analysis doesn't. cfr_explorer.
+    _decision_variance_explained replaces that SHAP-ratio computation with
+    a direct ANOVA-style "variance explained by grouping" statistic
+    (renamed "Decision variance explained by Split By features on claimed
+    samples" to match), computed against a baseline drawn from the
+    *parent's* own full claimed scope -- see that function's own
+    docstring."""
+
+    def test_shared_split_by_reads_meaningfully_above_zero_with_genuine_interaction(
+        self, interaction_checkpoint,
+    ):
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["hole_suited"]).run(timeout=60)
+        c0 = _add_substrategy(at, "root::")
+        at.multiselect(key=f"{c0}claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        _batch_set(at, {f"{c0}claim_filter_values::street_norm": ["Flop"]})
+
+        assert not at.exception
+        assert at.multiselect(key=f"{c0}split_by").value == ["hole_suited"]  # inherited, same as the parent's
+        assert _decision_variance_metric_value(at) >= 20
+
+    def test_shared_split_by_reads_near_zero_with_no_interaction(self, no_interaction_checkpoint):
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["hole_suited"]).run(timeout=60)
+        c0 = _add_substrategy(at, "root::")
+        at.multiselect(key=f"{c0}claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        _batch_set(at, {f"{c0}claim_filter_values::street_norm": ["Flop"]})
+
+        assert not at.exception
+        assert at.multiselect(key=f"{c0}split_by").value == ["hole_suited"]
+        assert _decision_variance_metric_value(at) <= 10
+
+    def test_root_itself_has_no_parent_adjustment(self, interaction_checkpoint):
+        # Root has no parent, so its own metric is plain, unadjusted
+        # variance explained -- just exercised here for "doesn't error and
+        # produces a sane percentage", since root's own claimed rows
+        # aren't narrowed the way a child's are in the tests above.
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["hole_suited"]).run(timeout=60)
+
+        assert not at.exception
+        value = _decision_variance_metric_value(at)
+        assert 0 <= value <= 100

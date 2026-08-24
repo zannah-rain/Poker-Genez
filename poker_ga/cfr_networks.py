@@ -1,4 +1,5 @@
-"""The advantage network: a plain MLP regressing each of
+"""The advantage network: an MLP (with residual connections between
+same-width hidden layers -- see _ResidualBlock) regressing each of
 strategy.ACTION_CATEGORIES' counterfactual regret, given the configured
 feature subset (cfr_features.py) -- Single Deep CFR's only network (see
 cfr_tree.py's module docstring for why there's just one, shared by every
@@ -19,8 +20,36 @@ import torch.nn as nn
 import cfr_features
 import strategy
 
-DEFAULT_HIDDEN_SIZES = (1024, 1024, 1024, 1024)
+DEFAULT_HIDDEN_SIZES = (2048, 2048, 2048, 2048, 2048, 2048, 2048)
 DEFAULT_DROPOUT = 0.1
+
+
+class _ResidualBlock(nn.Module):
+    """One hidden layer -- Linear -> LayerNorm -> ReLU -> Dropout -- with a
+    residual (skip) connection added around it whenever its input and
+    output widths match: standard practice for deep MLPs, mirroring
+    ResNet's identity shortcuts. Letting gradients flow straight through
+    the addition keeps a deep stack (DEFAULT_HIDDEN_SIZES is 4 layers deep)
+    trainable without the degradation a plain deep MLP is prone to, while
+    leaving what the network can represent unchanged -- the block can
+    still learn to zero out its own branch and pass its input through as
+    though it weren't there at all. Skipped when in_dim != out_dim (only
+    ever the very first hidden layer with DEFAULT_HIDDEN_SIZES, since every
+    entry there is the same width) -- there's no dimension-matching
+    identity to add in that case, and a learned projection shortcut isn't
+    worth the added complexity for a single misaligned layer."""
+
+    def __init__(self, in_dim: int, out_dim: int, dropout: float):
+        super().__init__()
+        self.same_width = in_dim == out_dim
+        layers: list[nn.Module] = [nn.Linear(in_dim, out_dim), nn.LayerNorm(out_dim), nn.ReLU()]
+        if dropout > 0.0:
+            layers.append(nn.Dropout(dropout))
+        self.block = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.block(x)
+        return x + out if self.same_width else out
 
 
 class AdvantageNet(nn.Module):
@@ -34,49 +63,47 @@ class AdvantageNet(nn.Module):
         self.output_dim = output_dim
         self.dropout = dropout
 
-        # Each hidden block is Linear -> LayerNorm -> ReLU -> Dropout.
-        # LayerNorm (not BatchNorm) since `predict` runs single-sample
-        # (batch size 1) forward passes during CFR traversal -- LayerNorm
-        # normalizes each sample independently and behaves identically in
-        # train/eval, unlike BatchNorm, which needs a batch to estimate
-        # statistics from and would otherwise need separate handling for
-        # single-sample inference. Dropout is a no-op once `predict`/
-        # `mean_shap_contributions_for_samples` call `self.eval()`, so it
-        # only ever regularizes the minibatch training steps in
-        # cfr_train.py's _train_step.
-        layers: list[nn.Module] = []
+        # Each hidden block is Linear -> LayerNorm -> ReLU -> Dropout, plus
+        # a residual connection whenever widths line up -- see
+        # _ResidualBlock. LayerNorm (not BatchNorm) since `predict` runs
+        # single-sample (batch size 1) forward passes during CFR traversal
+        # -- LayerNorm normalizes each sample independently and behaves
+        # identically in train/eval, unlike BatchNorm, which needs a batch
+        # to estimate statistics from and would otherwise need separate
+        # handling for single-sample inference. Dropout is a no-op once
+        # `predict`/`mean_shap_contributions_for_samples` call
+        # `self.eval()`, so it only ever regularizes the minibatch
+        # training steps in cfr_train.py's _train_step.
         prev = input_dim
+        blocks: list[_ResidualBlock] = []
         for h in hidden_sizes:
-            layers.append(nn.Linear(prev, h))
-            layers.append(nn.LayerNorm(h))
-            layers.append(nn.ReLU())
-            if dropout > 0.0:
-                layers.append(nn.Dropout(dropout))
+            blocks.append(_ResidualBlock(prev, h, dropout))
             prev = h
-        layers.append(nn.Linear(prev, output_dim))  # linear output: this is a regression head, not a classifier
-        self.model = nn.Sequential(*layers)
+        self.hidden = nn.ModuleList(blocks)
+        self.output_layer = nn.Linear(prev, output_dim)  # linear output: this is a regression head, not a classifier
         self._init_weights()
 
     def _init_weights(self) -> None:
-        """Kaiming-normal init (fan_in, ReLU gain) for every hidden Linear
-        layer, matching the ReLU nonlinearity that follows each -- PyTorch's
-        own default Linear init assumes a Leaky ReLU-ish gain that's a
-        reasonable general default but not tuned to this network's actual
-        activation. The final output Linear (a regression head, no
-        activation after it) instead gets a small-gain Xavier init, so the
-        net's initial regret predictions start out close to 0 rather than
-        with ReLU-scaled variance that has no reason to match the true
-        target scale."""
-        hidden_linears = [m for m in self.model if isinstance(m, nn.Linear)][:-1]
-        for layer in hidden_linears:
-            nn.init.kaiming_normal_(layer.weight, nonlinearity="relu")
-            nn.init.zeros_(layer.bias)
-        output_layer = self.model[-1]
-        nn.init.xavier_normal_(output_layer.weight, gain=0.1)
-        nn.init.zeros_(output_layer.bias)
+        """Kaiming-normal init (fan_in, ReLU gain) for every hidden block's
+        own Linear layer, matching the ReLU nonlinearity that follows each
+        -- PyTorch's own default Linear init assumes a Leaky ReLU-ish gain
+        that's a reasonable general default but not tuned to this
+        network's actual activation. The final output Linear (a
+        regression head, no activation after it) instead gets a
+        small-gain Xavier init, so the net's initial regret predictions
+        start out close to 0 rather than with ReLU-scaled variance that
+        has no reason to match the true target scale."""
+        for block in self.hidden:
+            linear = block.block[0]
+            nn.init.kaiming_normal_(linear.weight, nonlinearity="relu")
+            nn.init.zeros_(linear.bias)
+        nn.init.xavier_normal_(self.output_layer.weight, gain=0.1)
+        nn.init.zeros_(self.output_layer.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(x)
+        for block in self.hidden:
+            x = block(x)
+        return self.output_layer(x)
 
     def predict(self, features: np.ndarray) -> np.ndarray:
         """features: shape (input_dim,). Returns raw regret estimates,
@@ -167,7 +194,7 @@ def mean_shap_contributions_for_samples(
     net: AdvantageNet, explain_features: np.ndarray, background_features: np.ndarray,
     feature_keys: tuple[str, ...], rng: np.random.Generator,
     sample_size: int = 200, background_size: int = 20, nsamples: int = 20,
-    explain_group_labels: np.ndarray | None = None,
+    explain_group_labels: np.ndarray | None = None, background_group_labels: np.ndarray | None = None,
 ) -> list[tuple[str, float]]:
     """Normalized mean |SHAP value| per feature (see _normalized_mean_abs_shap;
     shap.GradientExplainer's Expected Gradients approximation -- exact
@@ -181,21 +208,40 @@ def mean_shap_contributions_for_samples(
     `background_size` bound the cost to roughly constant regardless of pool
     size.
 
-    `explain_group_labels`, if given, has one entry per row of BOTH
-    `explain_features` and `background_features` (the two are always the
-    same array, in the same row order, in this codebase's one caller --
-    cfr_explorer.py's self-referential explain=background call) -- e.g. a
-    parent sub-strategy's own resolved Split By group (see cfr_explorer.
-    _group_labels_for_rows). It stratifies on top of (not instead of) the
-    masking-pattern stratification below: each combined (masking pattern,
-    group) stratum is explained using ONLY a background sharing that exact
-    combination, by the same reasoning as the masking-only case just below
-    -- a feature the parent's own grouping fully determines (e.g. Hole
-    Suited, fully determined by Exact Hole Hand) is then an
-    exactly-constant reading for the whole stratum, background and explain
-    alike, so x_i - background_i is exactly 0 for it at every
-    interpolation point and it scores exactly 0, rather than sharing
-    credit with whatever the parent's own grouping feature explains.
+    `explain_group_labels`/`background_group_labels`, if given, have one
+    entry per row of `explain_features`/`background_features` respectively
+    -- e.g. a sub-strategy's own *parent's* resolved Split By group (see
+    cfr_explorer._group_labels_for_rows). The two pools don't need to be
+    the same rows, or even the same size: cfr_explorer._render_substrategy
+    deliberately passes a *wider* background pool (the parent's own full
+    claimed scope) than the (narrower, e.g. a child sub-strategy's own
+    claimed) explain pool, specifically so a group's baseline reflects how
+    the parent's grouping feature behaves in general, not just within
+    whatever narrow slice is being explained -- see that function's own
+    docstring for why (in short: a child sub-strategy applying the exact
+    same Split By feature as its parent, over a small subset, can still
+    capture real, additional signal the parent's own broader-population
+    analysis of that same feature doesn't -- the two shouldn't be forced
+    to agree). `background_group_labels` defaults to `explain_group_labels`
+    when omitted, matching the self-referential explain=background case
+    (e.g. this module's own tests).
+
+    Group labels stratify on top of (not instead of) the masking-pattern
+    stratification below: each combined (masking pattern, group) stratum
+    is explained using ONLY a background sharing that exact combination.
+    When background is drawn from the *same* population as explain (the
+    self-referential case), a feature the grouping fully, structurally
+    determines (e.g. Hole Suited, fully determined by Exact Hole Hand) is
+    an exactly-constant reading for the whole stratum, background and
+    explain alike, so x_i - background_i is exactly 0 at every
+    interpolation point and it scores exactly 0. When background is drawn
+    from a *wider* population instead, that same feature only scores near
+    0 if its relationship to the target is *also* uniform across that
+    wider population -- a relationship that's genuinely different (or
+    stronger, or reversed) specifically within the narrower explain pool
+    shows up as a nonzero residual instead, exactly the "does this narrower
+    rule still add something" question a sub-strategy's own Split By
+    metric is meant to answer.
 
     Computed separately per distinct masking pattern (see
     cfr_features.unmasked_validity/_validity_codes -- in practice, one
@@ -224,6 +270,8 @@ def mean_shap_contributions_for_samples(
     important. Empty list if `explain_features` is empty."""
     if len(explain_features) == 0:
         return []
+    if background_group_labels is None:
+        background_group_labels = explain_group_labels
 
     explain_codes = _validity_codes(cfr_features.unmasked_validity(feature_keys, explain_features))
     background_codes = _validity_codes(cfr_features.unmasked_validity(feature_keys, background_features))
@@ -232,14 +280,12 @@ def mean_shap_contributions_for_samples(
         explain_strata = explain_codes
         background_strata = background_codes
     else:
-        # background_strata reuses explain_group_labels (see docstring
-        # above) -- combining as strings rather than e.g. packing into a
-        # single int keeps this agnostic to whatever type group labels
-        # happen to be (str for an ordinary bucket-label grouping, int for
-        # Exact Hole Hand's grid-cell grouping -- see cfr_explorer.
-        # _group_labels_for_rows).
+        # Combining as strings rather than e.g. packing into a single int
+        # keeps this agnostic to whatever type group labels happen to be
+        # (str for an ordinary bucket-label grouping, int for Exact Hole
+        # Hand's grid-cell grouping -- see cfr_explorer._group_labels_for_rows).
         explain_strata = np.char.add(np.char.add(explain_codes.astype(str), ":"), explain_group_labels.astype(str))
-        background_strata = np.char.add(np.char.add(background_codes.astype(str), ":"), explain_group_labels.astype(str))
+        background_strata = np.char.add(np.char.add(background_codes.astype(str), ":"), background_group_labels.astype(str))
 
     net.eval()
     totals = np.zeros(len(feature_keys))

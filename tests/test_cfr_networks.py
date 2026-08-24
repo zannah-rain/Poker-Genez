@@ -197,7 +197,7 @@ class TestMeanShapContributionsForSamples:
         rng = np.random.default_rng(1)
         net = AdvantageNet(input_dim=4, hidden_sizes=(8,))
         with torch.no_grad():
-            first_layer = net.model[0]
+            first_layer = net.hidden[0].block[0]
             first_layer.weight[:, 2] = 0.0  # feature index 2 (spr_norm) can never affect any hidden unit
         features = _filled_reservoir(capacity=30, feature_dim=4, rng=rng).features
 
