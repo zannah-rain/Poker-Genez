@@ -39,6 +39,7 @@ import pytest
 import cfr_actions
 import cfr_features
 import cfr_tree
+import gto
 import strategy
 from cards import Card, Deck
 from game import PREFLOP, GameConfig, SeatState, _np_rng_to_random, play_hand
@@ -290,3 +291,99 @@ class TestPositionRelativeToNonFoldedPlayers:
         )
         assert situation.num_seats_this_street == 4
         assert situation.position == 2
+
+
+class _ExplodingNet:
+    """Fails the test loudly if _decision_node ever consults the net for a
+    decision a gto_spots entry was supposed to fix outright."""
+
+    def predict(self, features):
+        raise AssertionError("net.predict() called for a decision a matching gto_spots entry should have fixed")
+
+
+class _ExplodingReservoir:
+    """Fails the test loudly if _decision_node ever adds a training sample
+    for a decision a gto_spots entry was supposed to fix outright -- a
+    fixed decision isn't learned, so it should never produce a regret
+    target."""
+
+    def add(self, features, regrets, legal_mask, t):
+        raise AssertionError("reservoir.add() called for a decision a matching gto_spots entry should have fixed")
+
+
+class TestGtoSpotsOverrideDecisions:
+    """cfr_tree._decision_node should play a matching gto.GTOSpot's fixed
+    action verbatim -- for every seat, traverser included -- without ever
+    touching the net or reservoir for that decision (see gto.py's module
+    docstring)."""
+
+    def _make_state(self, num_seats=2, stack=200.0):
+        seats = [SeatState(player=Player(player_id=i, genome=None), stack=stack) for i in range(num_seats)]
+        for s in seats:
+            s.hole = [Card.from_str("7c"), Card.from_str("2d")]  # a hand no default_action="fold" range would cover
+        deck = Deck(rng=_np_rng_to_random(np.random.default_rng(0)))
+        return cfr_tree._HandState(
+            seats=seats, board=[], deck=deck, button_idx=0, config=GameConfig(),
+            starting_stacks=[stack] * num_seats,
+        )
+
+    def _fold_everywhere_spot(self):
+        return gto.GTOSpot(
+            key="always_fold", label="Always Fold Test Spot",
+            matcher=gto.SpotMatcher(), action_ranges=(), default_action="fold",
+        )
+
+    def test_matching_spot_forces_fold_without_touching_net_or_reservoir(self):
+        state = self._make_state()
+        ctx = cfr_tree._TraversalContext(
+            traverser=1, net=_ExplodingNet(), reservoir=_ExplodingReservoir(),
+            rng=np.random.default_rng(0), t=1.0, feature_indices=_FEATURE_INDICES, num_equity_rollouts=1,
+            gto_spots=(self._fold_everywhere_spot(),),
+        )
+        # Seat 0 facing a bet (call_amount > 0) with an active gto_spots
+        # catalog that always resolves to fold: this should fold seat 0
+        # immediately, ending the hand uncontested, and never reach
+        # net.predict()/reservoir.add() (both of which would raise).
+        value = cfr_tree._decision_node(
+            state, street=0, to_act=[0], order=[0, 1], pot=10.0, current_bet=6.0, last_raise_increment=2.0,
+            num_raises=1, street_aggressor=1, previous_street_aggressor=None, raiser_seats=frozenset({1}),
+            preflop_raise_count=1, ctx=ctx,
+        )
+        # Traverser (seat 1) already put in `pot`'s worth this street; once
+        # seat 0 folds uncontested, the traverser wins pot minus their own
+        # total contribution.
+        assert value == pytest.approx(10.0 - state.seats[1].total_committed)
+
+    def test_empty_gto_spots_falls_through_to_the_net(self):
+        state = self._make_state()
+        ctx = cfr_tree._TraversalContext(
+            traverser=1, net=_DominantRegretNet(strategy.ACTION_CALL), reservoir=_DiscardingReservoir(),
+            rng=np.random.default_rng(0), t=1.0, feature_indices=_FEATURE_INDICES, num_equity_rollouts=1,
+            gto_spots=(),
+        )
+        # No fixed spot in play -- should reach the (dominant-regret) net
+        # instead of raising, i.e. this must not itself raise.
+        cfr_tree._decision_node(
+            state, street=0, to_act=[0], order=[0, 1], pot=10.0, current_bet=6.0, last_raise_increment=2.0,
+            num_raises=1, street_aggressor=1, previous_street_aggressor=None, raiser_seats=frozenset({1}),
+            preflop_raise_count=1, ctx=ctx,
+        )
+
+    def test_non_matching_spot_falls_through_to_the_net(self):
+        state = self._make_state()
+        river_only_spot = gto.GTOSpot(
+            key="river_only", label="River Only", matcher=gto.SpotMatcher(street=3),
+            action_ranges=(), default_action="fold",
+        )
+        ctx = cfr_tree._TraversalContext(
+            traverser=1, net=_DominantRegretNet(strategy.ACTION_CALL), reservoir=_DiscardingReservoir(),
+            rng=np.random.default_rng(0), t=1.0, feature_indices=_FEATURE_INDICES, num_equity_rollouts=1,
+            gto_spots=(river_only_spot,),
+        )
+        # This decision is preflop -- the river-only spot shouldn't match,
+        # so this must fall through to the net rather than force a fold.
+        cfr_tree._decision_node(
+            state, street=0, to_act=[0], order=[0, 1], pot=10.0, current_bet=6.0, last_raise_increment=2.0,
+            num_raises=1, street_aggressor=1, previous_street_aggressor=None, raiser_seats=frozenset({1}),
+            preflop_raise_count=1, ctx=ctx,
+        )

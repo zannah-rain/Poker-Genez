@@ -43,6 +43,7 @@ import numpy as np
 
 import cfr_actions
 import cfr_features
+import gto
 from cards import Card, Deck, make_deck
 from features import Situation
 from game import (
@@ -121,6 +122,13 @@ class _TraversalContext:
     (NUM_ACTIONS,), raw regret estimates) -- see cfr_networks.AdvantageNet.
     `reservoir` must expose `.add(features, regrets, legal_mask, t)` -- see
     cfr_reservoir.ReservoirBuffer.
+
+    `gto_spots`: a catalog of gto.GTOSpot entries (see that module) whose
+    matching decisions are played exactly as their chart says instead of
+    the net's own regret-matched strategy -- for *every* seat, not just the
+    traverser, and without ever touching the net or reservoir for that
+    decision (see _decision_node). Empty by default: nothing is fixed, and
+    every decision is fully learned, same as before this existed.
     """
 
     traverser: int
@@ -130,6 +138,7 @@ class _TraversalContext:
     t: float
     feature_indices: np.ndarray
     num_equity_rollouts: int
+    gto_spots: tuple[gto.GTOSpot, ...] = ()
 
 
 def _apply_fold(state: _HandState, i: int) -> None:
@@ -314,11 +323,6 @@ def _decision_node(
         state, street, order, i, pot, call_amount, num_raises, preflop_raise_count,
         previous_street_aggressor, raiser_seats,
     )
-    legal_mask = cfr_actions.legal_action_categories(legal_actions)
-    feats = cfr_features.extract_subset(situation, ctx.feature_indices)
-    regrets = ctx.net.predict(feats)
-    sigma = cfr_actions.regret_matching(regrets, legal_mask)
-    legal_idx = np.flatnonzero(legal_mask)
 
     def _apply_and_recurse(child_state: _HandState, action_index: int) -> float:
         game_action, raw_bet_size = cfr_actions.category_to_game_action(action_index, situation, legal_actions)
@@ -345,6 +349,22 @@ def _decision_node(
             child_state, street, new_to_act, order, new_pot, new_current_bet, new_last_raise_increment,
             num_raises + 1, i, previous_street_aggressor, new_raiser_seats, preflop_raise_count, ctx,
         )
+
+    # A matching gto.GTOSpot fixes this decision's action outright, for
+    # whichever seat is on the move -- traverser or not -- rather than
+    # asking the net at all: there's only one path forward to take (no
+    # alternative actions to weigh), so no regret sample is added either.
+    # See gto.py's module docstring for why this is a hard override rather
+    # than another learned/evolvable input.
+    fixed_action = gto.first_matching_action(ctx.gto_spots, situation) if ctx.gto_spots else None
+    if fixed_action is not None:
+        return _apply_and_recurse(state, fixed_action)
+
+    legal_mask = cfr_actions.legal_action_categories(legal_actions)
+    feats = cfr_features.extract_subset(situation, ctx.feature_indices)
+    regrets = ctx.net.predict(feats)
+    sigma = cfr_actions.regret_matching(regrets, legal_mask)
+    legal_idx = np.flatnonzero(legal_mask)
 
     if i == ctx.traverser:
         # Explore every legal action (that's the whole point of being the
@@ -409,6 +429,7 @@ def traverse_hand(
     feature_indices: np.ndarray, num_equity_rollouts: int = DEFAULT_NUM_EQUITY_ROLLOUTS,
     min_starting_stack_bb: float = DEFAULT_MIN_STARTING_STACK_BB,
     max_starting_stack_bb: float = DEFAULT_MAX_STARTING_STACK_BB,
+    gto_spots: tuple[gto.GTOSpot, ...] = (),
 ) -> float:
     """Runs one Monte Carlo external-sampling traversal of a full hand from
     a fresh deal, seating `table_size` players around a randomized button --
@@ -426,6 +447,8 @@ def traverse_hand(
     fixed-depth deal would never produce. `config.starting_stack` itself is
     unused here as a result -- it only still applies to real (non-CFR)
     session play (game.py/simulate.py).
+
+    `gto_spots`: see _TraversalContext's own docstring -- forwarded as-is.
     """
     stacks = rng.uniform(min_starting_stack_bb, max_starting_stack_bb, size=table_size) * config.big_blind
     seats = [
@@ -458,6 +481,6 @@ def traverse_hand(
     )
     ctx = _TraversalContext(
         traverser=traverser, net=net, reservoir=reservoir, rng=rng, t=t,
-        feature_indices=feature_indices, num_equity_rollouts=num_equity_rollouts,
+        feature_indices=feature_indices, num_equity_rollouts=num_equity_rollouts, gto_spots=gto_spots,
     )
     return _start_street(state, PREFLOP, pot, 0, None, ctx)

@@ -47,7 +47,7 @@ DEFAULT_CHECKPOINT_PATH = os.path.join("cfr_runs", "checkpoint_latest")
 # How many reservoir rows to draw the whole report's explain/background
 # pools from -- large enough that every masking-pattern stratum (street,
 # mainly) is well represented, small enough that sampling from it stays fast.
-DEFAULT_POOL_SIZE = 1_000_000
+DEFAULT_POOL_SIZE = 100_000
 
 
 def _validity_codes(valid: np.ndarray) -> np.ndarray:
@@ -229,11 +229,11 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--checkpoint-path", type=str, default=DEFAULT_CHECKPOINT_PATH)
     parser.add_argument("--pool-size", type=int, default=DEFAULT_POOL_SIZE, help="Reservoir rows to sample from.")
-    parser.add_argument("--importance-sample-size", type=int, default=5_000)
-    parser.add_argument("--importance-background-size", type=int, default=1_000)
-    parser.add_argument("--importance-nsamples", type=int, default=500, help="shap.GradientExplainer's own nsamples.")
-    parser.add_argument("--interaction-sample-size", type=int, default=160, help="Explain rows per interaction stratum.")
-    parser.add_argument("--interaction-background-size", type=int, default=40, help="Baseline rows per interaction stratum.")
+    parser.add_argument("--importance-sample-size", type=int, default=2_500)
+    parser.add_argument("--importance-background-size", type=int, default=500)
+    parser.add_argument("--importance-nsamples", type=int, default=250, help="shap.GradientExplainer's own nsamples.")
+    parser.add_argument("--interaction-sample-size", type=int, default=80, help="Explain rows per interaction stratum.")
+    parser.add_argument("--interaction-background-size", type=int, default=20, help="Baseline rows per interaction stratum.")
     parser.add_argument(
         "--isolation-threshold", type=float, default=0.1,
         help="A feature's total interaction <= this fraction of the strongest feature's total is flagged as a weak-interaction (isolation) candidate.",

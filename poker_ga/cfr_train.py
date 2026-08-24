@@ -36,6 +36,7 @@ import cfr_features
 import cfr_networks
 import cfr_reservoir
 import cfr_tree
+import gto
 import strategy
 from game import GameConfig
 
@@ -64,6 +65,10 @@ class DeepCFRConfig:
     min_starting_stack_bb: float = cfr_tree.DEFAULT_MIN_STARTING_STACK_BB
     max_starting_stack_bb: float = cfr_tree.DEFAULT_MAX_STARTING_STACK_BB
     game_config: GameConfig = field(default_factory=GameConfig)
+    # See gto.py's module docstring -- matching decisions are played exactly
+    # as fixed, for every seat, instead of asking the net; empty (the
+    # default) leaves every decision fully learned, same as before this existed.
+    gto_spots: tuple[gto.GTOSpot, ...] = ()
 
 
 def _trainer_state_path(path: str) -> str:
@@ -241,7 +246,7 @@ def run_iteration(trainer: Trainer, rng: np.random.Generator, iteration: int, sh
             trainer.net, trainer.reservoir, config.table_size, config.game_config, rng,
             float(iteration), trainer.feature_indices, num_equity_rollouts=config.num_equity_rollouts,
             min_starting_stack_bb=config.min_starting_stack_bb,
-            max_starting_stack_bb=config.max_starting_stack_bb,
+            max_starting_stack_bb=config.max_starting_stack_bb, gto_spots=config.gto_spots,
         )
 
     trainer.net.train()

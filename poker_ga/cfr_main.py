@@ -30,6 +30,7 @@ import cfr_networks
 import cfr_policy
 import cfr_reservoir
 import cfr_tree
+import gto
 from benchmark import run_benchmark_until_resolved
 from cfr_train import DeepCFRConfig, Trainer, run_iteration
 from game import GameConfig
@@ -163,6 +164,13 @@ def parse_args() -> argparse.Namespace:
         "applies when --benchmark-interval > 0.",
     )
     p.add_argument(
+        "--gto-spots", action=argparse.BooleanOptionalAction, default=False,
+        help="Play gto.GTO_SPOTS' fixed charts verbatim (for every seat, not just the traverser) "
+        "instead of learning those specific decisions -- see gto.py's module docstring. The net "
+        "still learns the optimal response everywhere else, including its own best reply to those "
+        "fixed actions. Off by default: every decision is fully learned.",
+    )
+    p.add_argument(
         "--workers", type=int, default=0,
         help="Worker processes for the --benchmark-interval check specifically (CFR traversal "
         "itself is sequential in this version, so this only speeds up benchmarking). 1 is fully "
@@ -171,13 +179,16 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _benchmark_players(net: cfr_networks.AdvantageNet, feature_keys: tuple[str, ...], label: str, id_offset: int) -> list[Player]:
+def _benchmark_players(
+    net: cfr_networks.AdvantageNet, feature_keys: tuple[str, ...], label: str, id_offset: int,
+    gto_spots: tuple[gto.GTOSpot, ...] = (),
+) -> list[Player]:
     """A pool of BENCHMARK_SEATS_PER_SIDE Players all wrapping the same net
     -- run_benchmark_until_resolved draws its 3-a-side tables from a pool
     (refilling busted seats from it), so a single shared net just needs to
     appear in it that many times over."""
     return [
-        Player(player_id=id_offset + i, genome=cfr_policy.DeepCFRPolicy(net, feature_keys), label=label)
+        Player(player_id=id_offset + i, genome=cfr_policy.DeepCFRPolicy(net, feature_keys, gto_spots=gto_spots), label=label)
         for i in range(BENCHMARK_SEATS_PER_SIDE)
     ]
 
@@ -314,6 +325,7 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
         min_starting_stack_bb=args.min_starting_stack_bb,
         max_starting_stack_bb=args.max_starting_stack_bb,
         game_config=game_config,
+        gto_spots=gto.GTO_SPOTS if args.gto_spots else (),
     )
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -355,8 +367,8 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
             trainer.save(checkpoint_path)
 
         if args.benchmark_interval > 0 and iteration % args.benchmark_interval == 0:
-            current_players = _benchmark_players(trainer.net, config.feature_keys, "current", id_offset=0)
-            checkpoint_players = _benchmark_players(benchmark_net, config.feature_keys, "checkpoint", id_offset=-100)
+            current_players = _benchmark_players(trainer.net, config.feature_keys, "current", id_offset=0, gto_spots=config.gto_spots)
+            checkpoint_players = _benchmark_players(benchmark_net, config.feature_keys, "checkpoint", id_offset=-100, gto_spots=config.gto_spots)
             outcome = run_benchmark_until_resolved(
                 current_players, checkpoint_players, game_config, rng,
                 min_tables=args.benchmark_min_tables, max_tables=args.benchmark_max_tables,
