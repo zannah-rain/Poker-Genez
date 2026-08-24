@@ -387,3 +387,51 @@ class TestGtoSpotsOverrideDecisions:
             num_raises=1, street_aggressor=1, previous_street_aggressor=None, raiser_seats=frozenset({1}),
             preflop_raise_count=1, ctx=ctx,
         )
+
+    def test_fixed_bb_raise_spot_sizes_by_big_blind_not_pot(self, monkeypatch):
+        # A fixed "raise_1.5bb" spot should commit exactly current_bet +
+        # 1.5 * big_blind chips, regardless of how large `pot` is --
+        # unlike a pot-fraction category (see gto.py's _ActionSpec.decision).
+        # Intercepts the *next* decision (seat 1's, once seat 0's forced
+        # raise reopens the action) the same way
+        # test_decision_node_hands_off_its_own_street_aggressor... does for
+        # _start_street, since otherwise the street/hand would keep playing
+        # out (this same universal spot would also fix seat 1's response)
+        # until street_committed gets reset for the next street anyway.
+        real_decision_node = cfr_tree._decision_node
+        captured = {}
+
+        def fake_decision_node(state, *args, **kwargs):
+            captured["seat0_street_committed"] = state.seats[0].street_committed
+            return 0.0
+
+        monkeypatch.setattr(cfr_tree, "_decision_node", fake_decision_node)
+
+        config = GameConfig(small_blind=1.0, big_blind=2.0)
+        state = cfr_tree._HandState(
+            seats=[SeatState(player=Player(player_id=i, genome=None), stack=200.0) for i in range(2)],
+            board=[], deck=Deck(rng=_np_rng_to_random(np.random.default_rng(0))), button_idx=0, config=config,
+            starting_stacks=[200.0, 200.0],
+        )
+        for s in state.seats:
+            s.hole = [Card.from_str("7c"), Card.from_str("2d")]
+        state.seats[0].street_committed = 4.0
+        state.seats[0].stack -= 4.0
+        fixed_bb_spot = gto.GTOSpot(
+            key="fixed_bb", label="Fixed BB Raise Test Spot",
+            matcher=gto.SpotMatcher(), action_ranges=(), default_action="raise_1.5bb",
+        )
+        ctx = cfr_tree._TraversalContext(
+            traverser=1, net=_ExplodingNet(), reservoir=_ExplodingReservoir(),
+            rng=np.random.default_rng(0), t=1.0, feature_indices=_FEATURE_INDICES, num_equity_rollouts=1,
+            gto_spots=(fixed_bb_spot,),
+        )
+        real_decision_node(
+            state, street=0, to_act=[0], order=[0, 1], pot=6.0, current_bet=6.0, last_raise_increment=2.0,
+            num_raises=1, street_aggressor=1, previous_street_aggressor=None, raiser_seats=frozenset({1}),
+            preflop_raise_count=1, ctx=ctx,
+        )
+        # Was facing a call of 2.0 (current_bet 6.0 - already committed 4.0)
+        # -- the fixed spot's raise adds 1.5 * big_blind (3.0) on top of
+        # current_bet, for a total of 9.0 (see gto.py's _ActionSpec.decision).
+        assert captured["seat0_street_committed"] == pytest.approx(9.0)

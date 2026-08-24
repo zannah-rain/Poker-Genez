@@ -17,7 +17,7 @@ import numpy as np
 import strategy
 from features import Situation
 from genome import BET_RAISE, CHECK_CALL, FOLD, _apply_decision
-from rules import _standard_decision
+from rules import Decision, _standard_decision
 
 NUM_ACTIONS = strategy.NUM_ACTION_CATEGORIES
 
@@ -42,13 +42,24 @@ def legal_action_categories(legal_actions: list[int]) -> np.ndarray:
     return mask
 
 
+def decision_to_game_action(decision: Decision, legal_actions: list[int]) -> tuple[int, float]:
+    """A rules.Decision -> (game_action, bet_size), applying the shared
+    legal-action fallbacks (Fold -> Check/Call if folding isn't legal,
+    Raise -> Check/Call if raising isn't legal) -- category_to_game_action's
+    own underlying step, exposed separately so a Decision built some other
+    way (e.g. gto.py's fixed spots, whose raise sizes aren't always one of
+    strategy.ACTION_CATEGORIES' pot-fraction buckets -- see gto.GTOSpot's
+    "raise_<N>bb" tokens) resolves through the exact same fallback logic."""
+    return _apply_decision(decision, legal_actions)
+
+
 def category_to_game_action(
     action_index: int, situation: Situation, legal_actions: list[int]
 ) -> tuple[int, float]:
     """ACTION_CATEGORIES index -> (game_action, bet_size), exactly as a
     StandardRule's chosen action would resolve for the same Situation."""
     decision = _standard_decision(action_index, situation)
-    return _apply_decision(decision, legal_actions)
+    return decision_to_game_action(decision, legal_actions)
 
 
 def regret_matching(regrets: np.ndarray, legal_mask: np.ndarray) -> np.ndarray:

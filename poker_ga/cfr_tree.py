@@ -324,8 +324,7 @@ def _decision_node(
         previous_street_aggressor, raiser_seats,
     )
 
-    def _apply_and_recurse(child_state: _HandState, action_index: int) -> float:
-        game_action, raw_bet_size = cfr_actions.category_to_game_action(action_index, situation, legal_actions)
+    def _apply_and_recurse(child_state: _HandState, game_action: int, raw_bet_size: float) -> float:
         if game_action == FOLD:
             _apply_fold(child_state, i)
             return _decision_node(
@@ -356,9 +355,10 @@ def _decision_node(
     # alternative actions to weigh), so no regret sample is added either.
     # See gto.py's module docstring for why this is a hard override rather
     # than another learned/evolvable input.
-    fixed_action = gto.first_matching_action(ctx.gto_spots, situation) if ctx.gto_spots else None
-    if fixed_action is not None:
-        return _apply_and_recurse(state, fixed_action)
+    fixed_decision = gto.first_matching_action(ctx.gto_spots, situation) if ctx.gto_spots else None
+    if fixed_decision is not None:
+        game_action, raw_bet_size = cfr_actions.decision_to_game_action(fixed_decision, legal_actions)
+        return _apply_and_recurse(state, game_action, raw_bet_size)
 
     legal_mask = cfr_actions.legal_action_categories(legal_actions)
     feats = cfr_features.extract_subset(situation, ctx.feature_indices)
@@ -373,7 +373,8 @@ def _decision_node(
         # or worse it did than that weighted average.
         values = np.zeros(NUM_ACTIONS, dtype=np.float64)
         for a in legal_idx:
-            values[a] = _apply_and_recurse(state.copy(), int(a))
+            game_action, raw_bet_size = cfr_actions.category_to_game_action(int(a), situation, legal_actions)
+            values[a] = _apply_and_recurse(state.copy(), game_action, raw_bet_size)
         v_node = float(np.dot(sigma[legal_idx], values[legal_idx]))
         regret_vec = np.zeros(NUM_ACTIONS, dtype=np.float64)
         regret_vec[legal_idx] = values[legal_idx] - v_node
@@ -383,7 +384,8 @@ def _decision_node(
     p = sigma[legal_idx]
     p = p / p.sum()  # guard against float roundoff so np.random.Generator.choice's sum-to-1 check never flakes
     chosen = int(ctx.rng.choice(legal_idx, p=p))
-    return _apply_and_recurse(state, chosen)
+    game_action, raw_bet_size = cfr_actions.category_to_game_action(chosen, situation, legal_actions)
+    return _apply_and_recurse(state, game_action, raw_bet_size)
 
 
 def _start_street(

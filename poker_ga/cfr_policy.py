@@ -45,9 +45,9 @@ class DeepCFRPolicy:
     def decide(
         self, situation: Situation, legal_actions: list[int], rng: np.random.Generator | None = None,
     ) -> tuple[int, float]:
-        fixed_action = gto.first_matching_action(self.gto_spots, situation) if self.gto_spots else None
-        if fixed_action is not None:
-            return cfr_actions.category_to_game_action(fixed_action, situation, legal_actions)
+        fixed_decision = gto.first_matching_action(self.gto_spots, situation) if self.gto_spots else None
+        if fixed_decision is not None:
+            return cfr_actions.decision_to_game_action(fixed_decision, legal_actions)
 
         legal_mask = cfr_actions.legal_action_categories(legal_actions)
         feats = cfr_features.extract_subset(situation, self.feature_indices)

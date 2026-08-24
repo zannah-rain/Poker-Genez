@@ -7,9 +7,15 @@ the net's own guess there.
 A GTOSpot combines:
   - a SpotMatcher: a readable, declarative definition of which situations
     this spot applies to (street, pot type, position, stack depth, etc.)
-  - action_ranges: which strategy.ACTION_CATEGORIES token takes which range
-    (see ranges.py) in that spot, checked in order -- the first range a
-    hand falls in wins; default_action otherwise.
+  - action_ranges: which range (see ranges.py) takes which action in that
+    spot, checked in order -- the first range a hand falls in wins;
+    default_action otherwise. An action token is either one of
+    strategy.ACTION_CATEGORIES' pot-relative sizes ("fold", "call",
+    "raise_25".."raise_150", "allin" -- the same 9-way vocabulary the net
+    itself predicts over) or a fixed "raise_<N>bb" (e.g. "raise_1.5bb"): a
+    raise sized to exactly N big blinds regardless of pot size, for spots
+    (e.g. small, fixed-size continuation bets) better expressed that way
+    than as a pot fraction.
 
 Unlike a genome's evolvable weights, a GTOSpot's chart is never learned --
 it's a hard override: whenever a decision's Situation matches an active
@@ -36,6 +42,7 @@ from dataclasses import dataclass, field
 import strategy
 from features import Situation
 from ranges import hand_label, parse_range
+from rules import Decision, _standard_decision
 from seating import seat_role
 
 POT_TYPE_LABELS = ("Unraised", "Single Raised", "3-Bet", "4-Bet+")
@@ -56,16 +63,55 @@ _ACTION_TOKENS: dict[str, int] = {
     "allin": strategy.ACTION_ALLIN,
 }
 
+# "raise_<N>bb" (e.g. "raise_1.5bb", "raise_3bb") -- a fixed number of big
+# blinds, unlike _ACTION_TOKENS' pot-fraction categories, whose chip size
+# grows/shrinks with the pot. Matched against the already-lowercased token,
+# so the "BB" suffix in a chart like "raise_1.5BB" is case-insensitive.
+_BB_RAISE_TOKEN_RE = re.compile(r"raise_(\d+(?:\.\d+)?)bb")
 
-def parse_action_token(token: str) -> int:
-    """A GTOSpot chart token (e.g. "raise_150") -> its
-    strategy.ACTION_CATEGORIES index. Raises ValueError (listing every
-    valid token) for anything else -- a typo here should fail loudly at
-    catalog-definition time, not silently resolve to the wrong action."""
+
+@dataclass(frozen=True)
+class _ActionSpec:
+    """An action_ranges/default_action token, resolved down to either a
+    strategy.ACTION_CATEGORIES index (a pot-relative action, or fold/call)
+    or a fixed big-blind raise size -- exactly one of the two is set.
+    Deferred one step further than a plain Decision since a category's own
+    chip size still depends on the Situation it's actually played in (its
+    pot), whereas a fixed-BB raise's chip size only depends on that
+    Situation's big_blind (the same every hand) -- either way, `decision`
+    is what finally turns this into game-mechanics-ready chips."""
+
+    category: int | None = None
+    fixed_raise_bb: float | None = None
+
+    def decision(self, situation: Situation) -> Decision:
+        # bet_size is a chip amount on top of whatever's already required to
+        # call this street -- the same "raise BY this much" convention
+        # rules._standard_decision's own pot-fraction categories use (see
+        # cfr_tree._apply_raise), just sized in a fixed number of big blinds
+        # instead of a fraction of the (possibly very different, hand to
+        # hand) pot.
+        if self.fixed_raise_bb is not None:
+            return Decision("raise", self.fixed_raise_bb * situation.big_blind)
+        return _standard_decision(self.category, situation)
+
+
+def parse_action_token(token: str) -> _ActionSpec:
+    """A GTOSpot chart token -- either one of _ACTION_TOKENS (e.g.
+    "raise_150", a pot-relative category) or "raise_<N>bb" (e.g.
+    "raise_1.5bb", a fixed big-blind raise size regardless of pot) -- to
+    the _ActionSpec that resolves it. Raises ValueError for anything else
+    -- a typo here should fail loudly at catalog-definition time, not
+    silently resolve to the wrong action."""
     token = token.strip().lower()
-    if token not in _ACTION_TOKENS:
-        raise ValueError(f"Unknown GTO action token {token!r}; expected one of {sorted(_ACTION_TOKENS)}")
-    return _ACTION_TOKENS[token]
+    if token in _ACTION_TOKENS:
+        return _ActionSpec(category=_ACTION_TOKENS[token])
+    match = _BB_RAISE_TOKEN_RE.fullmatch(token)
+    if match:
+        return _ActionSpec(fixed_raise_bb=float(match.group(1)))
+    raise ValueError(
+        f"Unknown GTO action token {token!r}; expected one of {sorted(_ACTION_TOKENS)} or \"raise_<N>bb\" (e.g. \"raise_1.5bb\")"
+    )
 
 
 @dataclass(frozen=True)
@@ -141,37 +187,37 @@ class GTOSpot:
     action_ranges: tuple[tuple[str, str], ...]  # ((action_token, range_str), ...), checked in order
     default_action: str = "fold"  # applied if the hand isn't in any listed range, once the spot matches
     resolved_ranges: tuple = field(init=False, repr=False, compare=False)
-    default_action_index: int = field(init=False, repr=False, compare=False)
+    default_action_spec: _ActionSpec = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
         resolved = tuple((parse_action_token(action), parse_range(range_str)) for action, range_str in self.action_ranges)
         object.__setattr__(self, "resolved_ranges", resolved)
-        object.__setattr__(self, "default_action_index", parse_action_token(self.default_action))
+        object.__setattr__(self, "default_action_spec", parse_action_token(self.default_action))
 
 
-def resolve_spot_action(spot: GTOSpot, situation: Situation) -> int | None:
-    """This decision's fixed strategy.ACTION_CATEGORIES index if `situation`
-    matches `spot` (falling back to spot.default_action_index if the hand
-    isn't in any of its listed ranges), else None if the spot doesn't apply
-    to this situation at all."""
+def resolve_spot_action(spot: GTOSpot, situation: Situation) -> Decision | None:
+    """This decision's fixed rules.Decision if `situation` matches `spot`
+    (falling back to spot.default_action_spec if the hand isn't in any of
+    its listed ranges), else None if the spot doesn't apply to this
+    situation at all."""
     if not spot.matcher.matches(situation):
         return None
     label = hand_label(situation.hole[0], situation.hole[1])
-    for action_index, range_set in spot.resolved_ranges:
+    for action_spec, range_set in spot.resolved_ranges:
         if label in range_set:
-            return action_index
-    return spot.default_action_index
+            return action_spec.decision(situation)
+    return spot.default_action_spec.decision(situation)
 
 
-def first_matching_action(spots: tuple[GTOSpot, ...], situation: Situation) -> int | None:
+def first_matching_action(spots: tuple[GTOSpot, ...], situation: Situation) -> Decision | None:
     """The first spot (in catalog order) whose matcher applies to
-    `situation`, resolved to its fixed action -- None if no spot in `spots`
-    applies at all, in which case the caller should fall through to its
-    normal (learned) decision-making instead."""
+    `situation`, resolved to its fixed Decision -- None if no spot in
+    `spots` applies at all, in which case the caller should fall through to
+    its normal (learned) decision-making instead."""
     for spot in spots:
-        action = resolve_spot_action(spot, situation)
-        if action is not None:
-            return action
+        decision = resolve_spot_action(spot, situation)
+        if decision is not None:
+            return decision
     return None
 
 

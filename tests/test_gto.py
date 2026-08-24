@@ -6,6 +6,7 @@ real decision (cross-validated there, not here)."""
 import pytest
 
 import gto
+import rules
 import strategy
 from cards import Card
 from features import Situation
@@ -43,11 +44,18 @@ def test_hand_label_ignores_exact_suit():
 
 
 def test_parse_action_token_valid_and_invalid():
-    assert gto.parse_action_token("fold") == strategy.ACTION_FOLD
-    assert gto.parse_action_token("raise_150") == strategy.ACTION_RAISE_150
-    assert gto.parse_action_token("ALLIN") == strategy.ACTION_ALLIN
+    assert gto.parse_action_token("fold").category == strategy.ACTION_FOLD
+    assert gto.parse_action_token("raise_150").category == strategy.ACTION_RAISE_150
+    assert gto.parse_action_token("ALLIN").category == strategy.ACTION_ALLIN
     with pytest.raises(ValueError):
         gto.parse_action_token("raise_999")
+
+
+def test_parse_action_token_fixed_bb_raise():
+    assert gto.parse_action_token("raise_1.5bb").fixed_raise_bb == pytest.approx(1.5)
+    assert gto.parse_action_token("raise_3BB").fixed_raise_bb == pytest.approx(3.0)
+    with pytest.raises(ValueError):
+        gto.parse_action_token("raise_bb")
 
 
 def _situation(**overrides) -> Situation:
@@ -102,10 +110,21 @@ def test_resolve_spot_action_uses_range_then_default():
         action_ranges=(("raise_150", "AA, KK"),), default_action="fold",
     )
     aa_situation = _situation(hole=[Card.from_str("Ah"), Card.from_str("As")])
-    assert gto.resolve_spot_action(spot, aa_situation) == strategy.ACTION_RAISE_150
+    aa_decision = gto.resolve_spot_action(spot, aa_situation)
+    assert aa_decision == rules.Decision("raise", strategy.RAISE_POT_FRACTION[strategy.ACTION_RAISE_150] * max(aa_situation.pot, 1.0))
 
     trash_situation = _situation(hole=[Card.from_str("7c"), Card.from_str("2d")])
-    assert gto.resolve_spot_action(spot, trash_situation) == strategy.ACTION_FOLD
+    assert gto.resolve_spot_action(spot, trash_situation) == rules.Decision("fold")
+
+
+def test_resolve_spot_action_fixed_bb_raise_ignores_pot_size():
+    spot = gto.GTOSpot(
+        key="test_spot", label="Test", matcher=gto.SpotMatcher(street=0),
+        action_ranges=(), default_action="raise_1.5bb",
+    )
+    small_pot = gto.resolve_spot_action(spot, _situation(pot=3.0, big_blind=2.0))
+    huge_pot = gto.resolve_spot_action(spot, _situation(pot=300.0, big_blind=2.0))
+    assert small_pot == huge_pot == rules.Decision("raise", 3.0)  # 1.5 * 2.0 big blind, regardless of pot
 
 
 def test_resolve_spot_action_none_when_matcher_rejects():
@@ -125,7 +144,7 @@ def test_first_matching_action_stops_at_first_applicable_spot():
         key="always", label="Always", matcher=gto.SpotMatcher(street=0), action_ranges=(), default_action="fold",
     )
     situation = _situation(street=0)
-    assert gto.first_matching_action((never_matches, always_matches), situation) == strategy.ACTION_FOLD
+    assert gto.first_matching_action((never_matches, always_matches), situation) == rules.Decision("fold")
 
 
 def test_first_matching_action_none_when_nothing_applies():
