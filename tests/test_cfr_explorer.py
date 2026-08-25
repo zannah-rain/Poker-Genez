@@ -28,6 +28,13 @@ def _strip_shap_suffix(option: str) -> str:
     return re.sub(r"\s+\(SHAP [\d.]+\)$", "", option)
 
 
+def _strip_nav_prefix(label: str) -> str:
+    """A sidebar nav button's own tree-drawing prefix (see
+    _tree_prefix -- non-breaking spaces plus any of "│├└─") stripped off,
+    leaving just its plain _nav_label text."""
+    return re.sub(r"^[\u00a0│├└─]+", "", label)
+
+
 def _strip_interaction_suffix(option: str) -> str:
     """A "Cross with other features" dropdown option's plain feature
     label, with its "  (Interaction 0.0000)" suffix (see _render_graphs)
@@ -691,19 +698,46 @@ class TestNavigation:
         assert root_btn.label == "Overall Strategy"
         assert root_btn.proto.type == "primary"
 
-    def test_child_gets_its_own_indented_nav_button_and_becomes_selected(self, synthetic_checkpoint):
+    def test_child_gets_its_own_prefixed_nav_button_and_becomes_selected(self, synthetic_checkpoint):
         at = _run_app()
         c0 = _add_substrategy(at, "root::")  # auto-selected
 
         child_btn = at.sidebar.button(key=f"nav::{c0}")
-        assert child_btn.label.lstrip("\xa0") != child_btn.label  # indented one level deeper than root
+        assert _strip_nav_prefix(child_btn.label) != child_btn.label  # has a tree-drawing prefix root's own button lacks
         assert child_btn.proto.type == "primary"
         assert at.sidebar.button(key="nav::root::").proto.type == "secondary"
+
+    def test_siblings_get_mid_and_last_branch_glyphs(self, synthetic_checkpoint):
+        # First-added child still has a sibling below it (c1) -- "├";
+        # last-added child has none below it -- "└" (see _tree_prefix).
+        at = _run_app()
+        c0 = _add_substrategy(at, "root::")
+        _select(at, "root::")
+        c1 = _add_substrategy(at, "root::")
+
+        assert at.sidebar.button(key=f"nav::{c0}").label.startswith("├")
+        assert at.sidebar.button(key=f"nav::{c1}").label.startswith("└")
+
+    def test_grandchild_prefix_continues_its_parents_vertical_line(self, synthetic_checkpoint):
+        # c0 isn't root's last child (c1 comes after it), so a grandchild
+        # under c0 should see that ancestor's branch line still drawing
+        # through its own row (a "│" continuation segment) before its own
+        # (last-child) glyph.
+        at = _run_app()
+        c0 = _add_substrategy(at, "root::")
+        _select(at, "root::")
+        _add_substrategy(at, "root::")
+        _select(at, c0)
+        grandchild = _add_substrategy(at, c0)
+
+        label = at.sidebar.button(key=f"nav::{grandchild}").label
+        assert label.startswith("│")
+        assert "└" in label
 
     def test_unclaimed_child_label_says_unclaimed(self, synthetic_checkpoint):
         at = _run_app()
         c0 = _add_substrategy(at, "root::")
-        assert at.sidebar.button(key=f"nav::{c0}").label.strip() == "Sub-strategy (unclaimed)"
+        assert _strip_nav_prefix(at.sidebar.button(key=f"nav::{c0}").label) == "Sub-strategy (unclaimed)"
 
     def test_child_claim_shows_up_in_its_nav_label(self, synthetic_checkpoint):
         at = _run_app()

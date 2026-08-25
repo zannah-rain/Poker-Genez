@@ -1229,22 +1229,61 @@ def _nav_label(key_prefix: str, is_root: bool) -> str:
     return desc or "Sub-strategy (unclaimed)"
 
 
-def _render_navigation_node(key_prefix: str, is_root: bool, depth: int) -> None:
+# Tree-drawing glyphs for the sidebar nav (see _tree_prefix) -- the same
+# convention every CLI `tree` command uses, so a glance at the sidebar
+# shows exactly which nodes are siblings/children of which others, not
+# just how deep each one is (plain indentation alone can't distinguish "my
+# parent's next child" from "my own child" at the same depth). \u00a0
+# (non-breaking space), not a plain " ", for every blank-filler position --
+# regular spaces collapse away in the rendered HTML, undoing the alignment.
+_TREE_VERTICAL, _TREE_BRANCH, _TREE_LAST_BRANCH, _TREE_HORIZONTAL, _NBSP = "│", "├", "└", "─", " "
+
+
+def _tree_prefix(ancestor_is_last: list[bool], is_last: bool) -> str:
+    """A tree-drawing prefix (e.g. "│  ├─ ") for a non-root
+    nav node: one 2-character segment per ancestor level -- "│ " if that
+    ancestor still has more siblings below it (so its own branch line must
+    keep drawing down through this row), blank otherwise (its branch
+    already closed) -- followed by this node's own glyph: "├─" if it has
+    more siblings after it, "└─" if it's the last child. `ancestor_is_last`
+    holds one bool per ancestor strictly between root and this node's own
+    parent (root itself draws no segment -- see _render_navigation_node)."""
+    segments = ["" if last else _TREE_VERTICAL + _NBSP for last in ancestor_is_last]
+    segments = [s + _NBSP if s else _NBSP * 2 for s in segments]
+    branch = _TREE_LAST_BRANCH if is_last else _TREE_BRANCH
+    return "".join(segments) + branch + _TREE_HORIZONTAL + _NBSP
+
+
+def _render_navigation_node(key_prefix: str, is_root: bool, ancestor_is_last: list[bool], is_last: bool) -> None:
     """One sidebar button for the node at `key_prefix` -- clicking it
     switches the central column to show that node (see _select_node) --
-    plus one more, indented one level deeper, for each of its own
-    children, recursively. The currently selected node's own button
-    renders as `type="primary"` so it stands out from the rest of the
-    tree."""
+    plus one more, prefixed with its own tree-drawing glyph (see
+    _tree_prefix), for each of its own children, recursively. The
+    currently selected node's own button renders as `type="primary"` so it
+    stands out from the rest of the tree.
+
+    `ancestor_is_last`/`is_last` are this node's own position in the tree:
+    `is_last` is whether it's the last (bottom-most) child among its own
+    siblings; `ancestor_is_last` is the same "was it the last child"
+    reading for every ancestor from just below root down to (not
+    including) this node's own parent -- both needed to draw
+    `_tree_prefix` correctly. Root gets neither (it draws no prefix at
+    all), and doesn't contribute its own segment to its children's
+    `ancestor_is_last` either -- root is the sidebar's own header, not a
+    branch in the tree it's heading."""
     is_selected = _selected_node() == key_prefix
-    indent = " " * (depth * 4)  # non-breaking spaces -- regular spaces collapse in rendered HTML
+    prefix = "" if is_root else _tree_prefix(ancestor_is_last, is_last)
     st.sidebar.button(
-        f"{indent}{_nav_label(key_prefix, is_root)}", key=f"nav::{key_prefix}",
+        f"{prefix}{_nav_label(key_prefix, is_root)}", key=f"nav::{key_prefix}",
         type="primary" if is_selected else "secondary",
         on_click=_select_node, args=(key_prefix,), use_container_width=True,
     )
-    for child_id in _substrategy_children(key_prefix):
-        _render_navigation_node(_child_key_prefix(key_prefix, child_id), False, depth + 1)
+    children = _substrategy_children(key_prefix)
+    child_ancestor_is_last = ancestor_is_last if is_root else ancestor_is_last + [is_last]
+    for i, child_id in enumerate(children):
+        _render_navigation_node(
+            _child_key_prefix(key_prefix, child_id), False, child_ancestor_is_last, i == len(children) - 1,
+        )
 
 
 def _render_navigation() -> None:
@@ -1256,7 +1295,7 @@ def _render_navigation() -> None:
     which node is currently selected) is already fresh."""
     st.sidebar.header("Navigation")
     st.sidebar.caption("Click a sub-strategy to view it.")
-    _render_navigation_node("root::", True, 0)
+    _render_navigation_node("root::", True, [], True)
 
 
 def main() -> None:
