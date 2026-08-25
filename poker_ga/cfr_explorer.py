@@ -81,6 +81,15 @@ from features import HOLE_HAND_GRID_RANK_LABELS, HOLE_HAND_GRID_SIZE, MASKED, ho
 
 DEFAULT_CHECKPOINT_PATH = os.path.join("cfr_runs", "checkpoint_latest")
 DEFAULT_MAX_SAMPLES = 100_000
+# A big loaded reservoir pool is what gives an infrequent spot enough of
+# its own rows to read a meaningful (i.e. not leave-one-out-crushed --
+# see _decision_variance_explained) Decision variance explained figure;
+# capping *analysis* per spot separately (this default), rather than
+# capping the pool itself, keeps a common/high-volume spot's own table,
+# chart, metrics, and every ranking/button fast regardless of how large
+# that pool is loaded, without also making a rare spot's own comparatively
+# tiny row count any smaller than it already naturally is.
+DEFAULT_MAX_EVAL_SAMPLES = 10_000
 
 _FEATURE_COL_PREFIX = "feat::"
 _ACTION_COL_PREFIX = "action::"
@@ -240,19 +249,25 @@ def _group_labels_for_rows(df: pd.DataFrame, row_index: np.ndarray, group_by_key
     if not group_by_keys:
         return None
     if group_by_keys == (_HOLE_HAND_GRID_KEY,):
-        x = df[_HOLE_HAND_GRID_RAW_X_COL].to_numpy()
-        y = df[_HOLE_HAND_GRID_RAW_Y_COL].to_numpy()
+        # Indexed down to row_index *before* any per-row math below, not
+        # after -- df can be the whole loaded reservoir (root_df), while
+        # row_index is often a much smaller claimed/capped subset of it
+        # (see _capped_for_eval); doing the math over every row in df only
+        # to immediately throw most of it away would scale with the full
+        # reservoir size instead of with however many rows are actually
+        # being grouped here.
+        x = df[_HOLE_HAND_GRID_RAW_X_COL].to_numpy()[row_index]
+        y = df[_HOLE_HAND_GRID_RAW_Y_COL].to_numpy()[row_index]
         size = HOLE_HAND_GRID_SIZE
         cols = np.rint(np.clip(x, 0.0, 1.0) * (size - 1)).astype(int)
         rows = np.rint(np.clip(y, 0.0, 1.0) * (size - 1)).astype(int)
         cell = rows * size + cols
-        labels = np.where(x < 0.0, -1, cell)
-        return labels[row_index]
-    columns = [df[_feature_col(key)].to_numpy().astype(str) for key in group_by_keys]
+        return np.where(x < 0.0, -1, cell)
+    columns = [df[_feature_col(key)].to_numpy()[row_index].astype(str) for key in group_by_keys]
     combined = columns[0]
     for column in columns[1:]:
         combined = np.char.add(np.char.add(combined, "|"), column)
-    return combined[row_index]
+    return combined
 
 
 def _feature_col(key: str) -> str:
@@ -981,6 +996,22 @@ def _resolve_default_df(node_df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
     return remaining
 
 
+def _capped_for_eval(df: pd.DataFrame, max_eval_samples: int) -> pd.DataFrame:
+    """`df` itself if it's already at or under `max_eval_samples` rows,
+    otherwise a fixed-seed random subsample of exactly `max_eval_samples`
+    of them -- the actual sample every table/chart/metric/ranking/button
+    in this file computes over (see _render_substrategy), decoupled from
+    however many rows a node's own claim genuinely matches (`node_df`/
+    `default_df` themselves, used unchanged for heading counts and "keep
+    values" filter options -- see _render_substrategy). A *fixed* seed
+    (not fresh per render) so a spot's own analysis reads the same numbers
+    across reruns that don't actually change its own claimed rows, rather
+    than jittering on every unrelated interaction elsewhere on the page."""
+    if len(df) <= max_eval_samples:
+        return df
+    return df.sample(n=max_eval_samples, random_state=0)
+
+
 def _add_children_for_each_level(key_prefix: str, feature_key: str, default_df: pd.DataFrame, split_by: list[str]) -> None:
     """One new child sub-strategy per level of `feature_key` actually
     observed in `default_df` -- each claiming exactly that level, with
@@ -1155,7 +1186,7 @@ def _add_optimise_split_by(
 
 
 def _render_substrategy(
-    root_df: pd.DataFrame, key_prefix: str, display_keys: list[str], collapsed: bool,
+    root_df: pd.DataFrame, key_prefix: str, display_keys: list[str], collapsed: bool, max_eval_samples: int,
 ) -> None:
     """Renders the *currently selected* sub-strategy node's own page --
     root ("root::", heading "Overall Strategy") or any node added via "Add
@@ -1214,9 +1245,12 @@ def _render_substrategy(
     parent_split_by = [] if is_root else _split_by_from_state(parent_key_prefix)
     parent_group_by_keys = tuple(_resolve_split_by(parent_split_by))
     parent_node_df = None if is_root else _resolve_node_df(root_df, parent_key_prefix)
+    if parent_node_df is not None:
+        parent_node_df = _capped_for_eval(parent_node_df, max_eval_samples)
 
     importance = _decision_variance_by_key(
-        root_df, incoming_df, parent_node_df, parent_group_by_keys, display_keys, (), collapsed,
+        root_df, _capped_for_eval(incoming_df, max_eval_samples), parent_node_df, parent_group_by_keys,
+        display_keys, (), collapsed,
     )
     non_graph_options = [k for k, _ in importance if k != _HOLE_HAND_GRID_KEY]
     importance_by_key = dict(importance)
@@ -1249,21 +1283,30 @@ def _render_substrategy(
     # below) so the heading can show it alongside node_df's own count --
     # node_df is this node's own full claimed scope (its rule's total
     # domain, unaffected by whatever its children go on to carve out of
-    # it), while default_df is what's actually left over for its own
+    # it), while default_df_full is what's actually left over for its own
     # "default behaviour" once every child's claim is subtracted (see
     # _resolve_default_df) -- two genuinely different numbers a person
     # could otherwise easily conflate (e.g. a parent whose own rule covers
     # everything, node_df, while most of that has already been claimed by
-    # its own children, default_df much smaller).
-    default_df = _resolve_default_df(node_df, key_prefix)
+    # its own children, default_df_full much smaller). default_df itself
+    # -- what every table/chart/metric/ranking/button below this point
+    # actually computes over -- is that same leftover further capped to
+    # max_eval_samples (see _capped_for_eval), decoupled from node_df/
+    # default_df_full's own true counts so a common, high-volume spot's
+    # own analysis stays fast regardless of how large the loaded reservoir
+    # pool is.
+    default_df_full = _resolve_default_df(node_df, key_prefix)
+    default_df = _capped_for_eval(default_df_full, max_eval_samples)
 
     claim_desc = ", ".join(
         f"{cfr_features.feature_label(k)} = {', '.join(v)}" for k, v in local_filters.items()
     )
-    count_suffix = (
-        f"(n={len(node_df):,})" if len(default_df) == len(node_df)
-        else f"(n={len(node_df):,}, {len(default_df):,} default)"
-    )
+    count_parts = [f"n={len(node_df):,}"]
+    if len(default_df_full) != len(node_df):
+        count_parts.append(f"{len(default_df_full):,} default")
+    if len(default_df_full) > max_eval_samples:
+        count_parts.append(f"evaluated on {max_eval_samples:,}")
+    count_suffix = f"({', '.join(count_parts)})"
     if is_root:
         heading = f"Overall Strategy ({claim_desc})" if claim_desc else "Overall Strategy"
         st.header(f"{heading}  {count_suffix}")
@@ -1576,8 +1619,21 @@ def main() -> None:
 
     checkpoint_path = st.sidebar.text_input("Checkpoint path", value=_default_checkpoint_path())
     max_samples = st.sidebar.number_input(
-        "Max reservoir samples to load", min_value=100, max_value=1_000_000,
-        value=DEFAULT_MAX_SAMPLES, step=1000,
+        "Max reservoir samples to load", min_value=100, max_value=20_000_000,
+        value=DEFAULT_MAX_SAMPLES, step=1000, key="max_samples",
+        help="How many samples to pull from the reservoir into memory, up front, for the whole session -- "
+        "a big pool here is what gives an infrequent spot enough of its own matching rows to read a "
+        "meaningful Decision variance explained figure, even though any *one* spot's own analysis is "
+        "separately capped below.",
+    )
+    max_eval_samples = st.sidebar.number_input(
+        "Max samples to evaluate in any given spot", min_value=100, max_value=200_000,
+        value=DEFAULT_MAX_EVAL_SAMPLES, step=500, key="max_eval_samples",
+        help="However many rows a sub-strategy's own claimed sample actually has, at most this many "
+        "(a fixed random subsample, stable across reruns) are used for its own table/chart/metrics and "
+        "every ranking or button here -- keeps a common, high-volume spot's own analysis fast regardless "
+        "of how large the reservoir pool above is loaded, without capping how many *distinct* spots (rare "
+        "ones included) that larger pool can still tell apart.",
     )
 
     if not (os.path.exists(f"{checkpoint_path}.pt") and os.path.exists(f"{checkpoint_path}.json")):
@@ -1601,7 +1657,7 @@ def main() -> None:
     # the central column -- every other node is reached by switching
     # selection instead of scrolling (see _render_substrategy/
     # _render_navigation's module docstring).
-    _render_substrategy(df, _selected_node(), display_keys, collapsed)
+    _render_substrategy(df, _selected_node(), display_keys, collapsed, int(max_eval_samples))
 
     # Rendered after the selected node above so it reflects this run's
     # freshly updated session_state (filter picks, child list, selection)

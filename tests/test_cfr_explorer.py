@@ -1113,6 +1113,47 @@ class TestSubStrategies:
         assert at.session_state["selected_substrategy"] == c0
 
 
+def _max_eval_samples_input(at: AppTest):
+    return at.number_input(key="max_eval_samples")
+
+
+class TestMaxEvalSamples:
+    """"Max samples to evaluate in any given spot" (see _capped_for_eval)
+    -- decoupled from "Max reservoir samples to load" so a big loaded pool
+    (needed to give an infrequent spot enough of its own matching rows for
+    a meaningful Decision variance explained figure -- see
+    _decision_variance_explained's own leave-one-out correction) doesn't
+    also force every *other*, more common spot's own analysis to run over
+    however many rows it happens to match."""
+
+    def test_sidebar_control_exists_with_the_documented_default(self, synthetic_checkpoint):
+        at = _run_app()
+        control = _max_eval_samples_input(at)
+        assert control.value == 10_000  # DEFAULT_MAX_EVAL_SAMPLES
+
+    def test_no_evaluated_on_note_when_under_the_cap(self, synthetic_checkpoint):
+        at = _run_app()
+        assert "evaluated on" not in _own_heading(at)
+
+    def test_evaluated_on_note_appears_once_claimed_rows_exceed_the_cap(self, synthetic_checkpoint):
+        # synthetic_checkpoint has 200 rows -- lowering the cap below that
+        # (rather than building a dedicated 10,000+-row checkpoint just for
+        # this) is the cheap way to exercise the "over the cap" path. 150,
+        # not some smaller round number, since the control's own
+        # min_value is 100.
+        at = _run_app()
+        _max_eval_samples_input(at).set_value(150).run(timeout=60)
+        assert not at.exception
+        assert "(n=200, evaluated on 150)" in _own_heading(at)
+
+    def test_default_behaviour_analysis_is_actually_capped(self, synthetic_checkpoint):
+        at = _run_app()
+        _max_eval_samples_input(at).set_value(150).run(timeout=60)
+        assert not at.exception
+        counts_expander = next(exp for exp in at.expander if exp.label.startswith("Sample counts"))
+        assert counts_expander.label == "Sample counts (total n=150)"
+
+
 class TestSplitBy:
     """Each sub-strategy's own 1-2 "Split By" features define its
     prominent, implementable table+graph and "Decision variance explained"
