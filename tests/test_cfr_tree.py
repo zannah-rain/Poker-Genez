@@ -126,7 +126,7 @@ def _run_cfr(stacks, button_idx, config, seed, target_category, traverser, num_e
         traverser=traverser, net=_DominantRegretNet(target_category), reservoir=_DiscardingReservoir(),
         rng=rng, t=1.0, feature_indices=_FEATURE_INDICES, num_equity_rollouts=num_equity_rollouts,
     )
-    return cfr_tree._start_street(state, PREFLOP, pot, 0, None, ctx)
+    return cfr_tree._start_street(state, PREFLOP, pot, 0, None, ctx, 1.0)
 
 
 def _assert_matches_reference(stacks, button_idx, config, seed, target_category):
@@ -221,7 +221,7 @@ class TestIsAggressorReflectsThePreviousStreet:
         # two ever got mixed up).
         captured = {}
 
-        def fake_start_street(state, street, pot, preflop_raise_count, previous_street_aggressor, ctx):
+        def fake_start_street(state, street, pot, preflop_raise_count, previous_street_aggressor, ctx, path_weight):
             captured["previous_street_aggressor"] = previous_street_aggressor
             captured["street"] = street
             return 0.0
@@ -236,7 +236,7 @@ class TestIsAggressorReflectsThePreviousStreet:
         cfr_tree._decision_node(
             state, street=0, to_act=[], order=[0, 1], pot=10.0, current_bet=0.0, last_raise_increment=2.0,
             num_raises=1, street_aggressor=1, previous_street_aggressor=None, raiser_seats=frozenset({1}),
-            preflop_raise_count=0, ctx=ctx,
+            preflop_raise_count=0, ctx=ctx, path_weight=1.0,
         )
 
         assert captured["previous_street_aggressor"] == 1
@@ -347,7 +347,7 @@ class TestGtoSpotsOverrideDecisions:
         value = cfr_tree._decision_node(
             state, street=0, to_act=[0], order=[0, 1], pot=10.0, current_bet=6.0, last_raise_increment=2.0,
             num_raises=1, street_aggressor=1, previous_street_aggressor=None, raiser_seats=frozenset({1}),
-            preflop_raise_count=1, ctx=ctx,
+            preflop_raise_count=1, ctx=ctx, path_weight=1.0,
         )
         # Traverser (seat 1) already put in `pot`'s worth this street; once
         # seat 0 folds uncontested, the traverser wins pot minus their own
@@ -366,7 +366,7 @@ class TestGtoSpotsOverrideDecisions:
         cfr_tree._decision_node(
             state, street=0, to_act=[0], order=[0, 1], pot=10.0, current_bet=6.0, last_raise_increment=2.0,
             num_raises=1, street_aggressor=1, previous_street_aggressor=None, raiser_seats=frozenset({1}),
-            preflop_raise_count=1, ctx=ctx,
+            preflop_raise_count=1, ctx=ctx, path_weight=1.0,
         )
 
     def test_non_matching_spot_falls_through_to_the_net(self):
@@ -385,7 +385,7 @@ class TestGtoSpotsOverrideDecisions:
         cfr_tree._decision_node(
             state, street=0, to_act=[0], order=[0, 1], pot=10.0, current_bet=6.0, last_raise_increment=2.0,
             num_raises=1, street_aggressor=1, previous_street_aggressor=None, raiser_seats=frozenset({1}),
-            preflop_raise_count=1, ctx=ctx,
+            preflop_raise_count=1, ctx=ctx, path_weight=1.0,
         )
 
     def test_fixed_bb_raise_spot_sizes_by_big_blind_not_pot(self, monkeypatch):
@@ -429,9 +429,98 @@ class TestGtoSpotsOverrideDecisions:
         real_decision_node(
             state, street=0, to_act=[0], order=[0, 1], pot=6.0, current_bet=6.0, last_raise_increment=2.0,
             num_raises=1, street_aggressor=1, previous_street_aggressor=None, raiser_seats=frozenset({1}),
-            preflop_raise_count=1, ctx=ctx,
+            preflop_raise_count=1, ctx=ctx, path_weight=1.0,
         )
         # Was facing a call of 2.0 (current_bet 6.0 - already committed 4.0)
         # -- the fixed spot's raise adds 1.5 * big_blind (3.0) on top of
         # current_bet, for a total of 9.0 (see gto.py's _ActionSpec.decision).
         assert captured["seat0_street_committed"] == pytest.approx(9.0)
+
+
+class _RecordingReservoir:
+    """Records every sample's own stored weight (t), in the order
+    _decision_node adds them. Exploration is post-order -- a node's own
+    sample is only added once every one of its own children has already
+    been fully explored (v_node isn't known until then) -- so the very
+    first traverser decision reached in a hand always ends up *last* in
+    this list, not first."""
+
+    def __init__(self):
+        self.weights = []
+
+    def add(self, features, regrets, legal_mask, t):
+        self.weights.append(t)
+
+
+class TestPathWeightCorrectsOverRepresentation:
+    """See cfr_tree.py's own module docstring: full exploration of the
+    traverser's own actions means a hand that happens to reach many, or
+    branchy, decision points would otherwise push vastly more reservoir
+    samples -- and so vastly more training weight, once the reservoir's
+    contents get regressed on -- than one that resolves quickly, purely
+    from tree structure, not real importance. _decision_node/
+    _apply_and_recurse correct for this via `path_weight`, folded into
+    each sample's own stored `t`."""
+
+    def test_dividing_by_branch_count_at_a_single_traverser_node(self, monkeypatch):
+        # Direct, exact check of the core mechanism, bypassing traverse_hand's
+        # own randomness: call_amount is 0 here (current_bet ==
+        # street_committed), so the only *game* actions are check/call and
+        # bet/raise -- but bet/raise itself splits into 7 size-specific
+        # action categories (see strategy.ACTION_CATEGORIES), for 8 legal
+        # categories total (cfr_actions.legal_action_categories) -- each
+        # should get exactly 1/8 of the incoming path_weight.
+        seats = [SeatState(player=Player(player_id=i, genome=None), stack=200.0) for i in range(2)]
+        for s in seats:
+            s.hole = [Card.from_str("7c"), Card.from_str("2d")]
+        deck = Deck(rng=_np_rng_to_random(np.random.default_rng(0)))
+        state = cfr_tree._HandState(
+            seats=seats, board=[], deck=deck, button_idx=0, config=GameConfig(),
+            starting_stacks=[200.0, 200.0],
+        )
+        ctx = cfr_tree._TraversalContext(
+            traverser=0, net=_DominantRegretNet(strategy.ACTION_RAISE_75), reservoir=_DiscardingReservoir(),
+            rng=np.random.default_rng(0), t=100.0, feature_indices=_FEATURE_INDICES, num_equity_rollouts=1,
+        )
+        captured_weights = []
+
+        def fake_decision_node(state, *args, **kwargs):
+            captured_weights.append(args[-1])  # path_weight is always the last positional arg
+            return 0.0
+
+        real_decision_node = cfr_tree._decision_node
+        monkeypatch.setattr(cfr_tree, "_decision_node", fake_decision_node)
+        real_decision_node(
+            state, street=0, to_act=[0], order=[0, 1], pot=10.0, current_bet=0.0, last_raise_increment=2.0,
+            num_raises=0, street_aggressor=None, previous_street_aggressor=None, raiser_seats=frozenset(),
+            preflop_raise_count=0, ctx=ctx, path_weight=1.0,
+        )
+        assert captured_weights == pytest.approx([0.125] * 8)
+
+    def test_first_traverser_decision_in_a_hand_keeps_the_full_weight(self):
+        reservoir = _RecordingReservoir()
+        cfr_tree.traverse_hand(
+            net=_DominantRegretNet(strategy.ACTION_RAISE_75), reservoir=reservoir, table_size=2,
+            config=GameConfig(), rng=np.random.default_rng(0), t=100.0, feature_indices=_FEATURE_INDICES,
+            num_equity_rollouts=1,
+        )
+        assert reservoir.weights[-1] == pytest.approx(100.0)
+
+    def test_deeper_decisions_are_discounted_including_within_the_same_street(self):
+        # A raise-dominant net for *every* seat (not just the traverser)
+        # reliably produces a same-street raise war: the traverser's own
+        # BET_RAISE branch leads to the opponent's single-sampled response
+        # (also dominant-raise, since the net is shared -- see cfr_tree.py's
+        # own module docstring on this being genuinely self-play), which
+        # re-raises back for another traverser decision on the very same
+        # street, not a different one -- proving the correction isn't just
+        # a per-street thing.
+        reservoir = _RecordingReservoir()
+        cfr_tree.traverse_hand(
+            net=_DominantRegretNet(strategy.ACTION_RAISE_75), reservoir=reservoir, table_size=2,
+            config=GameConfig(max_raises_per_street=4), rng=np.random.default_rng(0), t=100.0,
+            feature_indices=_FEATURE_INDICES, num_equity_rollouts=1,
+        )
+        assert len(reservoir.weights) > 1
+        assert all(w <= 100.0 for w in reservoir.weights)
+        assert min(reservoir.weights) < 100.0 / 4  # meaningfully discounted, not just float noise

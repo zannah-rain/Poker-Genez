@@ -29,7 +29,37 @@ binary win-the-whole-pot/lose-everything target instead of something near
 "60% of the pot"), and Single Deep CFR's regression target is exactly that
 counterfactual value -- feeding the network high-variance labels makes
 training much noisier than it needs to be for a quantity we can just
-compute (near-)exactly instead of sampling once.
+compute (near-)exactly instead of sampling once. DEFAULT_NUM_EQUITY_ROLLOUTS
+only trades off *this* estimate's own variance against compute -- it never
+changes how many reservoir samples a hand produces (a terminal node returns
+one scalar value to whichever decision node called it, regardless of how
+many completions were averaged to get it), so it's orthogonal to -- and
+needs no special-casing from -- path_weight below.
+
+Full-width exploration of the traverser's own actions (the "external" in
+external sampling) has a side effect worth calling out separately from the
+opponent-sampling point above: a single traverse_hand() call can push
+wildly different numbers of reservoir samples into the reservoir depending
+on how many of the traverser's own decision points a hand happens to reach
+and how branchy each one is (2-3 actions, compounding multiplicatively at
+every one of *its own* descendant decision points, whether that's a raise
+war on the very same street or a fresh decision two streets later) --
+without correction, hands that go deep would vastly outvote hands that end
+early in the reservoir's own composition, and since Single Deep CFR trains
+one shared network by regression over a uniformly-sampled reservoir
+minibatch (unlike tabular CFR, where each infoset accumulates its own
+regret independently and extra visits elsewhere never bias it), that
+skews the network's own training signal towards whatever's over-
+represented rather than whatever's actually important to play well.
+_decision_node/_apply_and_recurse below correct for this with `path_weight`:
+a running multiplier, threaded through the recursion (not part of
+_TraversalContext -- unlike everything there, it varies *within* one
+traversal, not just across them), that gets divided by the branch count
+every time the traverser's own decisions fan out, at every branch point
+regardless of street -- so a sample reached via a heavily-explored line
+counts for proportionally less, folded into the same `t` (see
+cfr_reservoir.py) that already scales each sample's loss term for
+Linear-CFR purposes, rather than a new, separate mechanism.
 """
 
 from __future__ import annotations
@@ -283,7 +313,7 @@ def _decision_node(
     state: _HandState, street: int, to_act: list[int], order: list[int], pot: float,
     current_bet: float, last_raise_increment: float, num_raises: int, street_aggressor: int | None,
     previous_street_aggressor: int | None, raiser_seats: frozenset, preflop_raise_count: int,
-    ctx: _TraversalContext,
+    ctx: _TraversalContext, path_weight: float,
 ) -> float:
     """`street_aggressor` is who (if anyone) has raised so far on *this*
     street -- live-updated as the recursion proceeds, and hand off to
@@ -295,7 +325,19 @@ def _decision_node(
     order until either the street ends or someone else re-raises
     (immediately replacing them as street_aggressor), so a player can never
     be making a decision while also being this street's own last
-    aggressor -- see features.Situation.is_aggressor."""
+    aggressor -- see features.Situation.is_aggressor.
+
+    `path_weight` is this node's own share of the traversal's total sample
+    weight, folded into `ctx.t` at the reservoir.add() call below -- see
+    the module docstring's own explanation of why the traverser's full-
+    width exploration needs this. It's threaded through unchanged by every
+    call in this function that doesn't itself represent one of the
+    traverser's own branch points (the to-act-empty/folded-or-all-in cases
+    below, and every one of the opponent's own single-sampled actions --
+    matching the module docstring's "no importance-weight correction
+    needed" for opponent sampling specifically); only _apply_and_recurse's
+    own traverser-branching call site divides it, by however many actions
+    are legal there."""
     seats = state.seats
     non_folded = [s for s in order if not seats[s].folded]
     if len(non_folded) <= 1:
@@ -303,13 +345,13 @@ def _decision_node(
 
     if not to_act:
         new_preflop_raise_count = num_raises if street == PREFLOP else preflop_raise_count
-        return _start_street(state, street + 1, pot, new_preflop_raise_count, street_aggressor, ctx)
+        return _start_street(state, street + 1, pot, new_preflop_raise_count, street_aggressor, ctx, path_weight)
 
     i, rest = to_act[0], to_act[1:]
     if seats[i].folded or seats[i].all_in:
         return _decision_node(
             state, street, rest, order, pot, current_bet, last_raise_increment, num_raises,
-            street_aggressor, previous_street_aggressor, raiser_seats, preflop_raise_count, ctx,
+            street_aggressor, previous_street_aggressor, raiser_seats, preflop_raise_count, ctx, path_weight,
         )
 
     call_amount = current_bet - seats[i].street_committed
@@ -324,18 +366,18 @@ def _decision_node(
         previous_street_aggressor, raiser_seats,
     )
 
-    def _apply_and_recurse(child_state: _HandState, game_action: int, raw_bet_size: float) -> float:
+    def _apply_and_recurse(child_state: _HandState, game_action: int, raw_bet_size: float, weight: float) -> float:
         if game_action == FOLD:
             _apply_fold(child_state, i)
             return _decision_node(
                 child_state, street, rest, order, pot, current_bet, last_raise_increment, num_raises,
-                street_aggressor, previous_street_aggressor, raiser_seats, preflop_raise_count, ctx,
+                street_aggressor, previous_street_aggressor, raiser_seats, preflop_raise_count, ctx, weight,
             )
         if game_action == CHECK_CALL:
             new_pot = _apply_call(child_state, i, current_bet, pot)
             return _decision_node(
                 child_state, street, rest, order, new_pot, current_bet, last_raise_increment, num_raises,
-                street_aggressor, previous_street_aggressor, raiser_seats, preflop_raise_count, ctx,
+                street_aggressor, previous_street_aggressor, raiser_seats, preflop_raise_count, ctx, weight,
             )
         # BET_RAISE
         new_pot, new_current_bet, new_last_raise_increment = _apply_raise(
@@ -346,19 +388,20 @@ def _decision_node(
         new_raiser_seats = raiser_seats | {i}
         return _decision_node(
             child_state, street, new_to_act, order, new_pot, new_current_bet, new_last_raise_increment,
-            num_raises + 1, i, previous_street_aggressor, new_raiser_seats, preflop_raise_count, ctx,
+            num_raises + 1, i, previous_street_aggressor, new_raiser_seats, preflop_raise_count, ctx, weight,
         )
 
     # A matching gto.GTOSpot fixes this decision's action outright, for
     # whichever seat is on the move -- traverser or not -- rather than
     # asking the net at all: there's only one path forward to take (no
-    # alternative actions to weigh), so no regret sample is added either.
+    # alternative actions to weigh), so no regret sample is added either --
+    # and so no branching occurred here for path_weight's own purposes.
     # See gto.py's module docstring for why this is a hard override rather
     # than another learned/evolvable input.
     fixed_decision = gto.first_matching_action(ctx.gto_spots, situation) if ctx.gto_spots else None
     if fixed_decision is not None:
         game_action, raw_bet_size = cfr_actions.decision_to_game_action(fixed_decision, legal_actions)
-        return _apply_and_recurse(state, game_action, raw_bet_size)
+        return _apply_and_recurse(state, game_action, raw_bet_size, path_weight)
 
     legal_mask = cfr_actions.legal_action_categories(legal_actions)
     feats = cfr_features.extract_subset(situation, ctx.feature_indices)
@@ -370,32 +413,41 @@ def _decision_node(
         # Explore every legal action (that's the whole point of being the
         # traverser) and weight them by the *current* strategy to get this
         # node's value -- then each action's regret is just how much better
-        # or worse it did than that weighted average.
+        # or worse it did than that weighted average. This node's own
+        # sample uses path_weight as inherited from its own ancestors
+        # (unaffected by its own fan-out here -- that only discounts what
+        # each *child* branch below it inherits in turn).
+        child_weight = path_weight / len(legal_idx)
         values = np.zeros(NUM_ACTIONS, dtype=np.float64)
         for a in legal_idx:
             game_action, raw_bet_size = cfr_actions.category_to_game_action(int(a), situation, legal_actions)
-            values[a] = _apply_and_recurse(state.copy(), game_action, raw_bet_size)
+            values[a] = _apply_and_recurse(state.copy(), game_action, raw_bet_size, child_weight)
         v_node = float(np.dot(sigma[legal_idx], values[legal_idx]))
         regret_vec = np.zeros(NUM_ACTIONS, dtype=np.float64)
         regret_vec[legal_idx] = values[legal_idx] - v_node
-        ctx.reservoir.add(feats, regret_vec.astype(np.float32), legal_mask, float(ctx.t))
+        ctx.reservoir.add(feats, regret_vec.astype(np.float32), legal_mask, float(ctx.t * path_weight))
         return v_node
 
     p = sigma[legal_idx]
     p = p / p.sum()  # guard against float roundoff so np.random.Generator.choice's sum-to-1 check never flakes
     chosen = int(ctx.rng.choice(legal_idx, p=p))
     game_action, raw_bet_size = cfr_actions.category_to_game_action(chosen, situation, legal_actions)
-    return _apply_and_recurse(state, game_action, raw_bet_size)
+    # Single sampled action, not a branch -- path_weight passes through
+    # unchanged, same as the module docstring's existing "no importance-
+    # weight correction needed" reasoning for opponent sampling.
+    return _apply_and_recurse(state, game_action, raw_bet_size, path_weight)
 
 
 def _start_street(
     state: _HandState, street: int, pot: float, preflop_raise_count: int,
-    previous_street_aggressor: int | None, ctx: _TraversalContext,
+    previous_street_aggressor: int | None, ctx: _TraversalContext, path_weight: float,
 ) -> float:
     """`previous_street_aggressor` is who (if anyone) raised last on the
     street just completed -- None to start the hand (there's no street
     before preflop), or whatever the prior _decision_node's own
-    street_aggressor ended up being."""
+    street_aggressor ended up being. `path_weight` (see _decision_node's
+    own docstring) just passes through -- a new street starting is never
+    itself one of the traverser's own branch points."""
     if street > RIVER:
         return _terminal_showdown(state, ctx)
 
@@ -416,13 +468,13 @@ def _start_street(
         # No further decisions will ever be made this hand (everyone left is
         # either all-in or about to be dealt straight to showdown), so what
         # we pass forward here is moot -- carried through unchanged regardless.
-        return _start_street(state, street + 1, pot, preflop_raise_count, previous_street_aggressor, ctx)
+        return _start_street(state, street + 1, pot, preflop_raise_count, previous_street_aggressor, ctx, path_weight)
 
     to_act = [i for i in order if not seats[i].all_in]
     starting_bet = max((seats[i].street_committed for i in non_folded), default=0.0)
     return _decision_node(
         state, street, to_act, order, pot, starting_bet, state.config.big_blind, 0, None,
-        previous_street_aggressor, frozenset(), preflop_raise_count, ctx,
+        previous_street_aggressor, frozenset(), preflop_raise_count, ctx, path_weight,
     )
 
 
@@ -485,4 +537,6 @@ def traverse_hand(
         traverser=traverser, net=net, reservoir=reservoir, rng=rng, t=t,
         feature_indices=feature_indices, num_equity_rollouts=num_equity_rollouts, gto_spots=gto_spots,
     )
-    return _start_street(state, PREFLOP, pot, 0, None, ctx)
+    # path_weight starts at 1.0: nothing has branched yet for this hand --
+    # see _decision_node's own docstring for how it evolves from here.
+    return _start_street(state, PREFLOP, pot, 0, None, ctx, 1.0)

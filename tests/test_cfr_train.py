@@ -98,18 +98,23 @@ class TestRunIterationTracksCompletedIterations:
     def test_resuming_from_a_high_iteration_does_not_inflate_reservoir_sample_weights(self):
         """Regression test for the reload loss-spike bug: a reservoir
         sample's stored weight is the outer iteration `t` it was collected
-        at (see cfr_reservoir.ReservoirBuffer.add), and _train_step
-        normalizes by the *current* outer iteration. If a resumed run's
-        iteration counter restarted at 1 instead of continuing from
-        wherever the reservoir's own samples were collected, an old
-        sample's normalized weight (t / current_iteration) would blow up
-        far past 1.0 instead of staying in the (0, 1] range Linear CFR's
-        weighting assumes."""
+        at, times its own path_weight -- see cfr_reservoir.ReservoirBuffer.add
+        and cfr_tree._decision_node's own docstring (path_weight is never
+        more than 1.0, so this is an upper bound, not an exact figure --
+        only a hand's very first traverser decision keeps the full `t`;
+        every deeper one is discounted, and a small reservoir like this
+        test's own can easily end up not holding any of the (rare, one per
+        hand) undiscounted ones by chance) -- and _train_step normalizes by
+        the *current* outer iteration. If a resumed run's iteration counter
+        restarted at 1 instead of continuing from wherever the reservoir's
+        own samples were collected, an old sample's normalized weight
+        (t / current_iteration) would blow up far past 1.0 instead of
+        staying in the (0, 1] range Linear CFR's weighting assumes."""
         trainer = Trainer.new(_tiny_config(), np.random.default_rng(0))
         # Simulate a reservoir carried over from a much longer previous run.
         rng = np.random.default_rng(0)
         run_iteration(trainer, rng, 300, show_progress=False)
-        assert trainer.reservoir.weights[: trainer.reservoir.size].max() == 300
+        assert trainer.reservoir.weights[: trainer.reservoir.size].max() <= 300
 
         # A resumed run must keep counting from where the reservoir's own
         # samples left off, not restart at 1.
