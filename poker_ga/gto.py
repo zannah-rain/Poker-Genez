@@ -233,40 +233,64 @@ GTO_SPOTS: tuple[GTOSpot, ...] = (
         label="UTG Open -- 100BB stack",
         matcher=SpotMatcher(street=0, pot_type=0, position="UTG", facing_bet=False, min_effective_bb=80, max_effective_bb=120),
         action_ranges=(
-            ("raise_150", "77+, ATs+, KTs+, QTs+, JTs, T9s, 98s, AJo+, KQo"),
+            ("raise_2BB", "ATo+, KJo+, 55+, T9s+, J9s+, Q9s+, K5s+, A2s+"),
         ),
         default_action="fold",
     ),
     GTOSpot(
-        key="btn_open_100bb",
-        label="BTN Open -- 100BB stack",
-        matcher=SpotMatcher(street=0, pot_type=0, position="BTN", facing_bet=False, min_effective_bb=80, max_effective_bb=120),
+        key="hj_open_100bb",
+        label="HJ Open -- 100BB stack",
+        matcher=SpotMatcher(street=0, pot_type=0, position="HJ", facing_bet=False, min_effective_bb=80, max_effective_bb=120),
         action_ranges=(
-            (
-                "raise_150",
-                "22+, A2s+, K5s+, Q7s+, J7s+, T7s+, 96s+, 86s+, 75s+, 64s+, 53s+, "
-                "A2o+, K8o+, Q9o+, J9o+, T9o",
+            ("raise_2BB", "ATo+, KTo+, QJo+, 44+, 65s, 87s+, 97s+, T8s+, J8s+, Q8s+, K4s+, A2s+"),
+        ),
+        default_action="fold",
+    ),
+    GTOSpot(
+        key="co_open_100bb",
+        label="CO Open -- 100BB stack",
+        matcher=SpotMatcher(street=0, pot_type=0, position="CO", facing_bet=False, min_effective_bb=80, max_effective_bb=120),
+        action_ranges=(
+            ("raise_2.3BB", "A5o, A8o+, KTo+, QTo+, JTo+, 44+, 65s+, 97s+, T7s+, J7s+, Q5s+, K2s+, A2s+"),
+        ),
+        default_action="fold",
+    ),
+    GTOSpot(
+            key="btn_open_100bb",
+            label="BTN Open -- 100BB stack",
+            matcher=SpotMatcher(street=0, pot_type=0, position="BTN", facing_bet=False, min_effective_bb=80, max_effective_bb=120),
+            action_ranges=(
+                ("raise_2.5BB", "A3o+, K8o+, Q9o+, J9o+, T9o+, 22+, 54s+, 75s+, 96s+, T5s+, J4s+, Q2s+, K2s+, A2s+"),
             ),
-        ),
-        default_action="fold",
+            default_action="fold",
     ),
     GTOSpot(
-        key="bb_vs_single_raise_100bb",
-        label="BB Facing A Single Raise -- 100BB stack",
-        matcher=SpotMatcher(street=0, pot_type=1, position="BB", facing_bet=True, is_aggressor=False, min_effective_bb=80, max_effective_bb=120),
+        key="sb_open_100bb",
+        label="SB Open -- 100BB stack",
+        matcher=SpotMatcher(street=0, pot_type=0, position="SB", facing_bet=False, min_effective_bb=80, max_effective_bb=120),
         action_ranges=(
-            ("raise_150", "TT+, AQs+, AKo"),
-            ("call", "22-99, A2s+, K9s+, Q9s+, J9s+, T8s+, 97s+, 86s+, 75s+, ATo+, KJo+"),
+            ("call", "74s, 95s, T5s, T4s, J3s, J2s, A3s, Qts, Q9s"),
+            ("raise_3BB", "A3o+, K8o+, Q9o+, J9o+, T8o+, 98o+, 22+, 54s+, 53s+, 85s+, 96s+, T6s+, J4s+, Q2s+, K2s+, A4s+, A2s"),
         ),
         default_action="fold",
     ),
-    GTOSpot(
-        key="btn_vs_3bet_20bb",
-        label="BTN Facing A 3-Bet -- 20BB stack",
-        matcher=SpotMatcher(street=0, pot_type=2, position="BTN", facing_bet=True, is_aggressor=False, min_effective_bb=15, max_effective_bb=25),
-        action_ranges=(
-            ("allin", "88+, AJs+, KQs, AQo+"),
-        ),
-        default_action="fold",
-    ),
+    # GTOSpot(
+    #     key="bb_vs_single_raise_100bb",
+    #     label="BB Facing A Single Raise -- 100BB stack",
+    #     matcher=SpotMatcher(street=0, pot_type=1, position="BB", facing_bet=True, is_aggressor=False, min_effective_bb=80, max_effective_bb=120),
+    #     action_ranges=(
+    #         ("raise_150", "TT+, AQs+, AKo"),
+    #         ("call", "22-99, A2s+, K9s+, Q9s+, J9s+, T8s+, 97s+, 86s+, 75s+, ATo+, KJo+"),
+    #     ),
+    #     default_action="fold",
+    # ),
+    # GTOSpot(
+    #     key="btn_vs_3bet_20bb",
+    #     label="BTN Facing A 3-Bet -- 20BB stack",
+    #     matcher=SpotMatcher(street=0, pot_type=2, position="BTN", facing_bet=True, is_aggressor=False, min_effective_bb=15, max_effective_bb=25),
+    #     action_ranges=(
+    #         ("allin", "88+, AJs+, KQs, AQo+"),
+    #     ),
+    #     default_action="fold",
+    # ),
 )
