@@ -80,7 +80,7 @@ import strategy
 from features import HOLE_HAND_GRID_RANK_LABELS, HOLE_HAND_GRID_SIZE, MASKED, hole_hand_grid_label
 
 DEFAULT_CHECKPOINT_PATH = os.path.join("cfr_runs", "checkpoint_latest")
-DEFAULT_MAX_SAMPLES = 100_000
+DEFAULT_MAX_SAMPLES = 2_000_000
 # A big loaded reservoir pool is what gives an infrequent spot enough of
 # its own rows to read a meaningful (i.e. not leave-one-out-crushed --
 # see _decision_variance_explained) Decision variance explained figure;
@@ -89,7 +89,7 @@ DEFAULT_MAX_SAMPLES = 100_000
 # chart, metrics, and every ranking/button fast regardless of how large
 # that pool is loaded, without also making a rare spot's own comparatively
 # tiny row count any smaller than it already naturally is.
-DEFAULT_MAX_EVAL_SAMPLES = 10_000
+DEFAULT_MAX_EVAL_SAMPLES = 100_000
 
 _FEATURE_COL_PREFIX = "feat::"
 _ACTION_COL_PREFIX = "action::"
@@ -1619,7 +1619,7 @@ def main() -> None:
 
     checkpoint_path = st.sidebar.text_input("Checkpoint path", value=_default_checkpoint_path())
     max_samples = st.sidebar.number_input(
-        "Max reservoir samples to load", min_value=100, max_value=20_000_000,
+        "Max reservoir samples to load", min_value=100,
         value=DEFAULT_MAX_SAMPLES, step=1000, key="max_samples",
         help="How many samples to pull from the reservoir into memory, up front, for the whole session -- "
         "a big pool here is what gives an infrequent spot enough of its own matching rows to read a "
@@ -1627,7 +1627,7 @@ def main() -> None:
         "separately capped below.",
     )
     max_eval_samples = st.sidebar.number_input(
-        "Max samples to evaluate in any given spot", min_value=100, max_value=200_000,
+        "Max samples to evaluate in any given spot", min_value=100,
         value=DEFAULT_MAX_EVAL_SAMPLES, step=500, key="max_eval_samples",
         help="However many rows a sub-strategy's own claimed sample actually has, at most this many "
         "(a fixed random subsample, stable across reruns) are used for its own table/chart/metrics and "
