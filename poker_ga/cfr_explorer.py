@@ -1026,15 +1026,21 @@ def _add_max_interaction_split(
     """"Add maximum interaction split": finds the single candidate feature
     (see _splittable_candidates) with the highest total interaction
     strength (cfr_networks.interaction_strength_for_feature, summed across
-    however many features are in `resolved_split_by`) against this node's
-    own current Split By pick, then adds one child per level it takes
-    among this node's own default rows (see _add_children_for_each_level).
-    A quick way to check "is there a feature whose relationship to my
-    current Split By isn't just additive -- does my chosen breakdown
-    actually behave differently depending on its own value" without
-    manually trying each remaining feature as a filter one at a time.
-    No-op if this node has no Split By chosen yet (nothing to measure
-    interaction against) or no eligible candidate remains."""
+    however many features are in `resolved_split_by`) *per observed
+    level* -- summed interaction strength divided by how many children
+    claiming it would actually add (see _observed_categories), like
+    _add_max_importance_split's own per-level normalization -- against
+    this node's own current Split By pick, then adds one child per level
+    it takes among this node's own default rows (see
+    _add_children_for_each_level). A quick way to check "is there a
+    feature whose relationship to my current Split By isn't just additive
+    -- does my chosen breakdown actually behave differently depending on
+    its own value" without manually trying each remaining feature as a
+    filter one at a time -- and, thanks to the per-level normalization,
+    biased toward whichever such feature asks a person to learn the fewest
+    additional sub-strategies for that interaction. No-op if this node has
+    no Split By chosen yet (nothing to measure interaction against) or no
+    eligible candidate remains."""
     if not resolved_split_by:
         return
     candidates = _splittable_candidates(default_df, split_by_options, resolved_split_by)
@@ -1048,7 +1054,7 @@ def _add_max_interaction_split(
         ))
         for k in candidates:
             scores[k] += interaction_by_key.get(k, 0.0)
-    best_key = max(candidates, key=lambda k: scores[k])
+    best_key = max(candidates, key=lambda k: scores[k] / len(_observed_categories(default_df, k)))
     _add_children_for_each_level(key_prefix, best_key, default_df, resolved_split_by)
 
 
@@ -1318,8 +1324,9 @@ def _render_substrategy(
         st.button(
             "Add maximum interaction split", key=f"{key_prefix}add_max_interaction_split",
             disabled=not resolved_split_by,
-            help="Splits on whichever remaining feature interacts most with this node's own current Split By "
-            "pick -- one child per level it takes (see cfr_networks.interaction_strength_for_feature).",
+            help="Splits on whichever remaining feature has the highest interaction strength with this node's "
+            "own current Split By pick per observed level -- one child per level it takes "
+            "(see cfr_networks.interaction_strength_for_feature).",
             on_click=_add_max_interaction_split,
             args=(key_prefix, checkpoint_path, max_samples, default_df, resolved_split_by, split_by_options),
         )

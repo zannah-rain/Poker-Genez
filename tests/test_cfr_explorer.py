@@ -360,6 +360,88 @@ def importance_per_level_checkpoint(_importance_per_level_checkpoint_path, monke
     return _importance_per_level_checkpoint_path
 
 
+def _make_interaction_per_level_checkpoint(path: str, n: int = 8000, seed: int = 0) -> None:
+    """Regression coverage for cfr_explorer._add_max_interaction_split's
+    per-level normalization (see TestSuggestedSubstrategyButtons.
+    test_max_interaction_split_prefers_higher_interaction_per_level):
+    a trained net whose output genuinely, causally interacts with
+    hole_suited via *both* street_norm and hand_category_norm -- sign-
+    reversing hole_suited's own effect on one street bucket (Flop, 1 of
+    street_norm's 4) and, more broadly, on hand_category_norm readings
+    below 0.5 (roughly half of its 26 observed levels) -- but with a
+    bigger reversal magnitude for the hand_category_norm interaction, so
+    its *raw* (summed/averaged, not per-level) interaction strength with
+    hole_suited comes out higher than street_norm's, the same way
+    _make_importance_per_level_checkpoint engineers a raw-importance
+    winner with many levels. street_norm's own interaction, spread over
+    only 4 levels instead of 26, is higher *per level* -- "Add maximum
+    interaction split" should add street_norm, not hand_category_norm."""
+    feature_dim = len(cfr_features.feature_indices(_FEATURE_KEYS))
+    suited_idx = _FEATURE_KEYS.index("hole_suited")
+    street_idx = _FEATURE_KEYS.index("street_norm")
+    hand_idx = _FEATURE_KEYS.index("hand_category_norm")
+    rng = np.random.default_rng(seed)
+    suited = (rng.random(n) < 0.5).astype(np.float32)
+    street_choice = rng.integers(0, 4, size=n)
+    street = np.array([0.0, 1 / 3, 2 / 3, 1.0], dtype=np.float32)[street_choice]
+    is_flop = street_choice == 1
+    hand_raw = rng.random(n).astype(np.float32)
+    is_weak_hand = hand_raw < 0.5
+
+    signal_street = np.where(is_flop, -20.0 * suited, 20.0 * suited)
+    signal_hand = np.where(is_weak_hand, -22.0 * suited, 22.0 * suited)
+
+    X = np.zeros((n, feature_dim), dtype=np.float32)
+    X[:, suited_idx] = suited
+    X[:, street_idx] = street
+    X[:, hand_idx] = hand_raw
+    y = np.zeros((n, strategy.NUM_ACTION_CATEGORIES), dtype=np.float32)
+    y[:, 0] = signal_street + rng.normal(scale=0.1, size=n)  # isolate each signal to its own action
+    y[:, 1] = signal_hand + rng.normal(scale=0.1, size=n)
+    y[:, 2:] = rng.normal(scale=0.1, size=(n, strategy.NUM_ACTION_CATEGORIES - 2))
+
+    torch.manual_seed(0)
+    net = cfr_networks.AdvantageNet(input_dim=feature_dim, hidden_sizes=(32, 32), dropout=0.0)
+    optimizer = torch.optim.Adam(net.parameters(), lr=2e-3, weight_decay=1e-4)
+    Xt, yt = torch.from_numpy(X), torch.from_numpy(y)
+    net.train()
+    train_rng = np.random.default_rng(0)
+    for _ in range(2000):
+        idx = train_rng.integers(0, n, size=256)
+        pred = net(Xt[idx])
+        loss = ((pred - yt[idx]) ** 2).mean()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    net.eval()
+
+    net_config = cfr_networks.AdvantageNetConfig(feature_keys=_FEATURE_KEYS, hidden_sizes=(32, 32), table_size=3)
+    cfr_networks.save(net, net_config, path)
+
+    reservoir = cfr_reservoir.ReservoirBuffer(
+        capacity=n, feature_dim=feature_dim, num_actions=strategy.NUM_ACTION_CATEGORIES, rng=rng,
+    )
+    for i in range(n):
+        regrets = rng.normal(size=strategy.NUM_ACTION_CATEGORIES).astype(np.float32)
+        legal_mask = rng.random(strategy.NUM_ACTION_CATEGORIES) > 0.3
+        legal_mask[strategy.ACTION_CALL] = True
+        reservoir.add(X[i], regrets, legal_mask, float(rng.integers(1, 10)))
+    reservoir.save(path)
+
+
+@pytest.fixture(scope="module")
+def _interaction_per_level_checkpoint_path(tmp_path_factory) -> str:
+    path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_interaction_per_level_checkpoint")), "checkpoint")
+    _make_interaction_per_level_checkpoint(path)
+    return path
+
+
+@pytest.fixture
+def interaction_per_level_checkpoint(_interaction_per_level_checkpoint_path, monkeypatch):
+    monkeypatch.setenv("CFR_EXPLORER_CHECKPOINT_PATH", _interaction_per_level_checkpoint_path)
+    return _interaction_per_level_checkpoint_path
+
+
 class TestAppLoadsWithoutError:
     def test_no_exceptions_on_initial_run(self, synthetic_checkpoint):
         at = _run_app()
@@ -644,6 +726,25 @@ class TestSuggestedSubstrategyButtons:
         # Every child claims a different level of the same one feature.
         claimed_features = {next(iter(claims[f"root::substrategy_{cid}::"])) for cid in children}
         assert len(claimed_features) == 1
+
+    def test_max_interaction_split_prefers_higher_interaction_per_level(self, interaction_per_level_checkpoint):
+        # Regression coverage: hand_category_norm has the higher *raw*
+        # interaction strength with hole_suited in this checkpoint (see
+        # _make_interaction_per_level_checkpoint), but it spreads that
+        # interaction across 26 observed levels against street_norm's 4, so
+        # street_norm's interaction *per level* is actually higher -- "Add
+        # maximum interaction split" should pick street_norm (fewer new
+        # sub-strategies to learn per unit of interaction gained), not
+        # hand_category_norm (the raw-interaction winner).
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["hole_suited"]).run(timeout=60)
+        at.button(key="root::add_max_interaction_split").click().run(timeout=60)
+
+        assert not at.exception
+        children = at.session_state["substrategy_children"]["root::"]
+        claims = at.session_state["substrategy_claims"]
+        claimed_features = {next(iter(claims[f"root::substrategy_{cid}::"])) for cid in children}
+        assert claimed_features == {"street_norm"}
 
     def test_max_importance_split_works_without_any_split_by_chosen(self, synthetic_checkpoint):
         at = _run_app()
