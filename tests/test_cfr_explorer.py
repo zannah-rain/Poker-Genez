@@ -988,6 +988,31 @@ class TestSubStrategies:
         assert not at.exception
         assert "(n=200)" in _own_heading(at)
 
+    def test_parent_heading_shows_both_its_own_and_default_behaviour_counts(self, synthetic_checkpoint):
+        # Regression coverage: a parent's own heading count (node_df, its
+        # rule's total claimed scope) and its "Default behaviour" section
+        # below (default_df, what's left once every child's own claim is
+        # subtracted -- see _resolve_default_df) are two different numbers
+        # by design, easily conflated since only the heading's own count
+        # is shown right at the top. Once a child actually claims some
+        # rows, the heading should show both, not just node_df's own
+        # (unchanged, since node_df is deliberately unaffected by whatever
+        # children go on to claim) count.
+        at = _run_app()
+        assert "(n=200)" in _own_heading(at)  # no children yet -- nothing to disambiguate
+
+        c0 = _add_substrategy(at, "root::")
+        at.multiselect(key=f"{c0}claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        observed = at.multiselect(key=f"{c0}claim_filter_values::street_norm").options
+        _batch_set(at, {f"{c0}claim_filter_values::street_norm": observed[:1]})
+        claimed_n = int(_own_heading(at).split("(n=")[1].split(")")[0])
+        assert 0 < claimed_n < 200
+
+        at.button(key=f"{c0}back").click().run(timeout=60)
+        assert not at.exception
+        header = _own_heading(at)
+        assert f"(n=200, {200 - claimed_n} default)" in header
+
     def test_claim_filter_narrows_the_heading_count_and_names_the_feature(self, synthetic_checkpoint):
         at = _run_app()
         c0 = _add_substrategy(at, "root::")

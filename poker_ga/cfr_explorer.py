@@ -1245,18 +1245,33 @@ def _render_substrategy(
         )
     node_df = _apply_filters(incoming_df, local_filters)
     _set_local_filters(key_prefix, local_filters)
+    # Computed here (rather than just before its own default_importance use
+    # below) so the heading can show it alongside node_df's own count --
+    # node_df is this node's own full claimed scope (its rule's total
+    # domain, unaffected by whatever its children go on to carve out of
+    # it), while default_df is what's actually left over for its own
+    # "default behaviour" once every child's claim is subtracted (see
+    # _resolve_default_df) -- two genuinely different numbers a person
+    # could otherwise easily conflate (e.g. a parent whose own rule covers
+    # everything, node_df, while most of that has already been claimed by
+    # its own children, default_df much smaller).
+    default_df = _resolve_default_df(node_df, key_prefix)
 
     claim_desc = ", ".join(
         f"{cfr_features.feature_label(k)} = {', '.join(v)}" for k, v in local_filters.items()
     )
+    count_suffix = (
+        f"(n={len(node_df):,})" if len(default_df) == len(node_df)
+        else f"(n={len(node_df):,}, {len(default_df):,} default)"
+    )
     if is_root:
         heading = f"Overall Strategy ({claim_desc})" if claim_desc else "Overall Strategy"
-        st.header(f"{heading}  (n={len(node_df):,})")
+        st.header(f"{heading}  {count_suffix}")
     else:
         heading = claim_desc or "Sub-strategy (no filter set yet -- claims everything its parent hasn't)"
         col_heading, col_up, col_down, col_remove = st.columns([10, 1, 1, 1])
         with col_heading:
-            st.header(f"{heading}  (n={len(node_df):,})")
+            st.header(f"{heading}  {count_suffix}")
         with col_up:
             st.button(
                 "↑", key=f"{key_prefix}move_up", help="Move earlier (higher priority)",
@@ -1294,7 +1309,6 @@ def _render_substrategy(
                     on_click=_select_node, args=(child_prefix,), use_container_width=True,
                 )
 
-    default_df = _resolve_default_df(node_df, key_prefix)
     default_importance = _decision_variance_by_key(
         root_df, default_df, parent_node_df, parent_group_by_keys, display_keys, (), collapsed,
     )
