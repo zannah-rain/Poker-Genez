@@ -236,6 +236,77 @@ def correlated_checkpoint(_correlated_checkpoint_path, monkeypatch):
     return _correlated_checkpoint_path
 
 
+def _make_overfitting_checkpoint(path: str, rng: np.random.Generator, num_samples: int = 1000) -> None:
+    """Regression coverage for a real bug in cfr_explorer.
+    _decision_variance_explained (see TestSuggestedSubstrategyButtons.
+    test_best_second_split_by_does_not_favor_a_rare_noise_candidate):
+    before its leave-one-out correction, scoring a candidate second Split
+    By feature by how well grouping *by it* fits this node's own claimed
+    rows let a candidate that's overwhelmingly one value with just a
+    handful of stray rows in another bucket (>= 2 observed categories, so
+    not literally constant) outscore a genuinely informative candidate --
+    those stray rows land in their own tiny/singleton (first, candidate)
+    groups, which trivially "explain" their own members with zero error
+    regardless of whether the feature is actually predictive of anything.
+
+    hand_category_norm's own net input weight is zeroed out below, so the
+    net's output is mathematically guaranteed not to depend on it at all
+    -- yet it's still observed at 2 values here (995 rows at one, 5
+    rng-placed stray rows at the other), exactly the shape that triggered
+    the bug. Those 5 rows also get an extreme street_norm reading (0.999)
+    each, so the net's own real (if more modest than hole_suited's)
+    street_norm sensitivity gives them a genuinely elevated, outlier-sized
+    residual -- shared with plenty of other ordinary high-street_norm rows
+    under street_norm's own grouping (diluted across a real-sized group,
+    same bucket), but isolated into hand_category_norm's own tiny
+    rare-value groups instead, which then trivially "explain" them away
+    almost entirely. Without that shared outlier magnitude, 5 rows out of
+    1000 is too small a share to reliably reproduce the bug -- landing in
+    an unremarkable spot wouldn't give a tiny group anything to trivially
+    over-explain."""
+    feature_dim = len(cfr_features.feature_indices(_FEATURE_KEYS))
+    hole_idx = _FEATURE_KEYS.index("hole_suited")
+    street_idx = _FEATURE_KEYS.index("street_norm")
+    hand_idx = _FEATURE_KEYS.index("hand_category_norm")
+
+    torch.manual_seed(0)  # AdvantageNet's init otherwise draws from torch's unseeded global RNG
+    net = cfr_networks.AdvantageNet(input_dim=feature_dim, hidden_sizes=(8, 8))
+    with torch.no_grad():
+        net.hidden[0].block[0].weight[:, hole_idx] *= 20.0
+        net.hidden[0].block[0].weight[:, street_idx] *= 8.0
+        net.hidden[0].block[0].weight[:, hand_idx] = 0.0
+    net_config = cfr_networks.AdvantageNetConfig(feature_keys=_FEATURE_KEYS, hidden_sizes=(8, 8), table_size=3)
+    cfr_networks.save(net, net_config, path)
+
+    reservoir = cfr_reservoir.ReservoirBuffer(
+        capacity=num_samples, feature_dim=feature_dim, num_actions=strategy.NUM_ACTION_CATEGORIES, rng=rng,
+    )
+    rare_rows = set(rng.choice(num_samples, size=5, replace=False).tolist())
+    for i in range(num_samples):
+        features = rng.random(feature_dim).astype(np.float32)
+        if i in rare_rows:
+            features[hand_idx] = 1.0
+            features[street_idx] = 0.999
+        regrets = rng.normal(size=strategy.NUM_ACTION_CATEGORIES).astype(np.float32)
+        legal_mask = rng.random(strategy.NUM_ACTION_CATEGORIES) > 0.3
+        legal_mask[strategy.ACTION_CALL] = True
+        reservoir.add(features, regrets, legal_mask, float(rng.integers(1, 10)))
+    reservoir.save(path)
+
+
+@pytest.fixture(scope="module")
+def _overfitting_checkpoint_path(tmp_path_factory) -> str:
+    path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_overfitting_checkpoint")), "checkpoint")
+    _make_overfitting_checkpoint(path, np.random.default_rng(0))
+    return path
+
+
+@pytest.fixture
+def overfitting_checkpoint(_overfitting_checkpoint_path, monkeypatch):
+    monkeypatch.setenv("CFR_EXPLORER_CHECKPOINT_PATH", _overfitting_checkpoint_path)
+    return _overfitting_checkpoint_path
+
+
 class TestAppLoadsWithoutError:
     def test_no_exceptions_on_initial_run(self, synthetic_checkpoint):
         at = _run_app()
@@ -481,6 +552,114 @@ class TestGraphs:
         assert not at.exception
         substrategy_cross = at.multiselect(key=f"{c0}extra::graph_cross::hole_suited")
         assert substrategy_cross.value == []  # unaffected by root's own earlier selection
+
+
+class TestSuggestedSubstrategyButtons:
+    """The three "Suggested sub-strategies" buttons (see
+    _render_substrategy/_add_max_interaction_split/_add_max_importance_split/
+    _add_best_second_split_by) -- algorithmic shortcuts for the same claim-
+    filter/Split By state a person could otherwise only set up by hand."""
+
+    def test_max_interaction_split_disabled_without_a_split_by(self, synthetic_checkpoint):
+        at = _run_app()
+        assert at.button(key="root::add_max_interaction_split").proto.disabled
+
+    def test_max_interaction_split_enabled_once_a_split_by_is_chosen(self, synthetic_checkpoint):
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["street_norm"]).run(timeout=60)
+        assert not at.button(key="root::add_max_interaction_split").proto.disabled
+
+    def test_max_interaction_split_adds_one_child_per_observed_level_of_one_feature(self, synthetic_checkpoint):
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["street_norm"]).run(timeout=60)
+        at.button(key="root::add_max_interaction_split").click().run(timeout=60)
+
+        assert not at.exception
+        children = at.session_state["substrategy_children"]["root::"]
+        assert len(children) >= 2  # at least 2 levels for a real split to make sense
+
+        claims = at.session_state["substrategy_claims"]
+        split_bys = at.session_state["substrategy_split_by"]
+        for child_id in children:
+            child_prefix = f"root::substrategy_{child_id}::"
+            claim = claims[child_prefix]
+            assert set(claim.keys()) != {"street_norm"}  # never re-splits on its own Split By feature
+            assert len(claim) == 1  # one feature, exactly one kept level
+            assert len(next(iter(claim.values()))) == 1
+            assert split_bys[child_prefix] == ["street_norm"]  # inherits the parent's own current Split By
+
+        # Every child claims a different level of the same one feature.
+        claimed_features = {next(iter(claims[f"root::substrategy_{cid}::"])) for cid in children}
+        assert len(claimed_features) == 1
+
+    def test_max_importance_split_works_without_any_split_by_chosen(self, synthetic_checkpoint):
+        at = _run_app()
+        assert not at.button(key="root::add_max_importance_split").proto.disabled
+        at.button(key="root::add_max_importance_split").click().run(timeout=60)
+
+        assert not at.exception
+        assert len(at.session_state["substrategy_children"]["root::"]) >= 2
+
+    def test_best_second_split_by_disabled_unless_exactly_one_chosen(self, synthetic_checkpoint):
+        at = _run_app()
+        assert at.button(key="root::add_best_second_split_by").proto.disabled  # 0 chosen
+
+        at.multiselect(key="root::split_by").set_value(["street_norm", "hole_suited"]).run(timeout=60)
+        assert at.button(key="root::add_best_second_split_by").proto.disabled  # 2 chosen
+
+    def test_best_second_split_by_adds_a_second_feature(self, synthetic_checkpoint):
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["street_norm"]).run(timeout=60)
+        assert not at.button(key="root::add_best_second_split_by").proto.disabled
+
+        at.button(key="root::add_best_second_split_by").click().run(timeout=60)
+
+        assert not at.exception
+        value = at.multiselect(key="root::split_by").value
+        assert len(value) == 2
+        assert "street_norm" in value
+
+    def test_best_second_split_by_respects_current_filters(self, correlated_checkpoint):
+        # Regression coverage for a real bug: _add_best_second_split_by
+        # scored every other configured feature as a candidate, unlike
+        # _add_max_interaction_split/_add_max_importance_split (both go
+        # through _splittable_candidates, which excludes anything constant
+        # within this node's own claimed default_df). Filtering this child
+        # to Preflop makes both remaining features constant there --
+        # street_norm by the claim filter itself, hand_category_norm by the
+        # checkpoint's own correlation (see _make_correlated_checkpoint) --
+        # so there's nothing eligible left to pair with hole_suited, and
+        # the click should be a no-op rather than picking one anyway.
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["hole_suited"]).run(timeout=60)
+        c0 = _add_substrategy(at, "root::")
+        at.multiselect(key=f"{c0}claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        _batch_set(at, {f"{c0}claim_filter_values::street_norm": ["Preflop"]})
+
+        assert at.multiselect(key=f"{c0}split_by").value == ["hole_suited"]  # inherited
+        assert not at.button(key=f"{c0}add_best_second_split_by").proto.disabled
+        at.button(key=f"{c0}add_best_second_split_by").click().run(timeout=60)
+
+        assert not at.exception
+        assert at.multiselect(key=f"{c0}split_by").value == ["hole_suited"]
+
+    def test_best_second_split_by_does_not_favor_a_rare_noise_candidate(self, overfitting_checkpoint):
+        # Regression coverage for the deeper bug behind the filter-respecting
+        # fix above: _decision_variance_explained itself could score a
+        # candidate that's overwhelmingly one value with a handful of stray
+        # rows in another bucket *higher* than a genuinely informative
+        # candidate, purely because those stray rows land in their own
+        # tiny/singleton groups and trivially "explain" themselves (see
+        # _make_overfitting_checkpoint). hand_category_norm's own net input
+        # weight is zeroed out in this checkpoint -- it cannot carry any
+        # real signal -- while street_norm has a real (if more modest than
+        # hole_suited's) one, so street_norm should legitimately win.
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["hole_suited"]).run(timeout=60)
+        at.button(key="root::add_best_second_split_by").click().run(timeout=60)
+
+        assert not at.exception
+        assert at.multiselect(key="root::split_by").value == ["hole_suited", "street_norm"]
 
 
 class TestSubStrategies:

@@ -705,7 +705,21 @@ def _decision_variance_explained(
     real share of what remains (reads meaningfully above 0%, also
     correctly). No parent grouping in effect (root, or a parent with no
     Split By chosen) leaves the baseline as the plain grand mean --
-    ordinary, unadjusted ANOVA."""
+    ordinary, unadjusted ANOVA.
+
+    Each row is scored against its own `resolved_split_by` group's
+    leave-one-out mean, not the plain in-sample group mean: fitting a
+    group's mean on the same rows it's then scored against lets a group
+    "explain" its own members almost perfectly just by being small,
+    regardless of whether the grouping feature carries any real signal --
+    a singleton group has an in-sample deviation of exactly 0 by
+    construction. Left uncorrected, a candidate feature that's
+    overwhelmingly one value with only a handful of stray outlier rows
+    (colloquially "univariate," even though technically >= 2 categories
+    are observed) can score *higher* than a genuinely informative
+    candidate purely by carving those outliers into tiny/singleton groups
+    -- see _add_best_second_split_by, which picks whichever candidate
+    scores highest here."""
     if not resolved_split_by:
         return None
     action_cols = _action_columns(collapsed)
@@ -736,7 +750,25 @@ def _decision_variance_explained(
 
     own_labels = _group_labels_for_rows(df, default_index, tuple(resolved_split_by))
     own_group_means = pd.DataFrame(residual, index=own_labels).groupby(level=0).transform("mean").to_numpy()
-    within_group_variance = float(((residual - own_group_means) ** 2).sum(axis=1).mean())
+    in_sample_deviation = residual - own_group_means
+
+    # Leave-one-out deviation has a closed form for a group of size n_g >=
+    # 2: n_g / (n_g - 1) times the in-sample deviation above (algebraically,
+    # r_i - (group_sum - r_i) / (n_g - 1) == n_g / (n_g - 1) * (r_i -
+    # group_mean)). A singleton group (n_g == 1) has no leave-one-out
+    # estimate at all -- there's no *other* member left to average -- so it
+    # gets no explanatory credit: its deviation reverts to the full,
+    # pre-grouping residual (as if this row's own group hadn't explained
+    # anything).
+    group_sizes = pd.Series(own_labels).value_counts().reindex(own_labels).to_numpy()
+    singleton = group_sizes <= 1
+    # A singleton's own scale factor is never actually used below (np.where
+    # picks the plain-residual branch for it instead) -- its denominator is
+    # only kept away from a real 0 here so computing the (otherwise-unused)
+    # scaled branch doesn't raise a division-by-zero warning.
+    loo_scale = group_sizes / np.where(singleton, 1, group_sizes - 1)
+    loo_deviation = np.where(singleton[:, None], residual, in_sample_deviation * loo_scale[:, None])
+    within_group_variance = float((loo_deviation ** 2).sum(axis=1).mean())
 
     return max(0.0, 1.0 - within_group_variance / total_variance) * 100
 
@@ -956,6 +988,131 @@ def _resolve_default_df(node_df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
     return remaining
 
 
+def _add_children_for_each_level(key_prefix: str, feature_key: str, default_df: pd.DataFrame, split_by: list[str]) -> None:
+    """One new child sub-strategy per level of `feature_key` actually
+    observed in `default_df` -- each claiming exactly that level, with
+    Split By set to `split_by` (typically the parent's own current pick,
+    so every new child keeps examining the same breakdown within its own
+    narrower slice). Shared by _add_max_interaction_split/
+    _add_max_importance_split below -- they differ only in *which*
+    feature they pick, not in what happens once one's chosen."""
+    children = _substrategy_children(key_prefix)
+    for level in _observed_categories(default_df, feature_key):
+        child_id = uuid.uuid4().hex[:8]
+        children.append(child_id)
+        child_prefix = _child_key_prefix(key_prefix, child_id)
+        _set_local_filters(child_prefix, {feature_key: [level]})
+        _set_split_by(child_prefix, list(split_by))
+
+
+def _splittable_candidates(default_df: pd.DataFrame, split_by_options: list[str], exclude: list[str]) -> list[str]:
+    """`split_by_options` minus `exclude` and Exact Hole Hand (no ordinary
+    per-level claim makes sense for its own 2D grid -- see
+    _HOLE_HAND_GRID_KEY), minus any feature that's constant across
+    `default_df` (fewer than 2 observed levels -- splitting on it would
+    just recreate a single child claiming everything, not an actual
+    split) -- the pool _add_max_interaction_split/_add_max_importance_split
+    pick their one candidate from."""
+    return [
+        k for k in split_by_options
+        if k not in exclude and k != _HOLE_HAND_GRID_KEY and len(_observed_categories(default_df, k)) >= 2
+    ]
+
+
+def _add_max_interaction_split(
+    key_prefix: str, checkpoint_path: str, max_samples: int, default_df: pd.DataFrame,
+    resolved_split_by: list[str], split_by_options: list[str],
+) -> None:
+    """"Add maximum interaction split": finds the single candidate feature
+    (see _splittable_candidates) with the highest total interaction
+    strength (cfr_networks.interaction_strength_for_feature, summed across
+    however many features are in `resolved_split_by`) against this node's
+    own current Split By pick, then adds one child per level it takes
+    among this node's own default rows (see _add_children_for_each_level).
+    A quick way to check "is there a feature whose relationship to my
+    current Split By isn't just additive -- does my chosen breakdown
+    actually behave differently depending on its own value" without
+    manually trying each remaining feature as a filter one at a time.
+    No-op if this node has no Split By chosen yet (nothing to measure
+    interaction against) or no eligible candidate remains."""
+    if not resolved_split_by:
+        return
+    candidates = _splittable_candidates(default_df, split_by_options, resolved_split_by)
+    if not candidates:
+        return
+    row_index = default_df.index.to_numpy()
+    scores = {k: 0.0 for k in candidates}
+    for split_key in resolved_split_by:
+        interaction_by_key = dict(_interaction_strength_for_key(
+            checkpoint_path, max_samples, _row_digest(row_index), row_index, split_key,
+        ))
+        for k in candidates:
+            scores[k] += interaction_by_key.get(k, 0.0)
+    best_key = max(candidates, key=lambda k: scores[k])
+    _add_children_for_each_level(key_prefix, best_key, default_df, resolved_split_by)
+
+
+def _add_max_importance_split(
+    key_prefix: str, default_df: pd.DataFrame, resolved_split_by: list[str],
+    default_importance: list[tuple[str, float]],
+) -> None:
+    """"Add maximum importance split": adds one child per level of the
+    single highest-SHAP-importance candidate feature (see
+    _splittable_candidates; `default_importance` is already sorted
+    strongest-first) -- the model's own single biggest remaining lever on
+    this node's default rows, whatever its relationship to the currently
+    chosen Split By happens to be (unlike _add_max_interaction_split,
+    which specifically looks for features that interact with the current
+    Split By rather than simply mattering a lot on their own). No-op if no
+    eligible candidate remains."""
+    ranked_keys = [k for k, _ in default_importance]
+    candidates = set(_splittable_candidates(default_df, ranked_keys, resolved_split_by))
+    best_key = next((k for k in ranked_keys if k in candidates), None)
+    if best_key is None:
+        return
+    _add_children_for_each_level(key_prefix, best_key, default_df, resolved_split_by)
+
+
+def _add_best_second_split_by(
+    key_prefix: str, root_df: pd.DataFrame, default_df: pd.DataFrame, parent_node_df: pd.DataFrame | None,
+    parent_group_by_keys: tuple[str, ...], collapsed: bool, resolved_split_by: list[str], split_by_options: list[str],
+) -> None:
+    """"Add best second Split By feature": when this node currently has
+    exactly one Split By feature chosen, adds whichever second feature
+    (out of every other _splittable_candidates candidate -- so, as with the
+    other two buttons here, never one that's constant across this node's
+    own claimed default_df, respecting whatever local filters got it there)
+    maximizes "Decision variance explained by Split By features on claimed
+    samples" once paired with it (see _decision_variance_explained) --
+    optimizes that exact metric directly, rather than a proxy for it the
+    way the other two buttons here do (SHAP importance/interaction
+    strength). No-op unless exactly one Split By feature is currently
+    chosen (nothing to pair up with 0 -- and MAX_SPLIT_BY_FEATURES already
+    caps a pair at 2, so there's no "third").
+
+    Sets `st.session_state[f"{key_prefix}split_by"]` directly (not just
+    the sticky-shadow store _set_split_by normally goes through) since
+    this node's own Split By widget already exists (unlike a brand-new
+    child's) -- an existing widget's `default=` is only honored the very
+    first time its key is ever instantiated, so only overwriting its own
+    session_state entry directly actually takes effect on the very next
+    render (see the module-level comment on the sticky-state stores)."""
+    if len(resolved_split_by) != 1:
+        return
+    first = resolved_split_by[0]
+    candidates = _splittable_candidates(default_df, split_by_options, resolved_split_by)
+    best_key, best_pct = None, -1.0
+    for candidate in candidates:
+        pct = _decision_variance_explained(
+            root_df, default_df, parent_node_df, parent_group_by_keys, [first, candidate], collapsed,
+        )
+        if pct is not None and pct > best_pct:
+            best_key, best_pct = candidate, pct
+    if best_key is not None:
+        st.session_state[f"{key_prefix}split_by"] = [first, best_key]
+        _set_split_by(key_prefix, [first, best_key])
+
+
 def _render_substrategy(
     root_df: pd.DataFrame, key_prefix: str, checkpoint_path: str, max_samples: int,
     display_keys: list[str], collapsed: bool,
@@ -979,11 +1136,16 @@ def _render_substrategy(
     _resolve_default_df) -- Split By widget (own local widget, defaulting
     to inherit whatever its parent's *current* Split By pair is via a
     direct st.session_state read; root has no parent, so it just defaults
-    to nothing), the prominent table+graph, and the "Decision variance
-    explained by Split By features on claimed samples" metric, all
-    computed over that leftover, since the prominent block *is* the
-    default/else branch of the rule list -- then purely illustrative
-    "Add table"/"Add graph" additions, also over that same leftover.
+    to nothing) plus three "Suggested sub-strategies" buttons that build
+    on it algorithmically instead of by hand (_add_max_interaction_split/
+    _add_max_importance_split add one child per level of a well-chosen
+    feature; _add_best_second_split_by instead extends *this* node's own
+    Split By pick -- see each one's own docstring), the prominent
+    table+graph, and the "Decision variance explained by Split By
+    features on claimed samples" metric, all computed over that leftover,
+    since the prominent block *is* the default/else branch of the rule
+    list -- then purely illustrative "Add table"/"Add graph" additions,
+    also over that same leftover.
 
     Both SHAP views this node computes (`importance`, over its own
     incoming pool, for "Add filter"; `default_importance`, over its own
@@ -1140,6 +1302,37 @@ def _render_substrategy(
         st.caption(
             f"Exact Hole Hand is inherently 2D and fills both Split By slots by itself -- "
             f"ignoring {', '.join(cfr_features.feature_label(k) for k in dropped)}."
+        )
+
+    st.caption("Suggested sub-strategies:")
+    suggest_cols = st.columns(3)
+    with suggest_cols[0]:
+        st.button(
+            "Add maximum interaction split", key=f"{key_prefix}add_max_interaction_split",
+            disabled=not resolved_split_by,
+            help="Splits on whichever remaining feature interacts most with this node's own current Split By "
+            "pick -- one child per level it takes (see cfr_networks.interaction_strength_for_feature).",
+            on_click=_add_max_interaction_split,
+            args=(key_prefix, checkpoint_path, max_samples, default_df, resolved_split_by, split_by_options),
+        )
+    with suggest_cols[1]:
+        st.button(
+            "Add maximum importance split", key=f"{key_prefix}add_max_importance_split",
+            help="Splits on the single most important remaining feature by SHAP -- one child per level it takes.",
+            on_click=_add_max_importance_split,
+            args=(key_prefix, default_df, resolved_split_by, default_importance),
+        )
+    with suggest_cols[2]:
+        st.button(
+            "Add best second Split By feature", key=f"{key_prefix}add_best_second_split_by",
+            disabled=len(resolved_split_by) != 1,
+            help="Adds whichever second feature, paired with this node's current lone Split By pick, maximizes "
+            "Decision variance explained.",
+            on_click=_add_best_second_split_by,
+            args=(
+                key_prefix, root_df, default_df, parent_node_df, parent_group_by_keys, collapsed,
+                resolved_split_by, split_by_options,
+            ),
         )
 
     st.markdown("**Default behaviour**" if not is_root else "**Overall default behaviour**")
