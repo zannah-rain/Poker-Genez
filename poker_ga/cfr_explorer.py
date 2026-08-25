@@ -60,7 +60,6 @@ meaningful to plot otherwise.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import uuid
 
@@ -80,7 +79,7 @@ import strategy
 from features import HOLE_HAND_GRID_RANK_LABELS, HOLE_HAND_GRID_SIZE, MASKED, hole_hand_grid_label
 
 DEFAULT_CHECKPOINT_PATH = os.path.join("cfr_runs", "checkpoint_latest")
-DEFAULT_MAX_SAMPLES = 1_000_000
+DEFAULT_MAX_SAMPLES = 100_000
 
 _FEATURE_COL_PREFIX = "feat::"
 _ACTION_COL_PREFIX = "action::"
@@ -159,25 +158,24 @@ def _load_checkpoint(checkpoint_path: str):
 
 
 @st.cache_resource(show_spinner="Computing the current strategy over reservoir samples...")
-def _build_dataframe(checkpoint_path: str, max_samples: int) -> tuple[pd.DataFrame, np.ndarray]:
-    """(df, raw_features): df has one row per (subsampled) reservoir entry
-    -- one Categorical column per *displayed* feature (its bucket label, in
-    the feature's own natural value order -- see
-    cfr_features.bucket_categories; a linked child like hole_hand_grid_y_norm
-    gets no column of its own, since its parent hole_hand_grid_x_norm already
-    represents the same concept -- see cfr_features.display_feature_keys)
-    and one float column per action category (the *current* net's
-    regret-matching probability for that action, given that row's own
-    legal-action mask). Exact Hole Hand (_HOLE_HAND_GRID_KEY) is the one
-    exception: rather than a generic bucket-label column (its own value
-    table is just 13 per-axis ranks, not the 169 combos it actually
-    represents jointly with its second axis), it gets two plain raw float
-    columns instead -- see _hole_hand_grid_figures, which reads them
-    directly. raw_features is the same rows' full net-input vectors
-    (row-aligned with df, i.e. same order/positions), kept around so
-    _shap_importance_for_rows can re-explain just the rows a sub-strategy
-    claims without re-touching the reservoir. Everything else the UI does
-    is just pandas filtering/grouping over df, computed once."""
+def _build_dataframe(checkpoint_path: str, max_samples: int) -> pd.DataFrame:
+    """One row per (subsampled) reservoir entry -- one Categorical column
+    per *displayed* feature (its bucket label, in the feature's own
+    natural value order -- see cfr_features.bucket_categories; a linked
+    child like hole_hand_grid_y_norm gets no column of its own, since its
+    parent hole_hand_grid_x_norm already represents the same concept --
+    see cfr_features.display_feature_keys) and one float column per action
+    category (the *current* net's regret-matching probability for that
+    action, given that row's own legal-action mask). Exact Hole Hand
+    (_HOLE_HAND_GRID_KEY) is the one exception: rather than a generic
+    bucket-label column (its own value table is just 13 per-axis ranks,
+    not the 169 combos it actually represents jointly with its second
+    axis), it gets two plain raw float columns instead -- see
+    _hole_hand_grid_figures, which reads them directly. Everything else
+    the UI does -- every _decision_variance_explained/
+    _decision_variance_by_key call included -- is just pandas
+    filtering/grouping over this dataframe's own already-computed
+    columns, computed once."""
     net, net_config, reservoir = _load_checkpoint(checkpoint_path)
     rng = np.random.default_rng(0)
     n = min(max_samples, len(reservoir))
@@ -208,25 +206,19 @@ def _build_dataframe(checkpoint_path: str, max_samples: int) -> tuple[pd.DataFra
         data[_HOLE_HAND_GRID_RAW_X_COL] = features[:, x_idx]
         data[_HOLE_HAND_GRID_RAW_Y_COL] = features[:, y_idx]
 
-    return pd.DataFrame(data), features
-
-
-def _row_digest(row_index: np.ndarray) -> str:
-    """Cheap, stable hash of a set of row positions -- the actual
-    st.cache_data key for _shap_importance_for_rows, since the row array
-    itself (potentially large) is excluded from Streamlit's own hashing via
-    its leading-underscore parameter name."""
-    return hashlib.sha1(np.ascontiguousarray(row_index).tobytes()).hexdigest()
+    return pd.DataFrame(data)
 
 
 def _group_labels_for_rows(df: pd.DataFrame, row_index: np.ndarray, group_by_keys: tuple[str, ...]) -> np.ndarray | None:
     """One group-identifying value per row at `row_index`, defined by
-    `group_by_keys` -- a parent sub-strategy's own *resolved* Split By
-    pair (see _resolve_split_by) -- for _shap_importance_for_rows to center
-    a sub-strategy's own SHAP contributions per parent-group instead of
-    over its whole row set (see cfr_networks._normalized_mean_abs_shap).
-    None if `group_by_keys` is empty (no parent grouping in effect, e.g.
-    root, or a parent with no Split By chosen yet).
+    `group_by_keys` -- either a parent sub-strategy's own *resolved* Split
+    By pair (see _resolve_split_by), for _decision_variance_explained to
+    center a sub-strategy's own residual per parent-group instead of over
+    its whole row set, or the grouping whose own variance-explained is
+    being measured in the first place (see _decision_variance_explained/
+    _decision_variance_by_key). None if `group_by_keys` is empty (no
+    grouping in effect, e.g. root with no parent, or a parent with no
+    Split By chosen yet).
 
     Exact Hole Hand (_HOLE_HAND_GRID_KEY) is handled separately since it
     has no ordinary bucket-label column (see _build_dataframe): grouped by
@@ -234,7 +226,10 @@ def _group_labels_for_rows(df: pd.DataFrame, row_index: np.ndarray, group_by_key
     grouped together under one shared "masked" label -- a raw
     (x, y) < 0 pair is a sentinel, not a real grid position, so binning it
     into a grid cell (which would land it at cell (0, 0), colliding with a
-    real AA reading) would be wrong."""
+    real AA reading) would be wrong. Only ever passed alone (as a 1-tuple)
+    -- it has no ordinary column to jointly group by alongside anything
+    else, so pairing it with another key is never attempted (see
+    _decision_variance_by_key's own guard)."""
     if not group_by_keys:
         return None
     if group_by_keys == (_HOLE_HAND_GRID_KEY,):
@@ -249,83 +244,6 @@ def _group_labels_for_rows(df: pd.DataFrame, row_index: np.ndarray, group_by_key
     columns = [df[_feature_col(key)].to_numpy().astype(str) for key in group_by_keys]
     combined = columns[0] if len(columns) == 1 else np.char.add(np.char.add(columns[0], "|"), columns[1])
     return combined[row_index]
-
-
-@st.cache_data(show_spinner="Ranking features by SHAP contribution for this sub-strategy...")
-def _shap_importance_for_rows(
-    checkpoint_path: str, max_samples: int, row_digest: str, _row_index: np.ndarray,
-    background_digest: str, _background_row_index: np.ndarray, group_by_keys: tuple[str, ...] = (),
-) -> list[tuple[str, float]]:
-    """Mean |SHAP| contribution per displayed feature (see
-    cfr_networks.mean_shap_contributions_for_samples/cfr_features.
-    fold_child_contributions/display_feature_keys), restricted to exactly
-    the rows at `_row_index` -- a sub-strategy's own claimed rows, however
-    they got there (its own filters, minus whatever earlier siblings
-    already claimed -- not representable as a simple
-    feature->kept-bucket-labels dict, since claim-order exclusion isn't
-    "pin one key to one value"). Used both for a sub-strategy's own
-    "Add ..." dropdown ranking and its %SHAP-explained figure. Always one
-    entry per displayed feature, 0.0 for every feature when `_row_index` is
-    empty, so a feature never silently drops out of a widget that iterates
-    this list to build its options.
-
-    `_background_row_index` is ordinarily the same as `_row_index`
-    (self-referential -- explains and backgrounds against its own rows),
-    but callers pass a *wider* pool -- see _render_substrategy -- when
-    `group_by_keys` is set, so a parent's grouping gets corrected for
-    using the parent's own broader sample rather than this (possibly much
-    narrower) sub-strategy's own rows -- see cfr_networks.
-    mean_shap_contributions_for_samples for why that distinction matters.
-
-    `group_by_keys` (a parent sub-strategy's own resolved Split By pair --
-    see _render_substrategy) makes this sub-strategy's own view assume that
-    parent grouping is already "priced in": each row's contribution is
-    centered against its own group's mean, computed over
-    `_background_row_index` (see _group_labels_for_rows/cfr_networks.
-    _normalized_mean_abs_shap), instead of over its whole row set's own
-    mean, so a feature the parent's grouping already fully (and uniformly,
-    across the parent's whole sample) explains scores ~0 here too, rather
-    than getting credited again for signal the parent's own grouping
-    already accounts for."""
-    net, net_config, _reservoir = _load_checkpoint(checkpoint_path)
-    display_keys = cfr_features.display_feature_keys(net_config.feature_keys)
-    if len(_row_index) == 0:
-        return [(key, 0.0) for key in display_keys]
-    df, raw_features = _build_dataframe(checkpoint_path, max_samples)
-    selected = raw_features[_row_index]
-    background = raw_features[_background_row_index]
-    explain_group_labels = _group_labels_for_rows(df, _row_index, group_by_keys)
-    background_group_labels = _group_labels_for_rows(df, _background_row_index, group_by_keys)
-    contributions = cfr_networks.mean_shap_contributions_for_samples(
-        net, selected, background, net_config.feature_keys, np.random.default_rng(0),
-        explain_group_labels=explain_group_labels, background_group_labels=background_group_labels,
-    )
-    folded = dict(cfr_features.fold_child_contributions(contributions))
-    return sorted(((key, folded.get(key, 0.0)) for key in display_keys), key=lambda kv: -kv[1])
-
-
-@st.cache_data(show_spinner="Ranking cross-features by interaction strength...")
-def _interaction_strength_for_key(
-    checkpoint_path: str, max_samples: int, row_digest: str, _row_index: np.ndarray, focus_key: str,
-) -> list[tuple[str, float]]:
-    """Mean absolute pairwise interaction effect (see
-    cfr_networks.interaction_strength_for_feature) between `focus_key` and
-    every other net-input feature, over the rows at `_row_index` (a graphed
-    feature's own current `filtered` pool -- see _render_graphs). Unlike
-    _shap_importance_for_rows, this needs no parent-grouping correction: the
-    underlying Delta_ij term already isolates the interaction between
-    exactly two features, unaffected by any other feature's (however
-    dominant) own additive effect -- see that function's own docstring.
-    Self-referential (background = the same pool as explain), same as
-    _shap_importance_for_rows' own root-node case."""
-    net, net_config, _reservoir = _load_checkpoint(checkpoint_path)
-    if len(_row_index) == 0:
-        return [(key, 0.0) for key in net_config.feature_keys if key != focus_key]
-    _df, raw_features = _build_dataframe(checkpoint_path, max_samples)
-    pool = raw_features[_row_index]
-    return cfr_networks.interaction_strength_for_feature(
-        net, pool, pool, net_config.feature_keys, focus_key, np.random.default_rng(0),
-    )
 
 
 def _feature_col(key: str) -> str:
@@ -549,18 +467,21 @@ def _hole_hand_grid_figures(df: pd.DataFrame) -> list[go.Figure]:
 
 
 def _render_graphs(
-    filtered: pd.DataFrame, graph_keys: list[str], display_keys: list[str], collapsed: bool,
-    checkpoint_path: str, max_samples: int, key_prefix: str = "",
+    root_df: pd.DataFrame, filtered: pd.DataFrame, parent_node_df: pd.DataFrame | None,
+    parent_group_by_keys: tuple[str, ...], graph_keys: list[str], display_keys: list[str], collapsed: bool,
+    key_prefix: str = "",
 ) -> None:
     """One line chart per feature picked via a sub-strategy's own local
     "Add graph" control (see _render_substrategy), each paired with a
     multiselect of other features to "cross" it with, ranked strongest-
     interaction-first and labeled with that strength (see
-    cfr_networks.interaction_strength_for_feature/_interaction_strength_for_key)
-    -- every feature picked there adds its own row of 4 heatmaps (this
-    graphed feature as the x axis, the picked feature as the y axis, one
-    heatmap per simplified action rate). Exact Hole Hand (_HOLE_HAND_GRID_KEY)
-    is the one exception: inherently 2D already, it renders its own fixed set of
+    _decision_variance_by_key -- interaction here means "decision variance
+    explained by grouping jointly with the graphed feature", the same
+    metric every other ranking in this file uses) -- every feature picked
+    there adds its own row of 4 heatmaps (this graphed feature as the x
+    axis, the picked feature as the y axis, one heatmap per simplified
+    action rate). Exact Hole Hand (_HOLE_HAND_GRID_KEY) is the one
+    exception: inherently 2D already, it renders its own fixed set of
     heatmaps in place of the line chart, with no "cross" multiselect (and
     is never itself offered as something else's cross target -- it has no
     ordinary bucket-label column to pivot on, see _build_dataframe).
@@ -588,20 +509,15 @@ def _render_graphs(
             continue
 
         other_keys = [k for k in display_keys if k != key and k != _HOLE_HAND_GRID_KEY]
-        row_index = filtered.index.to_numpy()
-        interaction = _interaction_strength_for_key(
-            checkpoint_path, max_samples, _row_digest(row_index), row_index, key,
+        interaction = _decision_variance_by_key(
+            root_df, filtered, parent_node_df, parent_group_by_keys, other_keys, (key,), collapsed,
         )
         interaction_by_key = dict(interaction)
-        # Strongest-interaction-first, restricted to (and keeping) every
-        # option other_keys itself offers -- interaction's own order
-        # otherwise ranges over every net-input feature (incl. ones not
-        # offered here, e.g. linked children -- see cfr_networks.
-        # interaction_strength_for_feature).
-        ranked_other_keys = [k for k, _ in interaction if k in other_keys]
+        # Strongest-interaction-first -- already restricted to other_keys.
+        ranked_other_keys = [k for k, _ in interaction]
 
         def _cross_option_label(k: str) -> str:
-            return f"{cfr_features.feature_label(k)}  (Interaction {interaction_by_key.get(k, 0.0):.4f})"
+            return f"{cfr_features.feature_label(k)}  ({interaction_by_key.get(k, 0.0):.0f}% variance explained)"
 
         col_controls, col_chart = st.columns([1, 3])
         with col_controls:
@@ -678,16 +594,11 @@ def _decision_variance_explained(
     those rows by `resolved_split_by` (this node's own chosen Split By
     feature(s)) explains -- a standard ANOVA/eta-squared "variance
     explained by grouping" statistic, computed directly on the model's own
-    decisions rather than via SHAP attribution. SHAP can't cleanly answer
-    this particular question: _shap_importance_for_rows corrects for a
-    parent's own grouping by restricting SHAP's own background to rows
-    sharing the same group value, which forces a feature's own direct
-    attribution toward 0 whenever it *is* the grouping feature itself,
-    structurally, regardless of whether reusing it here captures real,
-    additional signal -- exactly the "shows 0% even though a different,
-    narrower rule is genuinely being applied" bug this function exists to
-    avoid. None if `resolved_split_by` is empty (nothing chosen yet to
-    measure).
+    decisions. This is the one metric the whole file uses -- see
+    _decision_variance_by_key, the thin wrapper around this function every
+    "Add ..." dropdown ranking, the feature table, and every "Suggested
+    sub-strategies" button is built on. None if `resolved_split_by` is
+    empty (nothing chosen yet to measure).
 
     Before measuring that, each row's own predicted vector first has
     whatever the *parent's* own Split By grouping (`parent_group_by_keys`)
@@ -719,9 +630,14 @@ def _decision_variance_explained(
     are observed) can score *higher* than a genuinely informative
     candidate purely by carving those outliers into tiny/singleton groups
     -- see _add_best_second_split_by, which picks whichever candidate
-    scores highest here."""
+    scores highest here. 0.0 (not None -- there's something to measure,
+    it's just empty) if `default_df` has no rows, e.g. a sub-strategy
+    every one of whose children together claims its entire own scope,
+    leaving nothing of its own "default behaviour" left to explain."""
     if not resolved_split_by:
         return None
+    if default_df.empty:
+        return 0.0
     action_cols = _action_columns(collapsed)
     default_view = _with_action_view(default_df, collapsed)
     default_index = default_df.index.to_numpy()
@@ -771,6 +687,39 @@ def _decision_variance_explained(
     within_group_variance = float((loo_deviation ** 2).sum(axis=1).mean())
 
     return max(0.0, 1.0 - within_group_variance / total_variance) * 100
+
+
+def _decision_variance_by_key(
+    root_df: pd.DataFrame, pool_df: pd.DataFrame, parent_node_df: pd.DataFrame | None,
+    parent_group_by_keys: tuple[str, ...], candidate_keys: list[str], pair_with: tuple[str, ...],
+    collapsed: bool,
+) -> list[tuple[str, float]]:
+    """One (key, pct) pair per `candidate_keys` entry, strongest-first --
+    the single metric behind every "Add ..." dropdown ranking, the feature
+    table, and every "Suggested sub-strategies" button in this file (see
+    the module docstring): `pct` is _decision_variance_explained(root_df,
+    pool_df, parent_node_df, parent_group_by_keys, [*pair_with, key],
+    collapsed) -- plain "how much does this feature alone explain" when
+    `pair_with` is empty, or "how much do this feature and whatever's
+    already in `pair_with` explain *together*" otherwise (used to rank a
+    second Split By candidate, a cross-graph target, or a child-split
+    candidate against the current Split By -- see each caller). 0.0 for a
+    key already in `pair_with` (nothing left for it to add) and for every
+    key when `pair_with` contains Exact Hole Hand (_HOLE_HAND_GRID_KEY) --
+    it has no ordinary bucket-label column, so _group_labels_for_rows can't
+    jointly group it with anything else."""
+    if _HOLE_HAND_GRID_KEY in pair_with:
+        return [(key, 0.0) for key in candidate_keys]
+    scores = {}
+    for key in candidate_keys:
+        if key in pair_with:
+            scores[key] = 0.0
+            continue
+        pct = _decision_variance_explained(
+            root_df, pool_df, parent_node_df, parent_group_by_keys, [*pair_with, key], collapsed,
+        )
+        scores[key] = pct if pct is not None else 0.0
+    return sorted(scores.items(), key=lambda kv: -kv[1])
 
 
 _SUBSTRATEGY_CHILDREN_STATE_KEY = "substrategy_children"
@@ -962,10 +911,11 @@ def _resolve_node_df(root_df: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
     further step _resolve_incoming_df deliberately stops short of, since
     the currently selected node applies its own filters via its real,
     interactive widgets instead). Used to find a node's *parent's* own
-    full claimed scope: the background pool a sub-strategy's own SHAP
-    computation should draw from when correcting for a grouping the
-    parent's Split By already applies (see _render_substrategy) --
-    deliberately the parent's full node_df, not its narrower default_df
+    full claimed scope: the `parent_node_df` a sub-strategy's own
+    _decision_variance_explained/_decision_variance_by_key calls draw their
+    baseline from when correcting for a grouping the parent's Split By
+    already applies (see _render_substrategy) -- deliberately the parent's
+    full node_df, not its narrower default_df
     (which excludes every child, including whichever one is asking), since
     the parent's own Split By is conceptually a rule over its whole
     domain, not just whatever's left after every child has carved its own
@@ -1020,40 +970,39 @@ def _splittable_candidates(default_df: pd.DataFrame, split_by_options: list[str]
 
 
 def _add_max_interaction_split(
-    key_prefix: str, checkpoint_path: str, max_samples: int, default_df: pd.DataFrame,
-    resolved_split_by: list[str], split_by_options: list[str],
+    key_prefix: str, root_df: pd.DataFrame, default_df: pd.DataFrame, parent_node_df: pd.DataFrame | None,
+    parent_group_by_keys: tuple[str, ...], collapsed: bool, resolved_split_by: list[str],
+    split_by_options: list[str],
 ) -> None:
     """"Add maximum interaction split": finds the single candidate feature
-    (see _splittable_candidates) with the highest total interaction
-    strength (cfr_networks.interaction_strength_for_feature, summed across
-    however many features are in `resolved_split_by`) *per observed
-    level* -- summed interaction strength divided by how many children
-    claiming it would actually add (see _observed_categories), like
-    _add_max_importance_split's own per-level normalization -- against
-    this node's own current Split By pick, then adds one child per level
-    it takes among this node's own default rows (see
-    _add_children_for_each_level). A quick way to check "is there a
-    feature whose relationship to my current Split By isn't just additive
-    -- does my chosen breakdown actually behave differently depending on
-    its own value" without manually trying each remaining feature as a
-    filter one at a time -- and, thanks to the per-level normalization,
-    biased toward whichever such feature asks a person to learn the fewest
-    additional sub-strategies for that interaction. No-op if this node has
-    no Split By chosen yet (nothing to measure interaction against) or no
-    eligible candidate remains."""
+    (see _splittable_candidates) with the highest *total* decision variance
+    explained once grouped jointly with this node's own current Split By
+    pick (see _decision_variance_by_key) *per observed level* -- that total
+    divided by how many children claiming it would actually add (see
+    _observed_categories), like _add_max_importance_split's own per-level
+    normalization -- then adds one child per level it takes among this
+    node's own default rows (see _add_children_for_each_level). Maximizing
+    total variance explained (rather than, say, the incremental gain over
+    the current Split By alone) means the winning candidate is whichever
+    one leaves the *overall* rule -- current Split By plus this new child
+    split -- explaining as much of this node's own decisions as possible.
+    A quick way to check "is there a feature whose relationship to my
+    current Split By isn't just additive -- does my chosen breakdown
+    actually behave differently depending on its own value" without
+    manually trying each remaining feature as a filter one at a time --
+    and, thanks to the per-level normalization, biased toward whichever
+    such feature asks a person to learn the fewest additional
+    sub-strategies for that interaction. No-op if this node has no Split
+    By chosen yet (nothing to measure interaction against) or no eligible
+    candidate remains."""
     if not resolved_split_by:
         return
     candidates = _splittable_candidates(default_df, split_by_options, resolved_split_by)
     if not candidates:
         return
-    row_index = default_df.index.to_numpy()
-    scores = {k: 0.0 for k in candidates}
-    for split_key in resolved_split_by:
-        interaction_by_key = dict(_interaction_strength_for_key(
-            checkpoint_path, max_samples, _row_digest(row_index), row_index, split_key,
-        ))
-        for k in candidates:
-            scores[k] += interaction_by_key.get(k, 0.0)
+    scores = dict(_decision_variance_by_key(
+        root_df, default_df, parent_node_df, parent_group_by_keys, candidates, tuple(resolved_split_by), collapsed,
+    ))
     best_key = max(candidates, key=lambda k: scores[k] / len(_observed_categories(default_df, k)))
     _add_children_for_each_level(key_prefix, best_key, default_df, resolved_split_by)
 
@@ -1064,7 +1013,8 @@ def _add_max_importance_split(
 ) -> None:
     """"Add maximum importance split": adds one child per level of
     whichever candidate feature (see _splittable_candidates) has the
-    highest SHAP importance *per observed level* -- raw SHAP importance
+    highest decision variance explained on its own (see
+    _decision_variance_by_key) *per observed level* -- raw importance
     divided by how many children claiming it would actually add (see
     _observed_categories) -- rather than raw importance alone. A feature
     that's a little more important overall but spreads that importance
@@ -1092,17 +1042,19 @@ def _add_best_second_split_by(
     parent_group_by_keys: tuple[str, ...], collapsed: bool, resolved_split_by: list[str], split_by_options: list[str],
 ) -> None:
     """"Add best second Split By feature": when this node currently has
-    exactly one Split By feature chosen, adds whichever second feature
-    (out of every other _splittable_candidates candidate -- so, as with the
+    exactly one Split By feature chosen, adds whichever second feature (out
+    of every other _splittable_candidates candidate -- so, as with the
     other two buttons here, never one that's constant across this node's
     own claimed default_df, respecting whatever local filters got it there)
     maximizes "Decision variance explained by Split By features on claimed
-    samples" once paired with it (see _decision_variance_explained) --
-    optimizes that exact metric directly, rather than a proxy for it the
-    way the other two buttons here do (SHAP importance/interaction
-    strength). No-op unless exactly one Split By feature is currently
-    chosen (nothing to pair up with 0 -- and MAX_SPLIT_BY_FEATURES already
-    caps a pair at 2, so there's no "third").
+    samples" once paired with it (see _decision_variance_by_key) --
+    optimizes that exact metric directly, with no per-level normalization
+    (unlike _add_max_interaction_split/_add_max_importance_split): this
+    button doesn't add any new sub-strategies for a person to learn, just a
+    second dimension to the *same* node's own existing rule, so there's no
+    per-level cost to weigh against. No-op unless exactly one Split By
+    feature is currently chosen (nothing to pair up with 0 -- and
+    MAX_SPLIT_BY_FEATURES already caps a pair at 2, so there's no "third").
 
     Sets `st.session_state[f"{key_prefix}split_by"]` directly (not just
     the sticky-shadow store _set_split_by normally goes through) since
@@ -1115,21 +1067,49 @@ def _add_best_second_split_by(
         return
     first = resolved_split_by[0]
     candidates = _splittable_candidates(default_df, split_by_options, resolved_split_by)
-    best_key, best_pct = None, -1.0
-    for candidate in candidates:
-        pct = _decision_variance_explained(
-            root_df, default_df, parent_node_df, parent_group_by_keys, [first, candidate], collapsed,
-        )
-        if pct is not None and pct > best_pct:
-            best_key, best_pct = candidate, pct
-    if best_key is not None:
-        st.session_state[f"{key_prefix}split_by"] = [first, best_key]
-        _set_split_by(key_prefix, [first, best_key])
+    if not candidates:
+        return
+    scores = dict(_decision_variance_by_key(
+        root_df, default_df, parent_node_df, parent_group_by_keys, candidates, tuple(resolved_split_by), collapsed,
+    ))
+    best_key = max(candidates, key=lambda k: scores[k])
+    st.session_state[f"{key_prefix}split_by"] = [first, best_key]
+    _set_split_by(key_prefix, [first, best_key])
+
+
+def _add_optimise_split_by(
+    key_prefix: str, root_df: pd.DataFrame, default_df: pd.DataFrame, parent_node_df: pd.DataFrame | None,
+    parent_group_by_keys: tuple[str, ...], collapsed: bool, split_by_options: list[str],
+) -> None:
+    """"Optimise split by features": like _add_best_second_split_by, but
+    ignores whatever Split By is currently chosen and searches every
+    unordered pair of _splittable_candidates from scratch (evaluated
+    against no existing pairing -- an empty `resolved_split_by`, so a
+    feature constant across this node's own claimed default_df is still
+    excluded, but nothing else is), setting Split By to whichever pair
+    maximizes "Decision variance explained by Split By features on claimed
+    samples" (see _decision_variance_explained) directly -- the single best
+    *pair* this node's own claimed rows support, not just the best partner
+    for whatever's already chosen. No-op if fewer than 2 eligible
+    candidates remain (nothing to pair)."""
+    candidates = _splittable_candidates(default_df, split_by_options, ())
+    if len(candidates) < 2:
+        return
+    best_pair, best_pct = None, -1.0
+    for i, a in enumerate(candidates):
+        for b in candidates[i + 1:]:
+            pct = _decision_variance_explained(
+                root_df, default_df, parent_node_df, parent_group_by_keys, [a, b], collapsed,
+            )
+            if pct is not None and pct > best_pct:
+                best_pair, best_pct = [a, b], pct
+    if best_pair is not None:
+        st.session_state[f"{key_prefix}split_by"] = best_pair
+        _set_split_by(key_prefix, best_pair)
 
 
 def _render_substrategy(
-    root_df: pd.DataFrame, key_prefix: str, checkpoint_path: str, max_samples: int,
-    display_keys: list[str], collapsed: bool,
+    root_df: pd.DataFrame, key_prefix: str, display_keys: list[str], collapsed: bool,
 ) -> None:
     """Renders the *currently selected* sub-strategy node's own page --
     root ("root::", heading "Overall Strategy") or any node added via "Add
@@ -1150,10 +1130,11 @@ def _render_substrategy(
     _resolve_default_df) -- Split By widget (own local widget, defaulting
     to inherit whatever its parent's *current* Split By pair is via a
     direct st.session_state read; root has no parent, so it just defaults
-    to nothing) plus three "Suggested sub-strategies" buttons that build
-    on it algorithmically instead of by hand (_add_max_interaction_split/
-    _add_max_importance_split add one child per level of a well-chosen
-    feature; _add_best_second_split_by instead extends *this* node's own
+    to nothing), a feature-importance-and-interaction table, and four
+    "Suggested sub-strategies" buttons that build on it algorithmically
+    instead of by hand (_add_max_interaction_split/_add_max_importance_split
+    add one child per level of a well-chosen feature; _add_best_second_split_by/
+    _add_optimise_split_by instead extend or replace *this* node's own
     Split By pick -- see each one's own docstring), the prominent
     table+graph, and the "Decision variance explained by Split By
     features on claimed samples" metric, all computed over that leftover,
@@ -1161,57 +1142,41 @@ def _render_substrategy(
     list -- then purely illustrative "Add table"/"Add graph" additions,
     also over that same leftover.
 
-    Both SHAP views this node computes (`importance`, over its own
-    incoming pool, for "Add filter"; `default_importance`, over its own
-    claimed-and-not-further-claimed leftover, for Split By/the variance
-    metric) correct for whatever grouping this node's own *parent*
-    already applies (`parent_group_by_keys`) by centering against
+    Both decision-variance-explained views this node computes (`importance`,
+    over its own incoming pool, for "Add filter"; `default_importance`,
+    over its own claimed-and-not-further-claimed leftover, for Split
+    By/the variance metric) correct for whatever grouping this node's own
+    *parent* already applies (`parent_group_by_keys`) by centering against
     `parent_node_df` -- the parent's own full claimed scope (see
-    _resolve_node_df), not this node's own rows. That distinction matters:
-    if the correction used this node's own (possibly much narrower) rows
-    instead, a feature merely *constant* within that narrow slice would
-    always score 0 regardless of whether the parent's grouping actually
-    explains it there -- e.g. a child sharing its parent's own Split By
-    feature, filtered down to a small subset, would always show 0%
-    "explained" even though that narrower rule can genuinely capture real,
-    additional signal the parent's broader-population analysis doesn't.
-    Centering against the parent's own full sample instead means a
-    feature only reads as "already explained" when the parent's grouping
-    is *uniformly* true across the parent's whole domain, not just within
-    whatever this node happens to have claimed."""
+    _resolve_node_df), not this node's own rows (see
+    _decision_variance_explained's own docstring for why). That
+    distinction matters: if the correction used this node's own (possibly
+    much narrower) rows instead, a feature merely *constant* within that
+    narrow slice would always score 0 regardless of whether the parent's
+    grouping actually explains it there -- e.g. a child sharing its
+    parent's own Split By feature, filtered down to a small subset, would
+    always show 0% "explained" even though that narrower rule can
+    genuinely capture real, additional signal the parent's broader-
+    population analysis doesn't. Centering against the parent's own full
+    sample instead means a feature only reads as "already explained" when
+    the parent's grouping is *uniformly* true across the parent's whole
+    domain, not just within whatever this node happens to have claimed."""
     parent_key_prefix, child_id = _parent_key_prefix_and_child_id(key_prefix)
     is_root = parent_key_prefix is None
     incoming_df = _resolve_incoming_df(root_df, key_prefix)
 
-    # This node's own SHAP views (both calls below) assume its *parent's*
-    # own Split By grouping is already "priced in" -- see
-    # _group_labels_for_rows/cfr_networks._normalized_mean_abs_shap. The
-    # background pool for that correction is the *parent's* own full
-    # claimed scope (see _resolve_node_df), not this node's own (possibly
-    # much narrower) rows -- a feature the parent's grouping only
-    # partially/locally explains should still show up as informative here,
-    # not collapse to 0 just because it's constant within this node's own
-    # narrow sample.
     parent_split_by = [] if is_root else _split_by_from_state(parent_key_prefix)
     parent_group_by_keys = tuple(_resolve_split_by(parent_split_by))
     parent_node_df = None if is_root else _resolve_node_df(root_df, parent_key_prefix)
 
-    def _background_index(explain_index: np.ndarray) -> np.ndarray:
-        if parent_group_by_keys and parent_node_df is not None:
-            return parent_node_df.index.to_numpy()
-        return explain_index
-
-    row_index = incoming_df.index.to_numpy()
-    background_index = _background_index(row_index)
-    importance = _shap_importance_for_rows(
-        checkpoint_path, max_samples, _row_digest(row_index), row_index,
-        _row_digest(background_index), background_index, group_by_keys=parent_group_by_keys,
+    importance = _decision_variance_by_key(
+        root_df, incoming_df, parent_node_df, parent_group_by_keys, display_keys, (), collapsed,
     )
     non_graph_options = [k for k, _ in importance if k != _HOLE_HAND_GRID_KEY]
     importance_by_key = dict(importance)
 
     def _claim_option_label(key: str) -> str:
-        return f"{cfr_features.feature_label(key)}  (SHAP {importance_by_key[key]:.4f})"
+        return f"{cfr_features.feature_label(key)}  ({importance_by_key[key]:.0f}% variance explained)"
 
     if not is_root:
         st.button("← Back to parent", key=f"{key_prefix}back", on_click=_select_node, args=(parent_key_prefix,))
@@ -1284,16 +1249,13 @@ def _render_substrategy(
                 )
 
     default_df = _resolve_default_df(node_df, key_prefix)
-    default_row_index = default_df.index.to_numpy()
-    default_background_index = _background_index(default_row_index)
-    default_importance = _shap_importance_for_rows(
-        checkpoint_path, max_samples, _row_digest(default_row_index), default_row_index,
-        _row_digest(default_background_index), default_background_index, group_by_keys=parent_group_by_keys,
+    default_importance = _decision_variance_by_key(
+        root_df, default_df, parent_node_df, parent_group_by_keys, display_keys, (), collapsed,
     )
     importance_by_key = dict(default_importance)
 
     def _default_option_label(key: str) -> str:
-        return f"{cfr_features.feature_label(key)}  (SHAP {importance_by_key[key]:.4f})"
+        return f"{cfr_features.feature_label(key)}  ({importance_by_key[key]:.0f}% variance explained)"
 
     split_by_options = [k for k, _ in default_importance]
     # The very first time this node is ever visited, default to inherit
@@ -1318,23 +1280,52 @@ def _render_substrategy(
             f"ignoring {', '.join(cfr_features.feature_label(k) for k in dropped)}."
         )
 
+    # Every number below is _decision_variance_explained/_decision_variance_by_key
+    # -- the one metric this whole page uses -- always computed over this
+    # node's own default_df (or incoming_df for "Add filter", above), so
+    # this table always reflects exactly the sample currently matching this
+    # sub-strategy's own filters, never a broader or narrower one.
+    table_keys = [k for k, _ in default_importance if k != _HOLE_HAND_GRID_KEY]
+    show_interaction = bool(resolved_split_by) and resolved_split_by != [_HOLE_HAND_GRID_KEY]
+    table_interaction_by_key = dict(_decision_variance_by_key(
+        root_df, default_df, parent_node_df, parent_group_by_keys, table_keys, tuple(resolved_split_by), collapsed,
+    )) if show_interaction else {}
+    st.caption("Feature importance and interaction with the current Split By pick:")
+    st.dataframe(
+        pd.DataFrame([
+            {
+                "Feature": cfr_features.feature_label(key),
+                "Importance": f"{importance_by_key[key]:.0f}%",
+                "Interaction with current Split By": (
+                    "—" if not show_interaction or key in resolved_split_by
+                    else f"{table_interaction_by_key[key]:.0f}%"
+                ),
+            }
+            for key in table_keys
+        ]),
+        hide_index=True, use_container_width=True,
+    )
+
     st.caption("Suggested sub-strategies:")
-    suggest_cols = st.columns(3)
+    suggest_cols = st.columns(4)
     with suggest_cols[0]:
         st.button(
             "Add maximum interaction split", key=f"{key_prefix}add_max_interaction_split",
             disabled=not resolved_split_by,
-            help="Splits on whichever remaining feature has the highest interaction strength with this node's "
-            "own current Split By pick per observed level -- one child per level it takes "
-            "(see cfr_networks.interaction_strength_for_feature).",
+            help="Splits on whichever remaining feature has the highest total decision variance explained "
+            "jointly with this node's own current Split By pick, per observed level -- one child per level "
+            "it takes.",
             on_click=_add_max_interaction_split,
-            args=(key_prefix, checkpoint_path, max_samples, default_df, resolved_split_by, split_by_options),
+            args=(
+                key_prefix, root_df, default_df, parent_node_df, parent_group_by_keys, collapsed,
+                resolved_split_by, split_by_options,
+            ),
         )
     with suggest_cols[1]:
         st.button(
             "Add maximum importance split", key=f"{key_prefix}add_max_importance_split",
-            help="Splits on the remaining feature with the highest SHAP importance per observed level -- one "
-            "child per level it takes.",
+            help="Splits on the remaining feature with the highest decision variance explained per observed "
+            "level -- one child per level it takes.",
             on_click=_add_max_importance_split,
             args=(key_prefix, default_df, resolved_split_by, default_importance),
         )
@@ -1349,6 +1340,14 @@ def _render_substrategy(
                 key_prefix, root_df, default_df, parent_node_df, parent_group_by_keys, collapsed,
                 resolved_split_by, split_by_options,
             ),
+        )
+    with suggest_cols[3]:
+        st.button(
+            "Optimise split by features", key=f"{key_prefix}optimise_split_by",
+            help="Ignores whatever Split By is currently chosen and sets it to whichever pair of features "
+            "maximizes Decision variance explained on this sub-strategy's own claimed samples.",
+            on_click=_add_optimise_split_by,
+            args=(key_prefix, root_df, default_df, parent_node_df, parent_group_by_keys, collapsed, split_by_options),
         )
 
     st.markdown("**Default behaviour**" if not is_root else "**Overall default behaviour**")
@@ -1408,7 +1407,10 @@ def _render_substrategy(
     for table_key in extra_table_keys:
         st.caption(f"Extra table: {cfr_features.feature_label(table_key)}")
         _render_table(default_df, [table_key], collapsed)
-    _render_graphs(default_df, extra_graph_keys, display_keys, collapsed, checkpoint_path, max_samples, f"{key_prefix}extra::")
+    _render_graphs(
+        root_df, default_df, parent_node_df, parent_group_by_keys, extra_graph_keys, display_keys, collapsed,
+        f"{key_prefix}extra::",
+    )
 
 
 def _shorthand_description(key_prefix: str) -> str:
@@ -1522,7 +1524,7 @@ def main() -> None:
         st.stop()
 
     _net, net_config, _reservoir = _load_checkpoint(checkpoint_path)
-    df, _raw_features = _build_dataframe(checkpoint_path, int(max_samples))
+    df = _build_dataframe(checkpoint_path, int(max_samples))
     if df.empty:
         st.warning("This checkpoint's reservoir is empty -- nothing to explore yet.")
         st.stop()
@@ -1538,7 +1540,7 @@ def main() -> None:
     # the central column -- every other node is reached by switching
     # selection instead of scrolling (see _render_substrategy/
     # _render_navigation's module docstring).
-    _render_substrategy(df, _selected_node(), checkpoint_path, int(max_samples), display_keys, collapsed)
+    _render_substrategy(df, _selected_node(), display_keys, collapsed)
 
     # Rendered after the selected node above so it reflects this run's
     # freshly updated session_state (filter picks, child list, selection)

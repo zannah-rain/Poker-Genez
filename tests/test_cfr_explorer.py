@@ -20,12 +20,14 @@ _FEATURE_KEYS = ("street_norm", "hole_suited", "hand_category_norm")
 _COLLAPSED_LABELS = ("Fold", "Call", "Raise", "All-In")
 
 
-def _strip_shap_suffix(option: str) -> str:
-    """A "Add filter/graph/table" or "Split By" dropdown option's plain
-    feature label, with its "  (SHAP 0.0000)" suffix (see
-    _render_substrategy) removed -- so tests can check which features are
-    offered without hardcoding an exact importance value."""
-    return re.sub(r"\s+\(SHAP [\d.]+\)$", "", option)
+def _strip_variance_suffix(option: str) -> str:
+    """A "Add filter/graph/table", "Split By", or "Cross with other
+    features" dropdown option's plain feature label, with its own
+    "  (NN% variance explained)" suffix (see _decision_variance_by_key/
+    _render_substrategy/_render_graphs -- the one metric every dropdown in
+    the app labels its options with) removed -- so tests can check which
+    features are offered without hardcoding an exact value."""
+    return re.sub(r"\s+\(\d+% variance explained\)$", "", option)
 
 
 def _strip_nav_prefix(label: str) -> str:
@@ -35,20 +37,13 @@ def _strip_nav_prefix(label: str) -> str:
     return re.sub(r"^[\u00a0│├└─]+", "", label)
 
 
-def _strip_interaction_suffix(option: str) -> str:
-    """A "Cross with other features" dropdown option's plain feature
-    label, with its "  (Interaction 0.0000)" suffix (see _render_graphs)
-    removed."""
-    return re.sub(r"\s+\(Interaction [\d.]+\)$", "", option)
-
-
-def _interaction_values_by_label(widget) -> dict[str, float]:
-    """label -> interaction-strength value read off a "Cross with other
-    features" multiselect's own "(Interaction 0.0000)"-suffixed options
-    (see _render_graphs)."""
+def _variance_values_by_label(widget) -> dict[str, float]:
+    """label -> decision-variance-explained value read off any dropdown
+    widget's own "(NN% variance explained)"-suffixed options (see
+    _strip_variance_suffix/_decision_variance_by_key)."""
     values = {}
     for option in widget.options:
-        match = re.match(r"^(.*)  \(Interaction ([\d.]+)\)$", option)
+        match = re.match(r"^(.*)  \((\d+)% variance explained\)$", option)
         if match:
             label, value = match.groups()
             values[label] = float(value)
@@ -56,45 +51,42 @@ def _interaction_values_by_label(widget) -> dict[str, float]:
 
 
 def _option_labels(widget) -> set[str]:
-    """The plain feature labels a SHAP-suffixed multiselect widget
-    currently offers (see _strip_shap_suffix) -- AppTest's own `.options`
-    already reflects the widget's format_func output, not the raw
-    feature-key identity."""
-    return {_strip_shap_suffix(o) for o in widget.options}
+    """The plain feature labels a variance-suffixed multiselect widget
+    currently offers (see _strip_variance_suffix) -- AppTest's own
+    `.options` already reflects the widget's format_func output, not the
+    raw feature-key identity."""
+    return {_strip_variance_suffix(o) for o in widget.options}
 
 
-def _shap_values_by_key(at: AppTest, key_prefix: str = "root::", feature_keys=_FEATURE_KEYS) -> dict[str, float]:
-    """Reads the "(SHAP 0.0000)" values off `key_prefix`'s own Split By
-    multiselect options -- computed over that node's current `default_df`
-    (see _render_substrategy), so it reflects whatever claim filters are
-    currently narrowing that node."""
+def _variance_values_by_key(at: AppTest, widget_key: str, feature_keys=_FEATURE_KEYS) -> dict[str, float]:
+    """Reads the "(NN% variance explained)" values off the multiselect at
+    `widget_key` (e.g. f"{key_prefix}split_by" or
+    f"{key_prefix}claim_filter_keys") -- computed over whatever pool that
+    widget's own dropdown ranks against (see _render_substrategy), so it
+    reflects whatever claim filters are currently narrowing that node."""
     label_to_key = {cfr_features.feature_label(k): k for k in feature_keys}
     values: dict[str, float] = {}
-    for option in at.multiselect(key=f"{key_prefix}split_by").options:
-        match = re.match(r"^(.*)  \(SHAP ([\d.]+)\)$", option)
-        if not match:
-            continue
-        label, shap = match.groups()
+    for label, value in _variance_values_by_label(at.multiselect(key=widget_key)).items():
         if label in label_to_key:
-            values[label_to_key[label]] = float(shap)
+            values[label_to_key[label]] = value
     return values
 
 
 def _batch_set(at: AppTest, values: dict[str, list[str]]) -> AppTest:
     """Sets several multiselect widgets' values together before a single
     .run() -- AppTest's own widget-state round-trip for a format_func-based
-    multiselect (every widget in this app that shows a "(SHAP 0.0000)"
-    suffix) isn't reliably preserved for a widget that's *not* re-asserted
-    in the same batch/run as some other widget's change (confirmed by
-    inspecting raw st.session_state directly during development -- a
-    testing-harness quirk, not real app behavior; a real browser session
-    doesn't have this problem, since it tracks each option's raw identity
-    client-side instead of round-tripping through format_func on every
-    interaction). The safe pattern used throughout this file: batch every
-    widget that's being given its *first* value together in one .run(), and
-    keep any dependent widget that only exists *after* an earlier one has a
-    value (e.g. "keep values" only appearing once a claim feature is
-    picked) to its own preceding .run()."""
+    multiselect (every widget in this app that shows a "(NN% variance
+    explained)" suffix) isn't reliably preserved for a widget that's *not*
+    re-asserted in the same batch/run as some other widget's change
+    (confirmed by inspecting raw st.session_state directly during
+    development -- a testing-harness quirk, not real app behavior; a real
+    browser session doesn't have this problem, since it tracks each
+    option's raw identity client-side instead of round-tripping through
+    format_func on every interaction). The safe pattern used throughout
+    this file: batch every widget that's being given its *first* value
+    together in one .run(), and keep any dependent widget that only exists
+    *after* an earlier one has a value (e.g. "keep values" only appearing
+    once a claim feature is picked) to its own preceding .run()."""
     for key, value in values.items():
         at.multiselect(key=key).set_value(value)
     at.run(timeout=60)
@@ -161,8 +153,9 @@ def _synthetic_checkpoint_path(tmp_path_factory) -> str:
     # Module-scoped and shared across every test that uses it (unlike a
     # fresh tmp_path per test) so Streamlit's cache_resource -- keyed on
     # this exact path string -- actually hits after the first test, instead
-    # of recomputing SHAP feature importance (the slow part) from scratch
-    # for all 200+ samples on every single test.
+    # of recomputing the net's own action-probability predictions (the slow
+    # part -- see _build_dataframe) from scratch for all 200+ samples on
+    # every single test.
     path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_checkpoint")), "checkpoint")
     _make_checkpoint(path, np.random.default_rng(0))
     return path
@@ -193,13 +186,21 @@ def _run_app() -> AppTest:
     return at
 
 
-def _make_correlated_checkpoint(path: str, rng: np.random.Generator, num_samples: int = 400) -> None:
+def _make_correlated_checkpoint(path: str, rng: np.random.Generator, num_samples: int = 4000) -> None:
     """Like _make_checkpoint, except hand_category_norm is pinned to
     exactly 0.0 whenever street_norm's own value falls in the "Preflop"
     bucket -- mirroring a real feature like num_overcards_norm, which is
     always exactly 0 preflop since there's no board yet to have overcards
-    on. Filtering to Preflop should then make hand_category_norm's SHAP
-    contribution collapse to ~0."""
+    on. Filtering to Preflop should then make hand_category_norm's
+    decision variance explained collapse to exactly 0%. `num_samples`
+    defaults much higher than _make_checkpoint's own 200: hand_category_norm
+    has 26 observed levels, and _decision_variance_explained's own
+    leave-one-out correction (see its docstring) needs enough samples per
+    level to tell a real, if diluted, relationship apart from noise --
+    too few and the honest, cross-validated read is indistinguishable
+    from 0% even for a real effect, which would make this checkpoint's
+    own "meaningfully important unfiltered" precondition fail before the
+    Preflop filter is even applied."""
     feature_dim = len(cfr_features.feature_indices(_FEATURE_KEYS))
     torch.manual_seed(0)  # AdvantageNet's init otherwise draws from torch's unseeded global RNG
     net = cfr_networks.AdvantageNet(input_dim=feature_dim, hidden_sizes=(8, 8))
@@ -312,7 +313,7 @@ def _make_importance_per_level_checkpoint(path: str, rng: np.random.Generator, n
     per-level normalization (see TestSuggestedSubstrategyButtons.
     test_max_importance_split_prefers_higher_importance_per_level):
     hand_category_norm gets a bigger net input weight than street_norm --
-    a higher *raw* SHAP importance -- but hand_category_norm has 26
+    a higher *raw* importance -- but hand_category_norm has 26
     observed levels (see cfr_features.bucket_categories) against
     street_norm's 4, so street_norm's importance *per level* is actually
     higher. "Add maximum importance split" should add street_norm (fewer
@@ -513,45 +514,43 @@ class TestRootIsJustAnotherSubstrategy:
         assert not any(ms.key == "root::split_by" for ms in at.multiselect)
 
 
-class TestSubstrategyShapImportance:
-    def test_narrowing_a_filter_changes_reported_shap_values(self, synthetic_checkpoint):
+class TestSubstrategyImportance:
+    def test_narrowing_a_filter_changes_reported_importance_values(self, correlated_checkpoint):
+        # synthetic_checkpoint's own net is untrained/random with no real
+        # structure, so under the leave-one-out-corrected metric (unlike the
+        # old raw-SHAP one) it honestly reads 0% everywhere regardless of
+        # filtering -- there's nothing there to detect. correlated_checkpoint
+        # has a real, engineered relationship (see _make_correlated_checkpoint)
+        # for filtering to actually change.
         at = _run_app()
-        before = _shap_values_by_key(at)
+        before = _variance_values_by_key(at, "root::split_by")
 
         at.multiselect(key="root::claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
-        observed = at.multiselect(key="root::claim_filter_values::street_norm").value
-        _batch_set(at, {"root::claim_filter_values::street_norm": observed[:1]})
+        _batch_set(at, {"root::claim_filter_values::street_norm": ["Preflop"]})
 
-        after = _shap_values_by_key(at)
+        after = _variance_values_by_key(at, "root::split_by")
         assert not at.exception
         assert before != after
 
     def test_feature_pinned_constant_by_the_filter_scores_exactly_zero(self, correlated_checkpoint):
         # Regression test: hand_category_norm is pinned to a single constant
         # value whenever street_norm falls in the Preflop bucket (see
-        # _make_correlated_checkpoint). When the SHAP background reference
-        # is drawn from the same filtered pool as the explained rows (the
-        # fix), x_i - background_i is exactly 0 for this feature at every
-        # interpolation point, so its contribution is exactly 0.0 -- not
-        # just small. Drawing background from the whole, unfiltered
-        # reservoir instead (where hand_category_norm does vary) leaves a
-        # nonzero residual here, since mean-centering alone doesn't cancel
-        # the per-row noise that mismatch introduces.
+        # _make_correlated_checkpoint). Grouping by a constant feature (see
+        # _decision_variance_explained) produces exactly the same partition
+        # as no grouping at all, so it explains exactly 0% -- not just a
+        # small amount -- once filtered to Preflop.
         at = _run_app()
-        unfiltered = _shap_values_by_key(at)
+        unfiltered = _variance_values_by_key(at, "root::split_by")
 
         at.multiselect(key="root::claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
         _batch_set(at, {"root::claim_filter_values::street_norm": ["Preflop"]})
 
         assert not at.exception
-        filtered = _shap_values_by_key(at)
-        # meaningfully important over the whole reservoir -- AdvantageNet's
-        # LayerNorm caps how dominant _make_correlated_checkpoint's single
-        # amplified weight column can make one feature look (it normalizes
-        # away the raw magnitude, not just the sign), so this precondition
-        # is calibrated to that architecture's actual ceiling rather than
-        # the much larger headroom a plain (unnormalized) MLP would allow.
-        assert unfiltered["hand_category_norm"] > 0.01
+        filtered = _variance_values_by_key(at, "root::split_by")
+        # meaningfully important over the whole reservoir, so the drop to
+        # exactly 0% below is a real change, not just noise around a value
+        # that was already near 0%.
+        assert unfiltered["hand_category_norm"] > 1.0
         assert filtered["hand_category_norm"] == 0.0  # constant, and so exactly uninformative, once filtered to Preflop
 
 
@@ -587,7 +586,7 @@ class TestGraphs:
         at.multiselect(key="root::extra_graph").set_value(["street_norm"]).run(timeout=60)
 
         cross = at.multiselect(key="root::extra::graph_cross::street_norm")
-        labels = {_strip_interaction_suffix(o) for o in cross.options}
+        labels = {_strip_variance_suffix(o) for o in cross.options}
         assert "Betting Street" not in labels  # street_norm's own label -- can't cross a feature with itself
         assert labels == {"Suited Hole Cards", "Hand Strength Tier"}
 
@@ -596,12 +595,12 @@ class TestGraphs:
         at.multiselect(key="root::extra_graph").set_value(["street_norm"]).run(timeout=60)
 
         cross = at.multiselect(key="root::extra::graph_cross::street_norm")
-        values = _interaction_values_by_label(cross)
+        values = _variance_values_by_label(cross)
         assert set(values) == {"Suited Hole Cards", "Hand Strength Tier"}
         assert all(v >= 0.0 for v in values.values())
         # Options themselves (not just the parsed values) come back
         # strongest-interaction-first.
-        ordered_values = [values[_strip_interaction_suffix(o)] for o in cross.options]
+        ordered_values = [values[_strip_variance_suffix(o)] for o in cross.options]
         assert ordered_values == sorted(ordered_values, reverse=True)
 
     def test_line_chart_has_one_trace_per_action_and_a_percent_y_axis(self, synthetic_checkpoint):
@@ -755,7 +754,7 @@ class TestSuggestedSubstrategyButtons:
         assert len(at.session_state["substrategy_children"]["root::"]) >= 2
 
     def test_max_importance_split_prefers_higher_importance_per_level(self, importance_per_level_checkpoint):
-        # Regression coverage: hand_category_norm has the higher *raw* SHAP
+        # Regression coverage: hand_category_norm has the higher *raw*
         # importance in this checkpoint (see
         # _make_importance_per_level_checkpoint), but it spreads that
         # importance across 26 observed levels against street_norm's 4, so
@@ -832,6 +831,60 @@ class TestSuggestedSubstrategyButtons:
 
         assert not at.exception
         assert at.multiselect(key="root::split_by").value == ["hole_suited", "street_norm"]
+
+    def test_best_second_split_by_and_max_interaction_split_no_op_safely_under_exact_hole_hand(
+        self, hole_hand_grid_checkpoint,
+    ):
+        # Regression coverage: Exact Hole Hand has no ordinary bucket-label
+        # column (see _build_dataframe), so _group_labels_for_rows can't
+        # jointly group it with anything else -- picking it as this node's
+        # *sole* current Split By pick (a valid, length-1 resolved_split_by)
+        # and then asking either button to pair something else with it used
+        # to raise a KeyError. _decision_variance_by_key now guards this
+        # (returns all-zero rather than pairing) -- both buttons should run
+        # without crashing.
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["hole_hand_grid_x_norm"]).run(timeout=60)
+        assert at.multiselect(key="root::split_by").value == ["hole_hand_grid_x_norm"]
+
+        at.button(key="root::add_best_second_split_by").click().run(timeout=60)
+        assert not at.exception
+
+        at.button(key="root::add_max_interaction_split").click().run(timeout=60)
+        assert not at.exception
+
+    def test_optimise_split_by_picks_the_best_pair_regardless_of_current_choice(self, overfitting_checkpoint):
+        # Regression/behavior coverage: unlike "Add best second Split By
+        # feature", this button ignores whatever Split By is currently set
+        # and searches every pair from scratch. Seeding Split By with
+        # hand_category_norm -- not part of the true best pair in this
+        # checkpoint (see _make_overfitting_checkpoint: its own net input
+        # weight is zeroed out, hole_suited and street_norm both carry real
+        # signal) -- proves it's a fresh search, not just an extension of
+        # whatever was already chosen.
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["hand_category_norm"]).run(timeout=60)
+        at.button(key="root::optimise_split_by").click().run(timeout=60)
+
+        assert not at.exception
+        assert set(at.multiselect(key="root::split_by").value) == {"hole_suited", "street_norm"}
+
+    def test_optimise_split_by_no_ops_with_fewer_than_two_candidates(self, correlated_checkpoint):
+        # Filtered to Preflop, both street_norm (by the filter itself) and
+        # hand_category_norm (by the checkpoint's own correlation -- see
+        # _make_correlated_checkpoint) are constant within this node's own
+        # claimed rows, leaving only hole_suited -- one candidate, not
+        # enough to form a pair.
+        at = _run_app()
+        c0 = _add_substrategy(at, "root::")
+        at.multiselect(key=f"{c0}claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        _batch_set(at, {f"{c0}claim_filter_values::street_norm": ["Preflop"]})
+
+        assert at.multiselect(key=f"{c0}split_by").value == []  # inherited from root's own default
+        at.button(key=f"{c0}optimise_split_by").click().run(timeout=60)
+
+        assert not at.exception
+        assert at.multiselect(key=f"{c0}split_by").value == []
 
 
 class TestSubStrategies:
@@ -966,8 +1019,8 @@ class TestSubStrategies:
 
 class TestSplitBy:
     """Each sub-strategy's own 1-2 "Split By" features define its
-    prominent, implementable table+graph and %SHAP-explained figure (see
-    _render_substrategy)."""
+    prominent, implementable table+graph and "Decision variance explained"
+    figure (see _render_substrategy)."""
 
     def test_root_has_its_own_local_split_by_widget(self, synthetic_checkpoint):
         at = _run_app()
@@ -1015,7 +1068,7 @@ class TestSplitBy:
         charts = [c for c in at.get("plotly_chart") if f"{c0}splitby_heat::" in c.id]
         assert len(charts) == 4  # one per collapsed action group
 
-    def test_shap_explained_metric_appears_once_split_by_is_set(self, synthetic_checkpoint):
+    def test_variance_explained_metric_appears_once_split_by_is_set(self, synthetic_checkpoint):
         at = _run_app()
         c0 = _add_substrategy(at, "root::")
         assert not any(m.label == "Decision variance explained by Split By features on claimed samples" for m in at.metric)
@@ -1033,6 +1086,57 @@ class TestSplitBy:
         assert not at.exception
         assert any("Pick 1-2 Split By features" in c.value for c in at.caption)
         assert not any(m.label == "Decision variance explained by Split By features on claimed samples" for m in at.metric)
+
+
+def _feature_table(at: AppTest):
+    """The new per-sub-strategy feature-importance-and-interaction table
+    (see _render_substrategy) -- picked out of every st.dataframe on the
+    page (there are others: _render_table's own summary/counts tables) by
+    its distinctive column set."""
+    return next(
+        df.value for df in at.dataframe
+        if list(df.value.columns) == ["Feature", "Importance", "Interaction with current Split By"]
+    )
+
+
+class TestFeatureTable:
+    """The feature-importance-and-interaction table every sub-strategy
+    page shows above "Suggested sub-strategies" (see _render_substrategy) --
+    one row per display feature, always computed over this node's own
+    default_df (see _decision_variance_by_key), so it's always scoped to
+    exactly the sample currently matching this sub-strategy's own filters."""
+
+    def test_present_with_a_row_per_feature(self, synthetic_checkpoint):
+        at = _run_app()
+        table = _feature_table(at)
+        assert set(table["Feature"]) == {cfr_features.feature_label(k) for k in _FEATURE_KEYS}
+
+    def test_interaction_column_is_a_dash_with_no_split_by_chosen(self, synthetic_checkpoint):
+        at = _run_app()
+        table = _feature_table(at)
+        assert set(table["Interaction with current Split By"]) == {"—"}
+
+    def test_interaction_column_is_a_dash_for_the_chosen_split_by_feature_itself(self, synthetic_checkpoint):
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["street_norm"]).run(timeout=60)
+        table = _feature_table(at)
+        own_row = table[table["Feature"] == cfr_features.feature_label("street_norm")].iloc[0]
+        assert own_row["Interaction with current Split By"] == "—"
+
+    def test_interaction_column_is_populated_for_other_features_once_split_by_is_chosen(self, synthetic_checkpoint):
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["street_norm"]).run(timeout=60)
+        table = _feature_table(at)
+        other_row = table[table["Feature"] == cfr_features.feature_label("hole_suited")].iloc[0]
+        assert other_row["Interaction with current Split By"] != "—"
+        assert other_row["Interaction with current Split By"].endswith("%")
+
+    def test_interaction_column_is_a_dash_when_split_by_is_exact_hole_hand_alone(self, hole_hand_grid_checkpoint):
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["hole_hand_grid_x_norm"]).run(timeout=60)
+        assert not at.exception
+        table = _feature_table(at)
+        assert set(table["Interaction with current Split By"]) == {"—"}
 
 
 class TestNavigation:
@@ -1491,12 +1595,13 @@ def _make_group_relative_checkpoint(path: str, rng: np.random.Generator) -> None
     grid position (upper-right of the diagonal, matching the real "suited"
     convention -- see features.hole_hand_grid_label) -- every row preflop,
     so Exact Hole Hand's Split By is available with no claim filter first
-    needed. Regression coverage for "a sub-strategy's own SHAP view should
-    assume its parent's own Split By grouping is already priced in" (see
-    cfr_explorer._group_labels_for_rows/_render_substrategy): once a
-    parent sub-strategy splits by Exact Hole Hand, hole_suited -- fully
-    determined by it -- should score exactly 0.0000 SHAP for any
-    sub-strategy underneath, instead of sharing credit for the same signal."""
+    needed. Regression coverage for "a sub-strategy's own importance view
+    should assume its parent's own Split By grouping is already priced in"
+    (see cfr_explorer._group_labels_for_rows/_decision_variance_explained/
+    _render_substrategy): once a parent sub-strategy splits by Exact Hole
+    Hand, hole_suited -- fully determined by it -- should explain exactly
+    0% decision variance for any sub-strategy underneath, instead of
+    sharing credit for the same signal."""
     feature_dim = len(cfr_features.feature_indices(_GROUP_RELATIVE_FEATURE_KEYS))
     x_idx = _GROUP_RELATIVE_FEATURE_KEYS.index("hole_hand_grid_x_norm")
     y_idx = _GROUP_RELATIVE_FEATURE_KEYS.index("hole_hand_grid_y_norm")
@@ -1536,20 +1641,21 @@ def group_relative_checkpoint(_group_relative_checkpoint_path, monkeypatch):
     return _group_relative_checkpoint_path
 
 
-class TestGroupRelativeShap:
-    """A sub-strategy's own SHAP view assumes its *parent's* own Split By
-    grouping is already priced in (see _group_labels_for_rows). In this
-    checkpoint's synthetic data, Exact Hole Hand fully determines
-    hole_suited, so once a parent splits by Exact Hole Hand, a child
-    underneath it should show exactly 0.0000 SHAP for hole_suited instead
-    of sharing credit for the same signal Exact Hole Hand already explains."""
+class TestGroupRelativeImportance:
+    """A sub-strategy's own importance view assumes its *parent's* own
+    Split By grouping is already priced in (see _group_labels_for_rows/
+    _decision_variance_explained). In this checkpoint's synthetic data,
+    Exact Hole Hand fully determines hole_suited, so once a parent splits
+    by Exact Hole Hand, a child underneath it should show exactly 0%
+    decision variance explained for hole_suited instead of sharing credit
+    for the same signal Exact Hole Hand already explains."""
 
-    def test_hole_suited_shows_nonzero_shap_with_no_parent_grouping(self, group_relative_checkpoint):
+    def test_hole_suited_shows_nonzero_importance_with_no_parent_grouping(self, group_relative_checkpoint):
         at = _run_app()
         assert not at.exception
         option = next(o for o in at.multiselect(key="root::split_by").options if o.startswith("Suited Hole Cards"))
-        shap_value = float(re.search(r"SHAP ([\d.]+)\)", option).group(1))
-        assert shap_value > 0.0
+        value = float(re.search(r"\((\d+)% variance explained\)", option).group(1))
+        assert value > 0.0
 
     def test_hole_suited_drops_to_exactly_zero_under_an_exact_hole_hand_parent_split(
         self, group_relative_checkpoint,
@@ -1560,24 +1666,24 @@ class TestGroupRelativeShap:
 
         assert not at.exception
         option = next(o for o in at.multiselect(key=f"{c0}split_by").options if o.startswith("Suited Hole Cards"))
-        assert option.endswith("(SHAP 0.0000)")
+        assert option.endswith("(0% variance explained)")
 
-    def test_a_grandchild_under_an_unrelated_parent_split_keeps_a_nonzero_shap(
+    def test_a_grandchild_under_an_unrelated_parent_split_keeps_a_nonzero_importance(
         self, group_relative_checkpoint,
     ):
         # Sanity check for the other direction: a child added under a
         # parent that has *not* split by Exact Hole Hand (root's own
         # default, unset Split By) should see hole_suited's ordinary,
-        # nonzero SHAP -- confirming the zeroing above is specifically a
-        # consequence of the parent's own grouping, not some unconditional
-        # side effect of merely being a non-root node.
+        # nonzero importance -- confirming the zeroing above is
+        # specifically a consequence of the parent's own grouping, not
+        # some unconditional side effect of merely being a non-root node.
         at = _run_app()
         c0 = _add_substrategy(at, "root::")
 
         assert not at.exception
         option = next(o for o in at.multiselect(key=f"{c0}split_by").options if o.startswith("Suited Hole Cards"))
-        shap_value = float(re.search(r"SHAP ([\d.]+)\)", option).group(1))
-        assert shap_value > 0.0
+        value = float(re.search(r"\((\d+)% variance explained\)", option).group(1))
+        assert value > 0.0
 
 
 _INTERACTION_FEATURE_KEYS = ("hole_suited", "street_norm")
