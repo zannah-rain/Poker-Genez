@@ -217,7 +217,13 @@ def _group_labels_for_rows(df: pd.DataFrame, row_index: np.ndarray, group_by_key
     center a sub-strategy's own residual per parent-group instead of over
     its whole row set, or the grouping whose own variance-explained is
     being measured in the first place (see _decision_variance_explained/
-    _decision_variance_by_key). None if `group_by_keys` is empty (no
+    _decision_variance_by_key) -- the latter can hold more than 2 keys at
+    once (e.g. this node's own 2-feature Split By plus one more candidate
+    being scored against it -- see _decision_variance_by_key's own
+    `pair_with`), even though Split By itself never holds more than
+    MAX_SPLIT_BY_FEATURES: that extra key still names a real, well-defined
+    joint grouping to measure, it just isn't one a person could adopt as
+    their own Split By pick directly. None if `group_by_keys` is empty (no
     grouping in effect, e.g. root with no parent, or a parent with no
     Split By chosen yet).
 
@@ -243,7 +249,9 @@ def _group_labels_for_rows(df: pd.DataFrame, row_index: np.ndarray, group_by_key
         labels = np.where(x < 0.0, -1, cell)
         return labels[row_index]
     columns = [df[_feature_col(key)].to_numpy().astype(str) for key in group_by_keys]
-    combined = columns[0] if len(columns) == 1 else np.char.add(np.char.add(columns[0], "|"), columns[1])
+    combined = columns[0]
+    for column in columns[1:]:
+        combined = np.char.add(np.char.add(combined, "|"), column)
     return combined[row_index]
 
 

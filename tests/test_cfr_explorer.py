@@ -443,6 +443,77 @@ def interaction_per_level_checkpoint(_interaction_per_level_checkpoint_path, mon
     return _interaction_per_level_checkpoint_path
 
 
+_THREE_WAY_FEATURE_KEYS = ("street_norm", "hole_suited", "connected_flop", "is_aggressor")
+
+
+def _make_three_way_checkpoint(path: str, rng: np.random.Generator, num_samples: int = 2000) -> None:
+    """Regression coverage for cfr_explorer._group_labels_for_rows'
+    general (non-Exact-Hole-Hand) branch, which used to combine only its
+    *first two* group_by_keys and silently drop any beyond that -- fine as
+    long as every caller passed at most 2 keys (Split By itself always
+    has), but _decision_variance_by_key's own `pair_with` can legitimately
+    hold 2 keys already (this node's own full, 2-feature Split By) plus
+    one more candidate being scored against it -- 3 keys total. With the
+    3rd silently dropped, every remaining candidate's "interaction with
+    current Split By" collapsed to re-measuring the *same* 2-key grouping
+    regardless of which candidate was asked about, so every row in the
+    feature table's own Interaction column read identically once 2 Split
+    By features were already chosen (see TestFeatureTable.
+    test_interaction_column_differs_per_candidate_with_two_split_by_features).
+
+    street_norm and hole_suited get real net input weight (the "already
+    chosen" Split By pair); connected_flop also gets real weight (a
+    genuinely informative remaining candidate); is_aggressor's own weight
+    is zeroed out (an uninformative one). Both remaining candidates are
+    plain booleans (2 observed levels each, like street_norm/hole_suited
+    themselves) specifically so their own 3-way joint partition ends up
+    the same *size* regardless of which one is asked about -- isolating
+    the bug (a structurally wrong, identical computation) from the
+    leave-one-out correction's own separate, expected sensitivity to
+    group cardinality (see _decision_variance_explained)."""
+    feature_dim = len(cfr_features.feature_indices(_THREE_WAY_FEATURE_KEYS))
+    street_idx = _THREE_WAY_FEATURE_KEYS.index("street_norm")
+    hole_idx = _THREE_WAY_FEATURE_KEYS.index("hole_suited")
+    connected_idx = _THREE_WAY_FEATURE_KEYS.index("connected_flop")
+    aggressor_idx = _THREE_WAY_FEATURE_KEYS.index("is_aggressor")
+
+    torch.manual_seed(0)  # AdvantageNet's init otherwise draws from torch's unseeded global RNG
+    net = cfr_networks.AdvantageNet(input_dim=feature_dim, hidden_sizes=(8, 8))
+    with torch.no_grad():
+        net.hidden[0].block[0].weight[:, street_idx] *= 12.0
+        net.hidden[0].block[0].weight[:, hole_idx] *= 12.0
+        net.hidden[0].block[0].weight[:, connected_idx] *= 15.0
+        net.hidden[0].block[0].weight[:, aggressor_idx] = 0.0
+    net_config = cfr_networks.AdvantageNetConfig(
+        feature_keys=_THREE_WAY_FEATURE_KEYS, hidden_sizes=(8, 8), table_size=3,
+    )
+    cfr_networks.save(net, net_config, path)
+
+    reservoir = cfr_reservoir.ReservoirBuffer(
+        capacity=num_samples, feature_dim=feature_dim, num_actions=strategy.NUM_ACTION_CATEGORIES, rng=rng,
+    )
+    for _ in range(num_samples):
+        features = rng.random(feature_dim).astype(np.float32)
+        regrets = rng.normal(size=strategy.NUM_ACTION_CATEGORIES).astype(np.float32)
+        legal_mask = rng.random(strategy.NUM_ACTION_CATEGORIES) > 0.3
+        legal_mask[strategy.ACTION_CALL] = True
+        reservoir.add(features, regrets, legal_mask, float(rng.integers(1, 10)))
+    reservoir.save(path)
+
+
+@pytest.fixture(scope="module")
+def _three_way_checkpoint_path(tmp_path_factory) -> str:
+    path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_three_way_checkpoint")), "checkpoint")
+    _make_three_way_checkpoint(path, np.random.default_rng(0))
+    return path
+
+
+@pytest.fixture
+def three_way_checkpoint(_three_way_checkpoint_path, monkeypatch):
+    monkeypatch.setenv("CFR_EXPLORER_CHECKPOINT_PATH", _three_way_checkpoint_path)
+    return _three_way_checkpoint_path
+
+
 class TestAppLoadsWithoutError:
     def test_no_exceptions_on_initial_run(self, synthetic_checkpoint):
         at = _run_app()
@@ -1137,6 +1208,32 @@ class TestFeatureTable:
         assert not at.exception
         table = _feature_table(at)
         assert set(table["Interaction with current Split By"]) == {"—"}
+
+    def test_interaction_column_differs_per_candidate_with_two_split_by_features(self, three_way_checkpoint):
+        # Regression coverage for a real bug: with 2 Split By features
+        # already chosen, _group_labels_for_rows' own general branch used
+        # to combine only the *first two* of however many group_by_keys it
+        # was given, silently dropping any 3rd -- so every remaining
+        # candidate's own "interaction with current Split By" collapsed to
+        # re-measuring the *same* 2-key grouping regardless of which
+        # candidate was actually asked about, reading identically for
+        # every row. connected_flop carries real signal here and
+        # is_aggressor doesn't (see _make_three_way_checkpoint) -- their
+        # own values should differ.
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["street_norm", "hole_suited"]).run(timeout=60)
+        assert not at.exception
+
+        table = _feature_table(at)
+        connected_value = table[table["Feature"] == cfr_features.feature_label("connected_flop")].iloc[0][
+            "Interaction with current Split By"
+        ]
+        aggressor_value = table[table["Feature"] == cfr_features.feature_label("is_aggressor")].iloc[0][
+            "Interaction with current Split By"
+        ]
+        assert connected_value != "—"
+        assert aggressor_value != "—"
+        assert connected_value != aggressor_value
 
 
 class TestNavigation:
