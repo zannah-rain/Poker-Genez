@@ -60,6 +60,7 @@ meaningful to plot otherwise.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import uuid
 
@@ -583,8 +584,31 @@ def _render_table(group_df: pd.DataFrame, split_by_keys: list[str], collapsed: b
         st.dataframe(counts)
 
 
+def _rows_digest(df: pd.DataFrame | None) -> str:
+    """Cheap, stable hash of a dataframe's own row *content* (index plus
+    every column's own values, via pandas' own vectorized row hasher --
+    materializing the actual bytes only once, not per grouping) -- the
+    actual st.cache_data key for _decision_variance_explained, since the
+    dataframes themselves (potentially huge -- default_df/parent_node_df
+    can be the whole reservoir) are excluded from Streamlit's own hashing
+    via their leading-underscore parameter names there. Hashing row
+    *positions* alone would be cheaper still, but isn't safe: two
+    unrelated dataframes (different checkpoints, or even the same
+    checkpoint reloaded) can easily share the same row-index range (e.g.
+    both just 0..n-1) while holding completely different data, which would
+    silently collide in the cache and return one sub-strategy's stale
+    result for another's query -- exactly the bug an incomplete digest
+    exists to avoid, not reintroduce. "" for None (no parent grouping in
+    effect)."""
+    if df is None:
+        return ""
+    return hashlib.sha1(pd.util.hash_pandas_object(df, index=True).to_numpy().tobytes()).hexdigest()
+
+
+@st.cache_data(show_spinner="Computing decision variance explained...")
 def _decision_variance_explained(
-    df: pd.DataFrame, default_df: pd.DataFrame, parent_node_df: pd.DataFrame | None,
+    _df: pd.DataFrame, _default_df: pd.DataFrame, _parent_node_df: pd.DataFrame | None,
+    default_digest: str, parent_digest: str,
     parent_group_by_keys: tuple[str, ...], resolved_split_by: list[str], collapsed: bool,
 ) -> float | None:
     """"Decision variance explained by Split By features on claimed
@@ -597,8 +621,15 @@ def _decision_variance_explained(
     decisions. This is the one metric the whole file uses -- see
     _decision_variance_by_key, the thin wrapper around this function every
     "Add ..." dropdown ranking, the feature table, and every "Suggested
-    sub-strategies" button is built on. None if `resolved_split_by` is
-    empty (nothing chosen yet to measure).
+    sub-strategies" button is built on. Cached (`default_digest`/
+    `parent_digest` -- see _rows_digest -- are the actual cache key
+    standing in for `_default_df`/`_parent_node_df`, which are otherwise
+    excluded from Streamlit's own hashing by their leading underscore, far
+    too expensive to hash directly at this call volume): recomputing this
+    same grouping on an unchanged sample is then instant on every rerun
+    that doesn't actually touch it, and a fresh one shows a spinner instead
+    of silently freezing the page. None if `resolved_split_by` is empty
+    (nothing chosen yet to measure).
 
     Before measuring that, each row's own predicted vector first has
     whatever the *parent's* own Split By grouping (`parent_group_by_keys`)
@@ -634,6 +665,7 @@ def _decision_variance_explained(
     it's just empty) if `default_df` has no rows, e.g. a sub-strategy
     every one of whose children together claims its entire own scope,
     leaving nothing of its own "default behaviour" left to explain."""
+    df, default_df, parent_node_df = _df, _default_df, _parent_node_df
     if not resolved_split_by:
         return None
     if default_df.empty:
@@ -710,13 +742,16 @@ def _decision_variance_by_key(
     jointly group it with anything else."""
     if _HOLE_HAND_GRID_KEY in pair_with:
         return [(key, 0.0) for key in candidate_keys]
+    pool_digest = _rows_digest(pool_df)
+    parent_digest = _rows_digest(parent_node_df)
     scores = {}
     for key in candidate_keys:
         if key in pair_with:
             scores[key] = 0.0
             continue
         pct = _decision_variance_explained(
-            root_df, pool_df, parent_node_df, parent_group_by_keys, [*pair_with, key], collapsed,
+            root_df, pool_df, parent_node_df, pool_digest, parent_digest,
+            parent_group_by_keys, [*pair_with, key], collapsed,
         )
         scores[key] = pct if pct is not None else 0.0
     return sorted(scores.items(), key=lambda kv: -kv[1])
@@ -1095,11 +1130,14 @@ def _add_optimise_split_by(
     candidates = _splittable_candidates(default_df, split_by_options, ())
     if len(candidates) < 2:
         return
+    default_digest = _rows_digest(default_df)
+    parent_digest = _rows_digest(parent_node_df)
     best_pair, best_pct = None, -1.0
     for i, a in enumerate(candidates):
         for b in candidates[i + 1:]:
             pct = _decision_variance_explained(
-                root_df, default_df, parent_node_df, parent_group_by_keys, [a, b], collapsed,
+                root_df, default_df, parent_node_df, default_digest, parent_digest,
+                parent_group_by_keys, [a, b], collapsed,
             )
             if pct is not None and pct > best_pct:
                 best_pair, best_pct = [a, b], pct
@@ -1384,7 +1422,8 @@ def _render_substrategy(
 
         if resolved_split_by:
             pct = _decision_variance_explained(
-                root_df, default_df, parent_node_df, parent_group_by_keys, resolved_split_by, collapsed,
+                root_df, default_df, parent_node_df, _rows_digest(default_df), _rows_digest(parent_node_df),
+                parent_group_by_keys, resolved_split_by, collapsed,
             )
             st.metric("Decision variance explained by Split By features on claimed samples", f"{pct:.0f}%")
         else:
