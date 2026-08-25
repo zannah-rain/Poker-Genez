@@ -38,6 +38,56 @@ class TestCapacity:
         assert list(buf.features[:4, 0]) == [0.0, 1.0, 2.0, 3.0]
 
 
+class TestGrow:
+    def test_raises_capacity_and_preserves_existing_samples(self):
+        buf = _make_buffer(capacity=5)
+        for i in range(5):
+            _add(buf, i)
+        buf.grow(8)
+        assert buf.capacity == 8
+        assert buf.size == 5  # unchanged -- growing adds empty capacity, not new samples
+        assert buf.n_seen == 5
+        assert list(buf.features[:5, 0]) == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+    def test_no_op_when_new_capacity_is_not_larger(self):
+        buf = _make_buffer(capacity=5)
+        for i in range(5):
+            _add(buf, i)
+        buf.grow(5)  # equal
+        assert buf.capacity == 5
+        buf.grow(3)  # smaller
+        assert buf.capacity == 5
+        assert list(buf.features[:5, 0]) == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+    def test_grown_buffer_fills_new_slots_before_replacing_again(self):
+        # A full buffer that's been grown should behave exactly like a
+        # fresh, never-full buffer of the new capacity: it keeps accepting
+        # every new sample in order (no probabilistic replacement) until
+        # the *new* capacity is reached.
+        buf = _make_buffer(capacity=3)
+        for i in range(3):
+            _add(buf, i)
+        buf.grow(6)
+        for i in range(3, 6):
+            _add(buf, i)
+        assert buf.size == 6
+        assert buf.n_seen == 6
+        assert list(buf.features[:6, 0]) == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+
+    def test_grown_buffer_still_round_trips_through_save_load(self):
+        buf = _make_buffer(capacity=3)
+        for i in range(3):
+            _add(buf, i)
+        buf.grow(7)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = os.path.join(tmp_dir, "checkpoint")
+            buf.save(path)
+            loaded = ReservoirBuffer.load(path, rng=np.random.default_rng(1))
+        assert loaded.capacity == 7
+        assert loaded.size == 3
+        assert list(loaded.features[:3, 0]) == [0.0, 1.0, 2.0]
+
+
 class TestUniformReplacement:
     def test_every_slot_eventually_gets_replaced(self):
         buf = _make_buffer(capacity=8, rng_seed=1)

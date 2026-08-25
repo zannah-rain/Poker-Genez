@@ -83,6 +83,45 @@ class TestReloadCheckpoint:
         assert optimizer_state is None
         assert completed_iterations == 0
 
+    def test_requested_capacity_larger_than_reloaded_reservoir_grows_it(self, tmp_path):
+        # Regression coverage: requesting *more* --reservoir-capacity than
+        # a reloaded reservoir was saved with should grow that reservoir to
+        # match (see ReservoirBuffer.grow), not silently discard the extra
+        # requested capacity by falling back to the smaller saved one.
+        feature_keys = ("hand_category_norm", "street_norm")
+        small_config = DeepCFRConfig(feature_keys=feature_keys, hidden_sizes=(8,), table_size=2, reservoir_capacity=10)
+        trainer = Trainer.new(small_config, np.random.default_rng(0))
+        checkpoint_path = str(tmp_path / "checkpoint_latest")
+        trainer.save(checkpoint_path)
+
+        requested_config = DeepCFRConfig(
+            feature_keys=feature_keys, hidden_sizes=(8,), table_size=2, reservoir_capacity=50,
+        )
+        net, reservoir, optimizer_state, completed_iterations, out_config = _reload_checkpoint(
+            checkpoint_path, True, requested_config, np.random.default_rng(0),
+        )
+        assert reservoir.capacity == 50
+        assert out_config.reservoir_capacity == 50
+
+    def test_requested_capacity_smaller_than_reloaded_reservoir_keeps_the_larger_one(self, tmp_path):
+        # The other direction is unchanged: shrinking would mean discarding
+        # already-collected samples, so the reloaded reservoir's own
+        # (larger) capacity wins instead of the smaller request.
+        feature_keys = ("hand_category_norm", "street_norm")
+        large_config = DeepCFRConfig(feature_keys=feature_keys, hidden_sizes=(8,), table_size=2, reservoir_capacity=50)
+        trainer = Trainer.new(large_config, np.random.default_rng(0))
+        checkpoint_path = str(tmp_path / "checkpoint_latest")
+        trainer.save(checkpoint_path)
+
+        requested_config = DeepCFRConfig(
+            feature_keys=feature_keys, hidden_sizes=(8,), table_size=2, reservoir_capacity=10,
+        )
+        net, reservoir, optimizer_state, completed_iterations, out_config = _reload_checkpoint(
+            checkpoint_path, True, requested_config, np.random.default_rng(0),
+        )
+        assert reservoir.capacity == 50
+        assert out_config.reservoir_capacity == 50
+
 
 class TestResumeContinuesIterationNumbering:
     def test_resumed_run_continues_the_iteration_count_instead_of_restarting_at_one(self, tmp_path, monkeypatch, capsys):

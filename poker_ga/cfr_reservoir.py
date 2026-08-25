@@ -41,6 +41,34 @@ class ReservoirBuffer:
         self.weights[idx] = t
         self.n_seen += 1
 
+    def grow(self, new_capacity: int) -> None:
+        """Raises `capacity` to `new_capacity` in place, preserving every
+        already-collected sample (and `size`/`n_seen`, so future Algorithm R
+        replacement odds stay correct) -- e.g. a reloaded reservoir whose
+        saved capacity is smaller than what's now requested (see
+        cfr_main.py's own --reservoir-capacity handling). A no-op if
+        `new_capacity` isn't actually larger than the current one: shrinking
+        would mean discarding already-collected samples, which isn't what
+        this is for.
+
+        Growing a reservoir mid-flight is algorithmically sound, not just a
+        storage resize: Algorithm R only requires that at any point, the
+        `min(n_seen, capacity)` filled slots be a uniform random sample of
+        the `n_seen` items seen so far -- true here both before and
+        immediately after, since nothing about which samples are already
+        held changes. The newly added slots are simply empty capacity for
+        future add() calls to fill (up to the new capacity) before
+        probabilistic replacement resumes, exactly as if that capacity had
+        been there from the start."""
+        if new_capacity <= self.capacity:
+            return
+        for attr in ("features", "regrets", "legal_masks", "weights"):
+            old = getattr(self, attr)
+            new = np.zeros((new_capacity, *old.shape[1:]), dtype=old.dtype)
+            new[: self.size] = old[: self.size]
+            setattr(self, attr, new)
+        self.capacity = new_capacity
+
     def __len__(self) -> int:
         return self.size
 

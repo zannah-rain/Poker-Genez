@@ -262,11 +262,18 @@ def _reload_checkpoint(
                 f"Reloaded reservoir from {checkpoint_path} "
                 f"({reservoir.size}/{reservoir.capacity} samples, {reservoir.n_seen} seen total)."
             )
-            if reservoir.capacity != config.reservoir_capacity:
+            if config.reservoir_capacity > reservoir.capacity:
+                print(
+                    f"Requested --reservoir-capacity ({config.reservoir_capacity}) exceeds the reloaded "
+                    f"reservoir's own capacity ({reservoir.capacity}) -- growing it to match rather than "
+                    "leaving the extra requested capacity unused."
+                )
+                reservoir.grow(config.reservoir_capacity)
+            elif reservoir.capacity != config.reservoir_capacity:
                 print(
                     f"Warning: reloaded reservoir's capacity ({reservoir.capacity}) differs from the "
                     f"requested --reservoir-capacity ({config.reservoir_capacity}) -- using the "
-                    "reservoir's own capacity instead."
+                    "reservoir's own (larger) capacity instead."
                 )
                 config.reservoir_capacity = reservoir.capacity
     else:
