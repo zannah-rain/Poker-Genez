@@ -7,8 +7,8 @@ import torch
 
 import strategy
 from cfr_networks import (
-    AdvantageNet, AdvantageNetConfig, _normalized_mean_abs_shap, _validity_codes, clone, load,
-    mean_shap_contributions_for_samples, save,
+    AdvantageNet, AdvantageNetConfig, _normalized_mean_abs_shap, _validity_codes, clone, interaction_strength_for_feature,
+    load, mean_shap_contributions_for_samples, pairwise_interaction_strength, save,
 )
 from cfr_reservoir import ReservoirBuffer
 from features import MASKED
@@ -360,3 +360,97 @@ class TestMeanShapContributionsForSamplesExplainGroupLabels:
         assert set(with_explicit_none) == set(without_the_argument)
         for key in with_explicit_none:
             assert with_explicit_none[key] == pytest.approx(without_the_argument[key], abs=0.05)
+
+
+class TestPairwiseInteractionStrength:
+    _KEYS = ("hand_category_norm", "street_norm", "spr_norm", "pot_type_norm")
+
+    def _train_net(self, target_fn, n=2000, hidden=(24, 24), steps=800, seed=0):
+        rng = np.random.default_rng(seed)
+        X = rng.random((n, 4)).astype(np.float32)
+        y = target_fn(X).astype(np.float32)
+        y = np.stack([y, y], axis=1)  # 2 output actions, both driven by the same target
+
+        torch.manual_seed(seed)
+        net = AdvantageNet(input_dim=4, hidden_sizes=hidden, output_dim=2, dropout=0.0)
+        optimizer = torch.optim.Adam(net.parameters(), lr=2e-3, weight_decay=1e-5)
+        Xt, yt = torch.from_numpy(X), torch.from_numpy(y)
+        net.train()
+        train_rng = np.random.default_rng(seed)
+        for _ in range(steps):
+            idx = train_rng.integers(0, n, size=256)
+            pred = net(Xt[idx])
+            loss = ((pred - yt[idx]) ** 2).mean()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        net.eval()
+        return net, X
+
+    def test_zero_for_an_additively_separable_target(self):
+        # No x0*x1 cross term at all -- Delta_01 should cancel to ~0 (see
+        # pairwise_interaction_strength's own docstring for why an
+        # additively separable target does that exactly, in the limit of a
+        # perfect fit).
+        net, X = self._train_net(lambda X: 10.0 * X[:, 0] + 5.0 * X[:, 1] + X[:, 2])
+        interaction, _weight = pairwise_interaction_strength(
+            net, X, X, self._KEYS, np.random.default_rng(1), sample_size=60, background_size=15,
+        )
+        assert interaction[0, 1] == pytest.approx(0.0, abs=0.1)
+
+    def test_higher_for_a_genuinely_interacting_pair_than_every_other_pair(self):
+        net, X = self._train_net(lambda X: 10.0 * X[:, 0] * X[:, 1])  # pure interaction, no main effects at all
+        interaction, _weight = pairwise_interaction_strength(
+            net, X, X, self._KEYS, np.random.default_rng(1), sample_size=60, background_size=15,
+        )
+        other_pairs = [
+            interaction[i, j] for i in range(4) for j in range(4) if i < j and {i, j} != {0, 1}
+        ]
+        assert interaction[0, 1] > max(other_pairs) * 2
+
+    def test_matrix_is_symmetric_with_zero_diagonal(self):
+        net = AdvantageNet(input_dim=4, hidden_sizes=(8,))
+        features = _filled_reservoir(capacity=30, feature_dim=4, rng=np.random.default_rng(0)).features
+        interaction, _weight = pairwise_interaction_strength(
+            net, features, features, self._KEYS, np.random.default_rng(1), sample_size=10, background_size=5,
+        )
+        assert np.allclose(interaction, interaction.T)
+        assert np.allclose(np.diag(interaction), 0.0)
+
+
+class TestInteractionStrengthForFeature:
+    _KEYS = ("hand_category_norm", "street_norm", "spr_norm", "pot_type_norm")
+
+    def test_empty_pool_returns_one_entry_per_other_feature_at_zero(self):
+        net = AdvantageNet(input_dim=4, hidden_sizes=(8,))
+        empty = np.zeros((0, 4), dtype=np.float32)
+        result = interaction_strength_for_feature(net, empty, empty, self._KEYS, "street_norm", np.random.default_rng(0))
+        assert sorted(k for k, _ in result) == sorted(k for k in self._KEYS if k != "street_norm")
+        assert all(v == 0.0 for _, v in result)
+
+    def test_agrees_with_pairwise_interaction_strengths_own_row(self):
+        rng = np.random.default_rng(0)
+        net = AdvantageNet(input_dim=4, hidden_sizes=(16, 16))
+        features = _filled_reservoir(capacity=200, feature_dim=4, rng=rng).features
+        focus_key, focus_idx = self._KEYS[1], 1
+
+        full_matrix, _weight = pairwise_interaction_strength(
+            net, features, features, self._KEYS, np.random.default_rng(1), sample_size=40, background_size=10,
+        )
+        one_row = dict(interaction_strength_for_feature(
+            net, features, features, self._KEYS, focus_key, np.random.default_rng(1),
+            sample_size=40, background_size=10,
+        ))
+        for i, key in enumerate(self._KEYS):
+            if key == focus_key:
+                continue
+            assert one_row[key] == pytest.approx(full_matrix[focus_idx, i], abs=1e-9)
+
+    def test_sorted_descending(self):
+        net = AdvantageNet(input_dim=4, hidden_sizes=(8,))
+        features = _filled_reservoir(capacity=30, feature_dim=4, rng=np.random.default_rng(0)).features
+        result = interaction_strength_for_feature(
+            net, features, features, self._KEYS, "street_norm", np.random.default_rng(1),
+        )
+        values = [v for _, v in result]
+        assert values == sorted(values, reverse=True)

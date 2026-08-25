@@ -304,6 +304,30 @@ def _shap_importance_for_rows(
     return sorted(((key, folded.get(key, 0.0)) for key in display_keys), key=lambda kv: -kv[1])
 
 
+@st.cache_data(show_spinner="Ranking cross-features by interaction strength...")
+def _interaction_strength_for_key(
+    checkpoint_path: str, max_samples: int, row_digest: str, _row_index: np.ndarray, focus_key: str,
+) -> list[tuple[str, float]]:
+    """Mean absolute pairwise interaction effect (see
+    cfr_networks.interaction_strength_for_feature) between `focus_key` and
+    every other net-input feature, over the rows at `_row_index` (a graphed
+    feature's own current `filtered` pool -- see _render_graphs). Unlike
+    _shap_importance_for_rows, this needs no parent-grouping correction: the
+    underlying Delta_ij term already isolates the interaction between
+    exactly two features, unaffected by any other feature's (however
+    dominant) own additive effect -- see that function's own docstring.
+    Self-referential (background = the same pool as explain), same as
+    _shap_importance_for_rows' own root-node case."""
+    net, net_config, _reservoir = _load_checkpoint(checkpoint_path)
+    if len(_row_index) == 0:
+        return [(key, 0.0) for key in net_config.feature_keys if key != focus_key]
+    _df, raw_features = _build_dataframe(checkpoint_path, max_samples)
+    pool = raw_features[_row_index]
+    return cfr_networks.interaction_strength_for_feature(
+        net, pool, pool, net_config.feature_keys, focus_key, np.random.default_rng(0),
+    )
+
+
 def _feature_col(key: str) -> str:
     return _FEATURE_COL_PREFIX + key
 
@@ -525,15 +549,18 @@ def _hole_hand_grid_figures(df: pd.DataFrame) -> list[go.Figure]:
 
 
 def _render_graphs(
-    filtered: pd.DataFrame, graph_keys: list[str], display_keys: list[str], collapsed: bool, key_prefix: str = "",
+    filtered: pd.DataFrame, graph_keys: list[str], display_keys: list[str], collapsed: bool,
+    checkpoint_path: str, max_samples: int, key_prefix: str = "",
 ) -> None:
     """One line chart per feature picked via a sub-strategy's own local
     "Add graph" control (see _render_substrategy), each paired with a
-    multiselect of other features to "cross" it with -- every feature
-    picked there adds its own row of 4 heatmaps (this graphed feature as
-    the x axis, the picked feature as the y axis, one heatmap per
-    simplified action rate). Exact Hole Hand (_HOLE_HAND_GRID_KEY) is the
-    one exception: inherently 2D already, it renders its own fixed set of
+    multiselect of other features to "cross" it with, ranked strongest-
+    interaction-first and labeled with that strength (see
+    cfr_networks.interaction_strength_for_feature/_interaction_strength_for_key)
+    -- every feature picked there adds its own row of 4 heatmaps (this
+    graphed feature as the x axis, the picked feature as the y axis, one
+    heatmap per simplified action rate). Exact Hole Hand (_HOLE_HAND_GRID_KEY)
+    is the one exception: inherently 2D already, it renders its own fixed set of
     heatmaps in place of the line chart, with no "cross" multiselect (and
     is never itself offered as something else's cross target -- it has no
     ordinary bucket-label column to pivot on, see _build_dataframe).
@@ -561,13 +588,28 @@ def _render_graphs(
             continue
 
         other_keys = [k for k in display_keys if k != key and k != _HOLE_HAND_GRID_KEY]
+        row_index = filtered.index.to_numpy()
+        interaction = _interaction_strength_for_key(
+            checkpoint_path, max_samples, _row_digest(row_index), row_index, key,
+        )
+        interaction_by_key = dict(interaction)
+        # Strongest-interaction-first, restricted to (and keeping) every
+        # option other_keys itself offers -- interaction's own order
+        # otherwise ranges over every net-input feature (incl. ones not
+        # offered here, e.g. linked children -- see cfr_networks.
+        # interaction_strength_for_feature).
+        ranked_other_keys = [k for k, _ in interaction if k in other_keys]
+
+        def _cross_option_label(k: str) -> str:
+            return f"{cfr_features.feature_label(k)}  (Interaction {interaction_by_key.get(k, 0.0):.4f})"
+
         col_controls, col_chart = st.columns([1, 3])
         with col_controls:
             st.markdown(f"**{cfr_features.feature_label(key)}**")
             cross_keys = _sticky_multiselect(
                 "Cross with other features (adds heatmaps below)",
-                other_keys, key=f"{key_prefix}graph_cross::{key}", default=[],
-                format_func=cfr_features.feature_label,
+                ranked_other_keys, key=f"{key_prefix}graph_cross::{key}", default=[],
+                format_func=_cross_option_label,
             )
         with col_chart:
             st.plotly_chart(_line_chart_figure(filtered, key, collapsed), key=f"{key_prefix}graph_chart::{key}")
@@ -1157,7 +1199,7 @@ def _render_substrategy(
     for table_key in extra_table_keys:
         st.caption(f"Extra table: {cfr_features.feature_label(table_key)}")
         _render_table(default_df, [table_key], collapsed)
-    _render_graphs(default_df, extra_graph_keys, display_keys, collapsed, f"{key_prefix}extra::")
+    _render_graphs(default_df, extra_graph_keys, display_keys, collapsed, checkpoint_path, max_samples, f"{key_prefix}extra::")
 
 
 def _shorthand_description(key_prefix: str) -> str:

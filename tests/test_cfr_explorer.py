@@ -28,6 +28,26 @@ def _strip_shap_suffix(option: str) -> str:
     return re.sub(r"\s+\(SHAP [\d.]+\)$", "", option)
 
 
+def _strip_interaction_suffix(option: str) -> str:
+    """A "Cross with other features" dropdown option's plain feature
+    label, with its "  (Interaction 0.0000)" suffix (see _render_graphs)
+    removed."""
+    return re.sub(r"\s+\(Interaction [\d.]+\)$", "", option)
+
+
+def _interaction_values_by_label(widget) -> dict[str, float]:
+    """label -> interaction-strength value read off a "Cross with other
+    features" multiselect's own "(Interaction 0.0000)"-suffixed options
+    (see _render_graphs)."""
+    values = {}
+    for option in widget.options:
+        match = re.match(r"^(.*)  \(Interaction ([\d.]+)\)$", option)
+        if match:
+            label, value = match.groups()
+            values[label] = float(value)
+    return values
+
+
 def _option_labels(widget) -> set[str]:
     """The plain feature labels a SHAP-suffixed multiselect widget
     currently offers (see _strip_shap_suffix) -- AppTest's own `.options`
@@ -354,8 +374,22 @@ class TestGraphs:
         at.multiselect(key="root::extra_graph").set_value(["street_norm"]).run(timeout=60)
 
         cross = at.multiselect(key="root::extra::graph_cross::street_norm")
-        assert "Betting Street" not in cross.options  # street_norm's own label -- can't cross a feature with itself
-        assert set(cross.options) == {"Suited Hole Cards", "Hand Strength Tier"}
+        labels = {_strip_interaction_suffix(o) for o in cross.options}
+        assert "Betting Street" not in labels  # street_norm's own label -- can't cross a feature with itself
+        assert labels == {"Suited Hole Cards", "Hand Strength Tier"}
+
+    def test_cross_dropdown_options_are_labeled_with_interaction_strength_and_ranked_by_it(self, synthetic_checkpoint):
+        at = _run_app()
+        at.multiselect(key="root::extra_graph").set_value(["street_norm"]).run(timeout=60)
+
+        cross = at.multiselect(key="root::extra::graph_cross::street_norm")
+        values = _interaction_values_by_label(cross)
+        assert set(values) == {"Suited Hole Cards", "Hand Strength Tier"}
+        assert all(v >= 0.0 for v in values.values())
+        # Options themselves (not just the parsed values) come back
+        # strongest-interaction-first.
+        ordered_values = [values[_strip_interaction_suffix(o)] for o in cross.options]
+        assert ordered_values == sorted(ordered_values, reverse=True)
 
     def test_line_chart_has_one_trace_per_action_and_a_percent_y_axis(self, synthetic_checkpoint):
         at = _run_app()
