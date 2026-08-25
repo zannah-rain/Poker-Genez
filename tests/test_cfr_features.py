@@ -103,6 +103,23 @@ class TestBucketLabel:
         # still nearest-point-match rather than being treated as masked.
         assert cfr_features.bucket_label("street_norm", -1.0) == "Preflop"
 
+    def test_zero_bucket_is_exact_matches_a_true_zero_reading(self):
+        assert cfr_features.bucket_label("call_amount_norm", 0.0) == "No bet to call"
+
+    def test_zero_bucket_is_exact_excludes_a_small_nonzero_reading(self):
+        # Regression test: 0.05 is numerically closer to the 0.0 point
+        # ("No bet to call") than to 0.2 ("Call is 1/4 pot"), but a call of
+        # 1/20 pot is still a real bet -- plain nearest-point matching used
+        # to lump it in with "No bet to call" anyway. zero_bucket_is_exact
+        # (see features.FeatureSpec) excludes that point for any nonzero
+        # reading, so it should land on the nearest *real* bucket instead.
+        assert cfr_features.bucket_label("call_amount_norm", 0.05) == "Call is 1/4 pot"
+
+    def test_zero_bucket_is_exact_still_nearest_point_matches_among_the_rest(self):
+        assert cfr_features.bucket_label("call_amount_norm", 0.2) == "Call is 1/4 pot"
+        assert cfr_features.bucket_label("call_amount_norm", 0.19) == "Call is 1/4 pot"
+        assert cfr_features.bucket_label("call_amount_norm", 1.0) == "Overbet (more than a full pot, clipped)"
+
 
 class TestBucketLabels:
     def test_vectorized_matches_scalar_per_element(self):
@@ -120,6 +137,16 @@ class TestBucketLabels:
         values = np.array([0.0, 0.5, 1.0, features.MASKED])
         labels = cfr_features.bucket_labels("straight_draw_norm", values)
         assert list(labels) == ["No Straight Draw", "Gutshot", "Open Ended Straight Draw", cfr_features.MASKED_LABEL]
+
+    def test_zero_bucket_is_exact_vectorized_matches_scalar_per_element(self):
+        values = np.array([0.0, 0.05, 0.2, 0.19, 1.0])
+        labels = cfr_features.bucket_labels("call_amount_norm", values)
+        expected = [cfr_features.bucket_label("call_amount_norm", v) for v in values]
+        assert list(labels) == expected
+        assert list(labels) == [
+            "No bet to call", "Call is 1/4 pot", "Call is 1/4 pot", "Call is 1/4 pot",
+            "Overbet (more than a full pot, clipped)",
+        ]
 
 
 class TestBucketCategories:

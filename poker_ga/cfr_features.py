@@ -69,18 +69,26 @@ def bucket_label(key: str, value: float) -> str:
     `maskable` feature's features.MASKED reading, MASKED_LABEL; otherwise,
     for a boolean feature, `spec.label`/f"Not {spec.label}"; otherwise
     the label of the nearest point in the feature's own
-    features.FeatureSpec.value_table (e.g. 0.33 -> "Flop" for street_norm).
-    Reuses features.py's existing human-facing names for each value rather
-    than inventing a second labeling scheme -- used by cfr_explorer.py to
-    turn raw reservoir columns into filter/split/table values a person can
-    read."""
+    features.FeatureSpec.value_table (e.g. 0.33 -> "Flop" for street_norm)
+    -- except for a `zero_bucket_is_exact` feature (e.g. call_amount_norm),
+    where the 0.0 point only ever matches an exact 0.0 reading; every other
+    value matches among the *remaining* points instead, so a small nonzero
+    reading is never absorbed into a bucket that's meant to mean "none at
+    all" purely for being numerically closest to it. Reuses features.py's
+    existing human-facing names for each value rather than inventing a
+    second labeling scheme -- used by cfr_explorer.py to turn raw
+    reservoir columns into filter/split/table values a person can read."""
     spec = _SPEC_BY_KEY[key]
     if spec.maskable and value == MASKED:
         return MASKED_LABEL
     if spec.kind == "boolean":
         return spec.label if value >= 0.5 else f"Not {spec.label}"
     points = np.array([p for p, _ in spec.value_table])
-    nearest = int(np.argmin(np.abs(points - value)))
+    if spec.zero_bucket_is_exact and value != 0.0:
+        candidate_idx = np.flatnonzero(points != 0.0)
+        nearest = candidate_idx[np.argmin(np.abs(points[candidate_idx] - value))]
+    else:
+        nearest = int(np.argmin(np.abs(points - value)))
     return spec.value_table[nearest][1]
 
 
@@ -133,16 +141,25 @@ def fold_child_contributions(contributions: list[tuple[str, float]]) -> list[tup
 
 def bucket_labels(key: str, values: np.ndarray) -> np.ndarray:
     """Vectorized bucket_label over a whole array of one feature's raw
-    values -- the same masked/nearest-point/boolean logic, without a Python
-    loop per row (cfr_explorer.py calls this once per feature for the whole
-    loaded reservoir)."""
+    values -- the same masked/nearest-point/boolean/zero_bucket_is_exact
+    logic (see bucket_label's own docstring), without a Python loop per row
+    (cfr_explorer.py calls this once per feature for the whole loaded
+    reservoir)."""
     spec = _SPEC_BY_KEY[key]
     if spec.kind == "boolean":
         labels = np.where(values >= 0.5, spec.label, f"Not {spec.label}")
     else:
         points = np.array([p for p, _ in spec.value_table])
         table_labels = np.array([label for _, label in spec.value_table])
-        nearest = np.argmin(np.abs(values[:, None] - points[None, :]), axis=1)
+        distances = np.abs(values[:, None] - points[None, :])
+        if spec.zero_bucket_is_exact:
+            zero_idx = np.flatnonzero(points == 0.0)
+            # Disqualify the exact-zero point as a nearest-match candidate
+            # for every row that isn't itself exactly 0.0 (an infinite
+            # distance can never win an argmin) -- a 0.0-reading row still
+            # matches it exactly (distance 0), so it's untouched there.
+            distances[np.ix_(values != 0.0, zero_idx)] = np.inf
+        nearest = np.argmin(distances, axis=1)
         labels = table_labels[nearest]
     if spec.maskable:
         labels = np.where(values == MASKED, MASKED_LABEL, labels)

@@ -57,6 +57,18 @@ class FeatureSpec:
     # instead of nearest-point-matching it into whichever real bucket
     # happens to sit closest to a negative number.
     maskable: bool = False
+    # True for a categorical/continuous feature whose value_table's own
+    # 0.0 point is a genuinely distinct, discrete state (e.g. "no bet to
+    # call at all") rather than just the low end of a continuous scale.
+    # Plain nearest-point matching would otherwise silently absorb small
+    # *nonzero* readings into that same bucket purely because they land
+    # closer to 0.0 than to the next real point -- see call_amount_norm,
+    # where a call of up to 1/8 pot would otherwise read as "No bet to
+    # call" alongside a literal check. With this set, cfr_features.py's
+    # bucket_label only ever returns the 0.0 point's own label for an
+    # exact 0.0 reading; every other value matches among the *remaining*
+    # points instead, never that one.
+    zero_bucket_is_exact: bool = False
 
 
 # Sentinel for a `maskable` FeatureSpec's reading whenever the situation
@@ -529,6 +541,7 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "noticeably bigger than that (an overbet) clips into its own top bucket instead "
         "of being lumped in with an exactly-pot-sized bet.",
         kind="continuous", value_table=_CALL_SIZE_VALUES, group="Betting Behaviour Features",
+        zero_bucket_is_exact=True,
     ),
 
     FeatureSpec(
