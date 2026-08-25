@@ -1056,20 +1056,28 @@ def _add_max_importance_split(
     key_prefix: str, default_df: pd.DataFrame, resolved_split_by: list[str],
     default_importance: list[tuple[str, float]],
 ) -> None:
-    """"Add maximum importance split": adds one child per level of the
-    single highest-SHAP-importance candidate feature (see
-    _splittable_candidates; `default_importance` is already sorted
-    strongest-first) -- the model's own single biggest remaining lever on
-    this node's default rows, whatever its relationship to the currently
-    chosen Split By happens to be (unlike _add_max_interaction_split,
-    which specifically looks for features that interact with the current
-    Split By rather than simply mattering a lot on their own). No-op if no
-    eligible candidate remains."""
+    """"Add maximum importance split": adds one child per level of
+    whichever candidate feature (see _splittable_candidates) has the
+    highest SHAP importance *per observed level* -- raw SHAP importance
+    divided by how many children claiming it would actually add (see
+    _observed_categories) -- rather than raw importance alone. A feature
+    that's a little more important overall but spreads that importance
+    across many levels asks a person to learn and remember many more
+    sub-strategies for roughly the same payoff per level; this
+    approximates "biggest remaining lever per additional sub-strategy a
+    person has to learn," not just "biggest lever, full stop" (unlike
+    _add_max_interaction_split, which specifically looks for features that
+    interact with the current Split By rather than simply mattering a lot
+    on their own). No-op if no eligible candidate remains."""
     ranked_keys = [k for k, _ in default_importance]
-    candidates = set(_splittable_candidates(default_df, ranked_keys, resolved_split_by))
-    best_key = next((k for k in ranked_keys if k in candidates), None)
-    if best_key is None:
+    importance_by_key = dict(default_importance)
+    candidates = _splittable_candidates(default_df, ranked_keys, resolved_split_by)
+    if not candidates:
         return
+    best_key = max(
+        candidates,
+        key=lambda k: importance_by_key[k] / len(_observed_categories(default_df, k)),
+    )
     _add_children_for_each_level(key_prefix, best_key, default_df, resolved_split_by)
 
 
@@ -1318,7 +1326,8 @@ def _render_substrategy(
     with suggest_cols[1]:
         st.button(
             "Add maximum importance split", key=f"{key_prefix}add_max_importance_split",
-            help="Splits on the single most important remaining feature by SHAP -- one child per level it takes.",
+            help="Splits on the remaining feature with the highest SHAP importance per observed level -- one "
+            "child per level it takes.",
             on_click=_add_max_importance_split,
             args=(key_prefix, default_df, resolved_split_by, default_importance),
         )

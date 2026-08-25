@@ -307,6 +307,59 @@ def overfitting_checkpoint(_overfitting_checkpoint_path, monkeypatch):
     return _overfitting_checkpoint_path
 
 
+def _make_importance_per_level_checkpoint(path: str, rng: np.random.Generator, num_samples: int = 600) -> None:
+    """Regression coverage for cfr_explorer._add_max_importance_split's
+    per-level normalization (see TestSuggestedSubstrategyButtons.
+    test_max_importance_split_prefers_higher_importance_per_level):
+    hand_category_norm gets a bigger net input weight than street_norm --
+    a higher *raw* SHAP importance -- but hand_category_norm has 26
+    observed levels (see cfr_features.bucket_categories) against
+    street_norm's 4, so street_norm's importance *per level* is actually
+    higher. "Add maximum importance split" should add street_norm (fewer
+    sub-strategies for a person to learn per unit of importance gained),
+    not hand_category_norm (raw-importance winner, but 26 new
+    sub-strategies for comparatively little additional payoff each).
+    hole_suited's own net input weight is zeroed out entirely so it can't
+    accidentally outscore either one."""
+    feature_dim = len(cfr_features.feature_indices(_FEATURE_KEYS))
+    hole_idx = _FEATURE_KEYS.index("hole_suited")
+    street_idx = _FEATURE_KEYS.index("street_norm")
+    hand_idx = _FEATURE_KEYS.index("hand_category_norm")
+
+    torch.manual_seed(0)  # AdvantageNet's init otherwise draws from torch's unseeded global RNG
+    net = cfr_networks.AdvantageNet(input_dim=feature_dim, hidden_sizes=(8, 8))
+    with torch.no_grad():
+        net.hidden[0].block[0].weight[:, hole_idx] = 0.0
+        net.hidden[0].block[0].weight[:, street_idx] *= 15.0
+        net.hidden[0].block[0].weight[:, hand_idx] *= 18.0
+    net_config = cfr_networks.AdvantageNetConfig(feature_keys=_FEATURE_KEYS, hidden_sizes=(8, 8), table_size=3)
+    cfr_networks.save(net, net_config, path)
+
+    reservoir = cfr_reservoir.ReservoirBuffer(
+        capacity=num_samples, feature_dim=feature_dim, num_actions=strategy.NUM_ACTION_CATEGORIES, rng=rng,
+    )
+    for _ in range(num_samples):
+        features = rng.random(feature_dim).astype(np.float32)
+        regrets = rng.normal(size=strategy.NUM_ACTION_CATEGORIES).astype(np.float32)
+        legal_mask = rng.random(strategy.NUM_ACTION_CATEGORIES) > 0.3
+        legal_mask[strategy.ACTION_CALL] = True
+        reservoir.add(features, regrets, legal_mask, float(rng.integers(1, 10)))
+    reservoir.save(path)
+
+
+@pytest.fixture(scope="module")
+def _importance_per_level_checkpoint_path(tmp_path_factory) -> str:
+    path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_importance_per_level_checkpoint")), "checkpoint")
+    _make_importance_per_level_checkpoint(path, np.random.default_rng(0))
+    return path
+
+
+@pytest.fixture
+def importance_per_level_checkpoint(_importance_per_level_checkpoint_path, monkeypatch):
+    monkeypatch.setenv("CFR_EXPLORER_CHECKPOINT_PATH", _importance_per_level_checkpoint_path)
+    return _importance_per_level_checkpoint_path
+
+
 class TestAppLoadsWithoutError:
     def test_no_exceptions_on_initial_run(self, synthetic_checkpoint):
         at = _run_app()
@@ -599,6 +652,24 @@ class TestSuggestedSubstrategyButtons:
 
         assert not at.exception
         assert len(at.session_state["substrategy_children"]["root::"]) >= 2
+
+    def test_max_importance_split_prefers_higher_importance_per_level(self, importance_per_level_checkpoint):
+        # Regression coverage: hand_category_norm has the higher *raw* SHAP
+        # importance in this checkpoint (see
+        # _make_importance_per_level_checkpoint), but it spreads that
+        # importance across 26 observed levels against street_norm's 4, so
+        # street_norm's importance *per level* is actually higher --
+        # "Add maximum importance split" should pick street_norm (fewer new
+        # sub-strategies to learn per unit of importance), not
+        # hand_category_norm (the raw-importance winner).
+        at = _run_app()
+        at.button(key="root::add_max_importance_split").click().run(timeout=60)
+
+        assert not at.exception
+        children = at.session_state["substrategy_children"]["root::"]
+        claims = at.session_state["substrategy_claims"]
+        claimed_features = {next(iter(claims[f"root::substrategy_{cid}::"])) for cid in children}
+        assert claimed_features == {"street_norm"}
 
     def test_best_second_split_by_disabled_unless_exactly_one_chosen(self, synthetic_checkpoint):
         at = _run_app()
