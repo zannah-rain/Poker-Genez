@@ -240,11 +240,22 @@ def _connectivity_label(gap: int) -> str:
 # player's overall (hole+board) high card -- folds what used to be the
 # standalone ace_high_no_pair/king_high_no_pair booleans in here instead.
 #
-# Pair (indices 3-11), weakest to strongest:
-#   Low Pair    -- pocket pair below the whole board
-#   Underpair   -- pocket pair below the board's top card, but not Low Pair
-#   Pair        -- catch-all: a preflop pocket pair (no board yet), or a
-#                  postflop pair matching a board rank outside the top 3
+# Pair (indices 3-12), weakest to strongest:
+#   Underpair   -- pocket pair strictly below every board card (e.g. 2-2 on
+#                  K-9-4 -- beats none of it)
+#   Ninja Pair  -- pocket pair below the board's top card, but beats at
+#                  least one board card (e.g. 6-6 on K-9-4 -- beats the 4,
+#                  loses to the K and 9)
+#   Bottom Pair -- a non-pocket hole card matching the board's *lowest*
+#                  distinct rank -- only distinct from Third Pair on a
+#                  board with 4+ distinct ranks (a 3-distinct-rank board's
+#                  lowest rank already *is* its 3rd highest, so that case
+#                  reads as Third Pair instead -- see _pair_bucket_offset)
+#   Pair        -- catch-all: a preflop pocket pair (no board yet), the
+#                  board already paired on its own (contributing nothing
+#                  from either hole card), or a postflop pair matching a
+#                  board rank that's none of top/second/third/bottom (the
+#                  4th-highest of 5 distinct ranks)
 #   Third Pair, Second Pair, Top Pair -- a non-pocket hole card matching
 #                  the board's 3rd/2nd/1st highest distinct rank
 #   Top Pair + Good Kicker  -- Top Pair, kicker Jack/Queen/King
@@ -252,31 +263,31 @@ def _connectivity_label(gap: int) -> str:
 #   Overpair    -- pocket pair above the whole board (the strongest
 #                  single-pair hand, hence placed right before Two Pair)
 #
-# Three of a Kind (indices 13-15): Bottom Set < Set < Top Set, by whether
+# Three of a Kind (indices 14-16): Bottom Set < Set < Top Set, by whether
 # the tripped rank is the board's lowest/other/highest distinct rank (a
 # non-pocket-pair "trips" via a paired board is treated as the plain
 # middle "Set" bucket).
 #
-# Straight (indices 16-19): Bottom Straight < Straight < Top Straight <
+# Straight (indices 17-20): Bottom Straight < Straight < Top Straight <
 # Nuts Straight, by comparing this straight's high card against every
 # straight_high any 2 hole cards could make on this board -- Nuts requires
 # also being the *top* straight AND no flush being possible for anyone
 # (fewer than 3 board cards sharing a suit), since a possible flush would
 # mean a straight -- even the best one -- isn't provably the best hand.
 #
-# Flush (indices 20-22): Flush < King High Flush < Ace High Flush, by the
+# Flush (indices 21-23): Flush < King High Flush < Ace High Flush, by the
 # flush's own high card (not this player's overall hole+board high card,
 # which can differ if the highest card isn't of the flush suit).
 _HAND_CATEGORY_VALUES = (
-    (0 / 25, "High Card"), (1 / 25, "King High"), (2 / 25, "Ace High"),
-    (3 / 25, "Low Pair"), (4 / 25, "Underpair"), (5 / 25, "Pair"),
-    (6 / 25, "Third Pair"), (7 / 25, "Second Pair"), (8 / 25, "Top Pair"),
-    (9 / 25, "Top Pair + Good Kicker"), (10 / 25, "Top Pair + Top Kicker"), (11 / 25, "Overpair"),
-    (12 / 25, "Two Pair"),
-    (13 / 25, "Bottom Set"), (14 / 25, "Set"), (15 / 25, "Top Set"),
-    (16 / 25, "Bottom Straight"), (17 / 25, "Straight"), (18 / 25, "Top Straight"), (19 / 25, "Nuts Straight"),
-    (20 / 25, "Flush"), (21 / 25, "King High Flush"), (22 / 25, "Ace High Flush"),
-    (23 / 25, "Full House"), (24 / 25, "Four of a Kind"), (25 / 25, "Straight Flush"),
+    (0 / 26, "High Card"), (1 / 26, "King High"), (2 / 26, "Ace High"),
+    (3 / 26, "Underpair"), (4 / 26, "Ninja Pair"), (5 / 26, "Bottom Pair"), (6 / 26, "Pair"),
+    (7 / 26, "Third Pair"), (8 / 26, "Second Pair"), (9 / 26, "Top Pair"),
+    (10 / 26, "Top Pair + Good Kicker"), (11 / 26, "Top Pair + Top Kicker"), (12 / 26, "Overpair"),
+    (13 / 26, "Two Pair"),
+    (14 / 26, "Bottom Set"), (15 / 26, "Set"), (16 / 26, "Top Set"),
+    (17 / 26, "Bottom Straight"), (18 / 26, "Straight"), (19 / 26, "Top Straight"), (20 / 26, "Nuts Straight"),
+    (21 / 26, "Flush"), (22 / 26, "King High Flush"), (23 / 26, "Ace High Flush"),
+    (24 / 26, "Full House"), (25 / 26, "Four of a Kind"), (26 / 26, "Straight Flush"),
 )
 _HOLE_CATEGORY_VALUES = tuple((i / 11, label) for i, label in enumerate(_HOLE_CATEGORY_LABELS))
 _HOLE_HAND_GRID_VALUES = tuple(
@@ -444,14 +455,14 @@ FEATURE_SPECS: list[FeatureSpec] = [
     FeatureSpec(
         "hand_category_norm", "Hand Strength Tier",
         "Made-hand category of the best hand available from hole cards plus the current "
-        "board, normalized to 0-1 as bucket_index / 25. Standard High Card < Pair < Two "
+        "board, normalized to 0-1 as bucket_index / 26. Standard High Card < Pair < Two "
         "Pair < Three of a Kind < Straight < Flush < Full House < Four of a Kind < "
         "Straight Flush ordering, but High Card/Pair/Three of a Kind/Straight/Flush are "
         "each split into several ordered sub-buckets instead of one flat value -- e.g. "
-        "Pair spans Low Pair, Underpair, Pair, Third Pair, Second Pair, Top Pair, Top "
-        "Pair + Good Kicker, Top Pair + Top Kicker, and Overpair, weakest to strongest, "
-        "and High Card spans High Card, King High, and Ace High -- folding in what used "
-        "to be a dozen-plus separate standalone booleans (top_pair, overpair, "
+        "Pair spans Underpair, Ninja Pair, Bottom Pair, Pair, Third Pair, Second Pair, "
+        "Top Pair, Top Pair + Good Kicker, Top Pair + Top Kicker, and Overpair, weakest "
+        "to strongest, and High Card spans High Card, King High, and Ace High -- folding "
+        "in what used to be a dozen-plus separate standalone booleans (top_pair, overpair, "
         "ace_high_no_pair, ...) directly into this ordinal scale. See "
         "_HAND_CATEGORY_VALUES for every bucket and _hand_category_bucket for exactly "
         "how each one is computed.",
@@ -913,17 +924,17 @@ def _hand_vs_board_heuristics(hole: list[Card], hand: dict, street: int) -> dict
     }
 
 
-# Base index (within hand_category_norm's 26-value table -- see
+# Base index (within hand_category_norm's 27-value table -- see
 # _HAND_CATEGORY_VALUES) where each made-hand category's sub-buckets begin.
 _HIGH_CARD_BASE_INDEX = 0
 _PAIR_BASE_INDEX = 3
-_TWO_PAIR_INDEX = 12
-_SET_BASE_INDEX = 13
-_STRAIGHT_BASE_INDEX = 16
-_FLUSH_BASE_INDEX = 20
-_FULL_HOUSE_INDEX = 23
-_QUADS_INDEX = 24
-_STRAIGHT_FLUSH_INDEX = 25
+_TWO_PAIR_INDEX = 13
+_SET_BASE_INDEX = 14
+_STRAIGHT_BASE_INDEX = 17
+_FLUSH_BASE_INDEX = 21
+_FULL_HOUSE_INDEX = 24
+_QUADS_INDEX = 25
+_STRAIGHT_FLUSH_INDEX = 26
 
 def _high_card_bucket_offset(hand: dict) -> int:
     """0-2 offset within hand_category_norm's High Card range (see
@@ -944,7 +955,7 @@ _GOOD_KICKER_RANKS = frozenset({11, 12, 13})
 
 
 def _pair_bucket_offset(hole: list[Card], board: list[Card]) -> int:
-    """0-8 offset within hand_category_norm's Pair range (see
+    """0-9 offset within hand_category_norm's Pair range (see
     _HAND_CATEGORY_VALUES, added to _PAIR_BASE_INDEX by the caller) --
     assumes cat == PAIR."""
     hole_ranks = (hole[0].rank, hole[1].rank)
@@ -953,36 +964,43 @@ def _pair_bucket_offset(hole: list[Card], board: list[Card]) -> int:
 
     if is_pocket_pair:
         if not board_ranks:
-            return 2  # preflop pocket pair -- no board yet to compare against
+            return 3  # preflop pocket pair -- no board yet to compare against
         if hole_ranks[0] > max(board_ranks):
-            return 8  # Overpair
+            return 9  # Overpair
         if hole_ranks[0] < min(board_ranks):
-            return 0  # Low Pair
-        return 1  # Underpair (below the top card, but beats at least one board card)
+            return 0  # Underpair (strictly below every board card)
+        return 1  # Ninja Pair (below the top card, but beats at least one board card)
 
     # Not a pocket pair. Usually this pair is exactly one hole card
     # rank-matching one board rank -- but the board can also already be
     # paired on its own (e.g. board 5-5-K, hole A-2), in which case neither
     # hole card matches and the pair is entirely the board's; that's not a
-    # top/second/third pair relative to either hole card, so it falls
-    # through to the generic Pair bucket below.
+    # top/second/third/bottom pair relative to either hole card, so it
+    # falls through to the generic Pair bucket below.
     distinct_board_desc = sorted(set(board_ranks), reverse=True)
     matches = [r for r in hole_ranks if r in board_ranks]
     if not matches:
-        return 2  # board itself is paired; neither hole card contributes
+        return 3  # board itself is paired; neither hole card contributes
     matched_rank = matches[0]
     if matched_rank == distinct_board_desc[0]:
         kicker = hole_ranks[1] if hole_ranks[0] == matched_rank else hole_ranks[0]
         if kicker == 14:
-            return 7  # Top Pair + Top Kicker
+            return 8  # Top Pair + Top Kicker
         if kicker in _GOOD_KICKER_RANKS:
-            return 6  # Top Pair + Good Kicker
-        return 5  # Top Pair
+            return 7  # Top Pair + Good Kicker
+        return 6  # Top Pair
     if len(distinct_board_desc) >= 2 and matched_rank == distinct_board_desc[1]:
-        return 4  # Second Pair
+        return 5  # Second Pair
     if len(distinct_board_desc) >= 3 and matched_rank == distinct_board_desc[2]:
-        return 3  # Third Pair
-    return 2  # generic Pair (4th+ pair on a wide board)
+        return 4  # Third Pair
+    # Bottom Pair -- the board's own lowest distinct rank -- only reachable
+    # (and only distinct from Third Pair) once the board has 4+ distinct
+    # ranks; on a 3-distinct-rank board the lowest rank *is* the 3rd
+    # highest, already returned above as Third Pair.
+    if len(distinct_board_desc) >= 4 and matched_rank == distinct_board_desc[-1]:
+        return 2  # Bottom Pair
+    return 3  # generic Pair (a rank that's none of top/second/third/bottom -- only
+    # possible as the 4th-highest of exactly 5 distinct board ranks)
 
 
 def _set_bucket_offset(hole: list[Card], board: list[Card]) -> int:
@@ -1058,7 +1076,7 @@ def _flush_bucket_offset(hand: dict) -> int:
 
 
 def _hand_category_bucket(hole: list[Card], board: list[Card], cat: int, hand: dict) -> int:
-    """Index into hand_category_norm's 26-value table (see
+    """Index into hand_category_norm's 27-value table (see
     _HAND_CATEGORY_VALUES) -- folds what used to be a dozen-plus standalone
     booleans (top_pair, overpair, low_pair, ace_high_no_pair, ...) directly
     into the made-hand-strength ordinal scale, plus new High Card/Set/

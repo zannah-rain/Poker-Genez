@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
         "(0 disables clipping) -- guards against the loss-spike failure mode described in "
         "cfr_train.py's _train_step.",
     )
-    p.add_argument("--reservoir-capacity", type=int, default=1_000_000)
+    p.add_argument("--reservoir-capacity", type=int, default=10_000_000)
     p.add_argument(
         "--num-equity-rollouts", type=int, default=cfr_tree.DEFAULT_NUM_EQUITY_ROLLOUTS,
         help="Terminal showdowns reached before the river (an early all-in) average this many "

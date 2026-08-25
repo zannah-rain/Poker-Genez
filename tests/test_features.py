@@ -81,39 +81,39 @@ class TestExtractFeaturesShape:
 class TestHandCategoryFeatures:
     def test_trips_hand_sets_category(self):
         # Pocket 9s matching the board's single highest card (9c) -- the
-        # best possible three of a kind on this board -- is Top Set (15/25).
+        # best possible three of a kind on this board -- is Top Set (16/26).
         situation = make_situation(
             hole=[Card.from_str("9h"), Card.from_str("9d")],
             board=[Card.from_str("9c"), Card.from_str("2s"), Card.from_str("4h")],
             street=1,
         )
         values = values_by_key(situation)
-        assert values["hand_category_norm"] == pytest.approx(15 / 25)
+        assert values["hand_category_norm"] == pytest.approx(16 / 26)
 
     def test_preflop_pocket_pair_is_a_pair(self):
         # No board yet to classify the pocket pair as over/under/low
         # against -- lands in the generic "Pair" catch-all bucket.
         situation = make_situation(hole=[Card.from_str("9h"), Card.from_str("9d")], board=[])
         values = values_by_key(situation)
-        assert values["hand_category_norm"] == pytest.approx(5 / 25)
+        assert values["hand_category_norm"] == pytest.approx(6 / 26)
 
     def test_ace_high_no_pair_is_the_ace_high_bucket(self):
         hole = [Card.from_str("Ah"), Card.from_str("2d")]
         board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("3h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["hand_category_norm"] == pytest.approx(2 / 25)
+        assert values["hand_category_norm"] == pytest.approx(2 / 26)
 
     def test_king_high_no_pair_is_the_king_high_bucket(self):
         hole = [Card.from_str("Kh"), Card.from_str("2d")]
         board = [Card.from_str("Qc"), Card.from_str("7d"), Card.from_str("3h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["hand_category_norm"] == pytest.approx(1 / 25)
+        assert values["hand_category_norm"] == pytest.approx(1 / 26)
 
     def test_queen_high_no_pair_is_the_generic_high_card_bucket(self):
         hole = [Card.from_str("Qh"), Card.from_str("2d")]
         board = [Card.from_str("Jc"), Card.from_str("7d"), Card.from_str("3h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["hand_category_norm"] == pytest.approx(0 / 25)
+        assert values["hand_category_norm"] == pytest.approx(0 / 26)
 
 
 class TestHoleCardFeatures:
@@ -420,7 +420,7 @@ class TestFlopTexture:
         assert one["suit_connection_index"] == pytest.approx(4 / 5)  # flush draw: 4 cards of one suit
         # Both hole cards + all 3 board cards = a made flush -- King high
         # (the board's own Kc), since that's the flush's own highest card.
-        assert two["hand_category_norm"] == pytest.approx(21 / 25)  # King High Flush
+        assert two["hand_category_norm"] == pytest.approx(22 / 26)  # King High Flush
 
     def test_connected_flop_without_a_straight_draw(self):
         board = [Card.from_str("5c"), Card.from_str("7d"), Card.from_str("9h")]
@@ -559,62 +559,89 @@ class TestSuitConnectionIndex:
 
 class TestHandCategoryPairBuckets:
     """Pair-strength-vs-board classification is a set of mutually exclusive
-    hand_category_norm sub-buckets (see _HAND_CATEGORY_VALUES) -- e.g. Low
-    Pair and Underpair are two distinct buckets, not overlapping booleans."""
+    hand_category_norm sub-buckets (see _HAND_CATEGORY_VALUES) -- e.g.
+    Underpair and Ninja Pair are two distinct buckets, not overlapping
+    booleans. 27 total categories now (see _pair_bucket_offset's own
+    Bottom Pair addition), so every bucket_index below is /26, not /25."""
 
     def test_top_pair_weak_kicker(self):
         hole = [Card.from_str("Kh"), Card.from_str("2d")]
         board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("3h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["hand_category_norm"] == pytest.approx(8 / 25)  # Top Pair
+        assert values["hand_category_norm"] == pytest.approx(9 / 26)  # Top Pair
 
     def test_top_pair_good_kicker(self):
         hole = [Card.from_str("Kh"), Card.from_str("Jd")]  # Jack kicker
         board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("3h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["hand_category_norm"] == pytest.approx(9 / 25)  # Top Pair + Good Kicker
+        assert values["hand_category_norm"] == pytest.approx(10 / 26)  # Top Pair + Good Kicker
 
     def test_top_pair_top_kicker(self):
         hole = [Card.from_str("Kh"), Card.from_str("Ad")]  # Ace kicker
         board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("3h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["hand_category_norm"] == pytest.approx(10 / 25)  # Top Pair + Top Kicker
+        assert values["hand_category_norm"] == pytest.approx(11 / 26)  # Top Pair + Top Kicker
 
     def test_second_pair(self):
         hole = [Card.from_str("7h"), Card.from_str("2d")]
         board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("3h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["hand_category_norm"] == pytest.approx(7 / 25)  # Second Pair
+        assert values["hand_category_norm"] == pytest.approx(8 / 26)  # Second Pair
 
     def test_third_pair(self):
+        # Also disambiguation coverage: on an exactly-3-distinct-rank board,
+        # the lowest rank *is* the 3rd highest -- this must read as Third
+        # Pair, not Bottom Pair (see test_bottom_pair_needs_four_distinct_ranks
+        # for the corresponding 4-distinct-rank case that *does* read as
+        # Bottom Pair).
         hole = [Card.from_str("3h"), Card.from_str("2d")]
         board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("3c")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["hand_category_norm"] == pytest.approx(6 / 25)  # Third Pair
+        assert values["hand_category_norm"] == pytest.approx(7 / 26)  # Third Pair
+
+    def test_bottom_pair_needs_four_distinct_ranks(self):
+        # Board has 4 distinct ranks (K, 9, 7, 3) -- matching the lowest (3)
+        # is now genuinely distinguishable from Third Pair (7).
+        hole = [Card.from_str("3h"), Card.from_str("2d")]
+        board = [Card.from_str("Kc"), Card.from_str("9d"), Card.from_str("7h"), Card.from_str("3c")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=2))
+        assert values["hand_category_norm"] == pytest.approx(5 / 26)  # Bottom Pair
+
+    def test_pair_on_the_gap_rank_of_a_five_distinct_rank_board(self):
+        # 5 distinct ranks (K, Q, 9, 7, 3) -- Top/Second/Third cover the top
+        # 3, Bottom covers the lowest (3), leaving the 4th-highest (7)
+        # covered by neither -- falls through to the generic Pair bucket.
+        hole = [Card.from_str("7d"), Card.from_str("2h")]
+        board = [
+            Card.from_str("Kc"), Card.from_str("Qd"), Card.from_str("9h"),
+            Card.from_str("7s"), Card.from_str("3c"),
+        ]
+        values = values_by_key(make_situation(hole=hole, board=board, street=3))
+        assert values["hand_category_norm"] == pytest.approx(6 / 26)  # generic Pair
 
     def test_overpair(self):
         hole = [Card.from_str("Kh"), Card.from_str("Kd")]
         board = [Card.from_str("7c"), Card.from_str("4d"), Card.from_str("3h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["hand_category_norm"] == pytest.approx(11 / 25)  # Overpair
+        assert values["hand_category_norm"] == pytest.approx(12 / 26)  # Overpair
 
-    def test_low_pair(self):
-        # 4 is below every board card -- Low Pair, not Underpair.
+    def test_underpair(self):
+        # 4 is below every board card.
         hole = [Card.from_str("4h"), Card.from_str("4d")]
         board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("5h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["hand_category_norm"] == pytest.approx(3 / 25)  # Low Pair
+        assert values["hand_category_norm"] == pytest.approx(3 / 26)  # Underpair
 
-    def test_underpair_not_low_pair(self):
+    def test_ninja_pair_not_underpair(self):
         # pair (6) is below the top card (K) but above the bottom card (3).
         hole = [Card.from_str("6h"), Card.from_str("6d")]
         board = [Card.from_str("Kc"), Card.from_str("5d"), Card.from_str("3h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["hand_category_norm"] == pytest.approx(4 / 25)  # Underpair
+        assert values["hand_category_norm"] == pytest.approx(4 / 26)  # Ninja Pair
 
     def test_preflop_pocket_pair_is_the_generic_pair_bucket(self):
         values = values_by_key(make_situation(hole=[Card.from_str("6h"), Card.from_str("6d")], board=[]))
-        assert values["hand_category_norm"] == pytest.approx(5 / 25)  # Pair
+        assert values["hand_category_norm"] == pytest.approx(6 / 26)  # Pair
 
 
 class TestHandVsBoardHeuristics:

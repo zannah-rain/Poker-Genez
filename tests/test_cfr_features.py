@@ -81,9 +81,9 @@ class TestBucketLabel:
         # 0.3 is closer to 1/3 (Flop) than to 0.0 (Preflop).
         assert cfr_features.bucket_label("street_norm", 0.3) == "Flop"
 
-    def test_26_way_hand_category(self):
+    def test_27_way_hand_category(self):
         assert cfr_features.bucket_label("hand_category_norm", 0.0) == "High Card"
-        assert cfr_features.bucket_label("hand_category_norm", 12 / 25) == "Two Pair"
+        assert cfr_features.bucket_label("hand_category_norm", 13 / 26) == "Two Pair"
         assert cfr_features.bucket_label("hand_category_norm", 1.0) == "Straight Flush"
 
     def test_maskable_categorical_feature_masked_reading(self):
