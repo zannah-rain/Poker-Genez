@@ -903,17 +903,21 @@ class TestSuggestedSubstrategyButtons:
         assert not at.exception
         assert at.multiselect(key="root::split_by").value == ["hole_suited", "street_norm"]
 
-    def test_best_second_split_by_and_max_interaction_split_no_op_safely_under_exact_hole_hand(
+    def test_best_second_split_by_and_max_interaction_split_run_safely_under_exact_hole_hand(
         self, hole_hand_grid_checkpoint,
     ):
         # Regression coverage: Exact Hole Hand has no ordinary bucket-label
-        # column (see _build_dataframe), so _group_labels_for_rows can't
-        # jointly group it with anything else -- picking it as this node's
-        # *sole* current Split By pick (a valid, length-1 resolved_split_by)
-        # and then asking either button to pair something else with it used
-        # to raise a KeyError. _decision_variance_by_key now guards this
-        # (returns all-zero rather than pairing) -- both buttons should run
-        # without crashing.
+        # column (see _build_dataframe) -- picking it as this node's *sole*
+        # current Split By pick (a valid, length-1 resolved_split_by) and
+        # then asking either button to pair something else with it used to
+        # raise a KeyError, before _group_labels_for_rows learned to group
+        # it jointly with an ordinary feature's own bucket label (its grid
+        # cell alongside the other feature's own value). Both buttons
+        # should run without crashing -- "Add best second" ends up
+        # collapsing back to Exact Hole Hand alone regardless of what it
+        # picks (see _resolve_split_by), but "Add max interaction split"
+        # genuinely uses the joint (grid cell, street_norm) grouping to
+        # pick street_norm and split on it.
         at = _run_app()
         at.multiselect(key="root::split_by").set_value(["hole_hand_grid_x_norm"]).run(timeout=60)
         assert at.multiselect(key="root::split_by").value == ["hole_hand_grid_x_norm"]
@@ -1276,12 +1280,37 @@ class TestFeatureTable:
         assert other_row["Interaction with current Split By"] != "—"
         assert other_row["Interaction with current Split By"].endswith("%")
 
-    def test_interaction_column_is_a_dash_when_split_by_is_exact_hole_hand_alone(self, hole_hand_grid_checkpoint):
+    def test_interaction_column_is_populated_for_other_features_when_split_by_is_exact_hole_hand_alone(
+        self, grid_joint_interaction_checkpoint,
+    ):
+        # Exact Hole Hand fills both of Split By's own slots by itself
+        # (see _resolve_split_by) -- but that's a UI/memorability
+        # constraint on what a person could pick, not a limit on what
+        # _group_labels_for_rows can jointly group: (grid cell,
+        # street_norm's own value) is just as well-defined a joint
+        # grouping as any other pair. street_norm carries strong, real
+        # signal here (see _grid_joint_interaction_checkpoint_path), so a
+        # merely-not-"—" check wouldn't tell a genuine joint computation
+        # apart from one wrongly forced to a flat 0% -- asserting a
+        # clearly nonzero reading does.
         at = _run_app()
         at.multiselect(key="root::split_by").set_value(["hole_hand_grid_x_norm"]).run(timeout=60)
         assert not at.exception
         table = _feature_table(at)
-        assert set(table["Interaction with current Split By"]) == {"—"}
+        street_row = table[table["Feature"] == cfr_features.feature_label("street_norm")].iloc[0]
+        interaction = street_row["Interaction with current Split By"]
+        assert interaction != "—"
+        assert int(interaction.rstrip("%")) >= 5
+
+    def test_interaction_column_is_a_dash_for_exact_hole_hands_own_row_when_it_is_the_split_by(
+        self, all_preflop_hole_hand_grid_checkpoint,
+    ):
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["hole_hand_grid_x_norm"]).run(timeout=60)
+        assert not at.exception
+        table = _feature_table(at)
+        own_row = table[table["Feature"] == "Exact Hole Hand"].iloc[0]
+        assert own_row["Interaction with current Split By"] == "—"
 
     def test_interaction_column_differs_per_candidate_with_two_split_by_features(self, three_way_checkpoint):
         # Regression coverage for a real bug: with 2 Split By features
@@ -1320,6 +1349,19 @@ class TestFeatureTable:
         at = _run_app()
         table = _feature_table(at)
         assert "Exact Hole Hand" not in set(table["Feature"])
+
+    def test_exact_hole_hand_is_sorted_into_its_own_ranked_position_not_appended_last(
+        self, grid_outranks_other_checkpoint,
+    ):
+        # Regression coverage: the table used to filter Exact Hole Hand out
+        # and unconditionally re-append it as the very last row, regardless
+        # of its actual importance (see _render_substrategy's table_keys).
+        # Here it has real, strongly-weighted signal and is_aggressor has
+        # none (see _grid_outranks_other_checkpoint_path), so it should
+        # rank clearly above is_aggressor, not below it.
+        at = _run_app()
+        table = _feature_table(at)
+        assert list(table["Feature"]) == ["Exact Hole Hand", "Last Aggressor"]
 
 
 class TestNavigation:
@@ -1644,6 +1686,122 @@ def all_preflop_hole_hand_grid_checkpoint(_all_preflop_hole_hand_grid_checkpoint
     return _all_preflop_hole_hand_grid_checkpoint_path
 
 
+_GRID_OUTRANKS_OTHER_FEATURE_KEYS = ("hole_hand_grid_x_norm", "hole_hand_grid_y_norm", "is_aggressor")
+
+
+@pytest.fixture(scope="module")
+def _grid_outranks_other_checkpoint_path(tmp_path_factory) -> str:
+    """All rows preflop, with Exact Hole Hand's own grid coordinates given
+    a big net input weight (real signal, like hand_idx in
+    _make_importance_per_level_checkpoint) and is_aggressor's zeroed out
+    entirely (guaranteed no effect, like hole_idx there) -- so Exact Hole
+    Hand should rank clearly *above* is_aggressor in the feature table.
+    Regression coverage for the table's own sort: it used to filter Exact
+    Hole Hand out and unconditionally re-append it last, regardless of its
+    actual importance (see _render_substrategy's table_keys)."""
+    path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_grid_outranks_other")), "checkpoint")
+    rng = np.random.default_rng(0)
+    feature_dim = len(cfr_features.feature_indices(_GRID_OUTRANKS_OTHER_FEATURE_KEYS))
+    x_idx = _GRID_OUTRANKS_OTHER_FEATURE_KEYS.index("hole_hand_grid_x_norm")
+    y_idx = _GRID_OUTRANKS_OTHER_FEATURE_KEYS.index("hole_hand_grid_y_norm")
+    aggressor_idx = _GRID_OUTRANKS_OTHER_FEATURE_KEYS.index("is_aggressor")
+
+    torch.manual_seed(0)  # AdvantageNet's init otherwise draws from torch's unseeded global RNG
+    net = cfr_networks.AdvantageNet(input_dim=feature_dim, hidden_sizes=(8, 8))
+    with torch.no_grad():
+        net.hidden[0].block[0].weight[:, x_idx] *= 20.0
+        net.hidden[0].block[0].weight[:, y_idx] *= 20.0
+        net.hidden[0].block[0].weight[:, aggressor_idx] = 0.0
+    net_config = cfr_networks.AdvantageNetConfig(
+        feature_keys=_GRID_OUTRANKS_OTHER_FEATURE_KEYS, hidden_sizes=(8, 8), table_size=3,
+    )
+    cfr_networks.save(net, net_config, path)
+
+    num_samples = 600
+    reservoir = cfr_reservoir.ReservoirBuffer(
+        capacity=num_samples, feature_dim=feature_dim, num_actions=strategy.NUM_ACTION_CATEGORIES, rng=rng,
+    )
+    for _ in range(num_samples):
+        feats = rng.random(feature_dim).astype(np.float32)
+        feats[x_idx] = rng.integers(0, 3) / 12.0
+        feats[y_idx] = rng.integers(0, 3) / 12.0
+        regrets = rng.normal(size=strategy.NUM_ACTION_CATEGORIES).astype(np.float32)
+        legal_mask = rng.random(strategy.NUM_ACTION_CATEGORIES) > 0.3
+        legal_mask[strategy.ACTION_CALL] = True
+        reservoir.add(feats, regrets, legal_mask, float(rng.integers(1, 10)))
+    reservoir.save(path)
+    return path
+
+
+@pytest.fixture
+def grid_outranks_other_checkpoint(_grid_outranks_other_checkpoint_path, monkeypatch):
+    monkeypatch.setenv("CFR_EXPLORER_CHECKPOINT_PATH", _grid_outranks_other_checkpoint_path)
+    return _grid_outranks_other_checkpoint_path
+
+
+_GRID_JOINT_INTERACTION_FEATURE_KEYS = ("hole_hand_grid_x_norm", "hole_hand_grid_y_norm", "street_norm")
+
+
+@pytest.fixture(scope="module")
+def _grid_joint_interaction_checkpoint_path(tmp_path_factory) -> str:
+    """All rows preflop, street_norm given a big net input weight (real
+    signal, like hand_idx in _make_importance_per_level_checkpoint) while
+    Exact Hole Hand's own grid coordinates get *zero* weight (guaranteed
+    no effect, like hole_idx there) and a small, unboosted range (3x3 = 9
+    cells, not the full 169) so a joint (grid cell, street_norm level)
+    grouping still has plenty of samples per group despite carrying no
+    real signal of its own. Regression coverage for the feature table's
+    "Interaction with current Split By" column actually computing the
+    *joint* grouping instead of being forced to 0 whenever Exact Hole Hand
+    is the current Split By (see _decision_variance_by_key): with
+    street_norm's own strong, isolated signal, that joint computation
+    should read clearly above 0% (empirically ~9%, some diluted by the
+    grid's own finer partition -- see _decision_variance_explained's own
+    leave-one-out correction), not just "not literally a dash"."""
+    path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_grid_joint_interaction")), "checkpoint")
+    rng = np.random.default_rng(0)
+    feature_dim = len(cfr_features.feature_indices(_GRID_JOINT_INTERACTION_FEATURE_KEYS))
+    x_idx = _GRID_JOINT_INTERACTION_FEATURE_KEYS.index("hole_hand_grid_x_norm")
+    y_idx = _GRID_JOINT_INTERACTION_FEATURE_KEYS.index("hole_hand_grid_y_norm")
+    street_idx = _GRID_JOINT_INTERACTION_FEATURE_KEYS.index("street_norm")
+
+    torch.manual_seed(0)  # AdvantageNet's init otherwise draws from torch's unseeded global RNG
+    net = cfr_networks.AdvantageNet(input_dim=feature_dim, hidden_sizes=(8, 8))
+    with torch.no_grad():
+        net.hidden[0].block[0].weight[:, street_idx] *= 20.0
+        net.hidden[0].block[0].weight[:, x_idx] = 0.0
+        net.hidden[0].block[0].weight[:, y_idx] = 0.0
+    net_config = cfr_networks.AdvantageNetConfig(
+        feature_keys=_GRID_JOINT_INTERACTION_FEATURE_KEYS, hidden_sizes=(8, 8), table_size=3,
+    )
+    cfr_networks.save(net, net_config, path)
+
+    num_samples = 600
+    reservoir = cfr_reservoir.ReservoirBuffer(
+        capacity=num_samples, feature_dim=feature_dim, num_actions=strategy.NUM_ACTION_CATEGORIES, rng=rng,
+    )
+    for _ in range(num_samples):
+        feats = rng.random(feature_dim).astype(np.float32)
+        feats[x_idx] = rng.integers(0, 3) / 12.0
+        feats[y_idx] = rng.integers(0, 3) / 12.0
+        if cfr_features.bucket_label("street_norm", feats[street_idx]) == "Preflop":
+            feats[street_idx] = 0.0
+        else:
+            feats[street_idx] = 1.0
+        regrets = rng.normal(size=strategy.NUM_ACTION_CATEGORIES).astype(np.float32)
+        legal_mask = rng.random(strategy.NUM_ACTION_CATEGORIES) > 0.3
+        legal_mask[strategy.ACTION_CALL] = True
+        reservoir.add(feats, regrets, legal_mask, float(rng.integers(1, 10)))
+    reservoir.save(path)
+    return path
+
+
+@pytest.fixture
+def grid_joint_interaction_checkpoint(_grid_joint_interaction_checkpoint_path, monkeypatch):
+    monkeypatch.setenv("CFR_EXPLORER_CHECKPOINT_PATH", _grid_joint_interaction_checkpoint_path)
+    return _grid_joint_interaction_checkpoint_path
+
+
 _MAX_SPLIT_EXCLUDES_GRID_FEATURE_KEYS = ("hole_suited", "is_aggressor", "hole_hand_grid_x_norm", "hole_hand_grid_y_norm")
 
 
@@ -1813,22 +1971,25 @@ class TestExactHoleHand:
         assert not at.exception
         assert any("fills both Split By slots by itself" in c.value for c in at.caption)
 
-    def test_add_best_second_split_by_can_pick_it_when_the_substrategy_is_100_percent_preflop(
+    def test_add_best_second_split_by_never_picks_it_even_when_it_is_the_only_candidate(
         self, all_preflop_hole_hand_grid_checkpoint,
     ):
-        # street_norm is this checkpoint's only ordinary feature and it's
-        # pinned constant (see _all_preflop_hole_hand_grid_checkpoint_path),
-        # so once it's the current (sole) Split By pick, Exact Hole Hand is
-        # the only thing left for "Add best second Split By feature" to
-        # offer -- proving the button can reach it at all (see
-        # _splittable_candidates' own include_hole_hand_grid).
+        # Exact Hole Hand always fills *both* Split By slots by itself (see
+        # _resolve_split_by) -- with street_norm (this checkpoint's only
+        # ordinary feature, pinned constant -- see
+        # _all_preflop_hole_hand_grid_checkpoint_path) already occupying
+        # the one slot this button is trying to fill, there's no room left
+        # for it: picking it wouldn't add a second dimension to the
+        # existing rule, it would silently discard street_norm instead.
+        # Unlike "Optimise split by features" (which searches fresh, so
+        # picking it alone is legitimate there), this button must no-op
+        # rather than fall back to it.
         at = _run_app()
         at.multiselect(key="root::split_by").set_value(["street_norm"]).run(timeout=60)
         at.button(key="root::add_best_second_split_by").click().run(timeout=60)
 
         assert not at.exception
-        assert at.multiselect(key="root::split_by").value == ["street_norm", "hole_hand_grid_x_norm"]
-        assert any("fills both Split By slots by itself" in c.value for c in at.caption)
+        assert at.multiselect(key="root::split_by").value == ["street_norm"]
 
     def test_optimise_split_by_can_pick_it_alone_as_the_winning_pair(
         self, all_preflop_hole_hand_grid_checkpoint,

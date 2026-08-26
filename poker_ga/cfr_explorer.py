@@ -238,36 +238,50 @@ def _group_labels_for_rows(df: pd.DataFrame, row_index: np.ndarray, group_by_key
 
     Exact Hole Hand (_HOLE_HAND_GRID_KEY) is handled separately since it
     has no ordinary bucket-label column (see _build_dataframe): grouped by
-    its own 13x13 grid cell instead, with every masked (postflop) row
-    grouped together under one shared "masked" label -- a raw
-    (x, y) < 0 pair is a sentinel, not a real grid position, so binning it
-    into a grid cell (which would land it at cell (0, 0), colliding with a
-    real AA reading) would be wrong. Only ever passed alone (as a 1-tuple)
-    -- it has no ordinary column to jointly group by alongside anything
-    else, so pairing it with another key is never attempted (see
-    _decision_variance_by_key's own guard)."""
+    its own 13x13 grid cell instead (see _hole_hand_grid_cell_labels), with
+    every masked (postflop) row grouped together under one shared "masked"
+    label -- a raw (x, y) < 0 pair is a sentinel, not a real grid position,
+    so binning it into a grid cell (which would land it at cell (0, 0),
+    colliding with a real AA reading) would be wrong. It combines with
+    other keys the same way any of them combine with each other -- e.g.
+    this node's own current Split By being Exact Hole Hand alone (which
+    fills both of Split By's own slots by itself -- see _resolve_split_by)
+    doesn't stop a *candidate* feature from being scored jointly against
+    it here: (grid cell, candidate's own bucket label) is just as
+    well-defined a joint grouping as any other pair, even though a person
+    could never adopt it as their own Split By pick directly (Split By's
+    own 2-slot cap is a UI/memorability constraint on people, not a limit
+    on what this function can measure)."""
     if not group_by_keys:
         return None
-    if group_by_keys == (_HOLE_HAND_GRID_KEY,):
-        # Indexed down to row_index *before* any per-row math below, not
-        # after -- df can be the whole loaded reservoir (root_df), while
-        # row_index is often a much smaller claimed/capped subset of it
-        # (see _capped_for_eval); doing the math over every row in df only
-        # to immediately throw most of it away would scale with the full
-        # reservoir size instead of with however many rows are actually
-        # being grouped here.
-        x = df[_HOLE_HAND_GRID_RAW_X_COL].to_numpy()[row_index]
-        y = df[_HOLE_HAND_GRID_RAW_Y_COL].to_numpy()[row_index]
-        size = HOLE_HAND_GRID_SIZE
-        cols = np.rint(np.clip(x, 0.0, 1.0) * (size - 1)).astype(int)
-        rows = np.rint(np.clip(y, 0.0, 1.0) * (size - 1)).astype(int)
-        cell = rows * size + cols
-        return np.where(x < 0.0, -1, cell)
-    columns = [df[_feature_col(key)].to_numpy()[row_index].astype(str) for key in group_by_keys]
+    columns = [
+        _hole_hand_grid_cell_labels(df, row_index) if key == _HOLE_HAND_GRID_KEY
+        else df[_feature_col(key)].to_numpy()[row_index].astype(str)
+        for key in group_by_keys
+    ]
     combined = columns[0]
     for column in columns[1:]:
         combined = np.char.add(np.char.add(combined, "|"), column)
     return combined
+
+
+def _hole_hand_grid_cell_labels(df: pd.DataFrame, row_index: np.ndarray) -> np.ndarray:
+    """One 13x13-grid-cell label per row at `row_index` -- "-1" for every
+    masked (postflop) row, sharing one label rather than colliding with a
+    real AA (cell (0, 0)) reading -- see _group_labels_for_rows. Indexed
+    down to `row_index` *before* any per-row math below, not after -- `df`
+    can be the whole loaded reservoir (root_df), while `row_index` is often
+    a much smaller claimed/capped subset of it (see _capped_for_eval);
+    doing the math over every row in `df` only to immediately throw most
+    of it away would scale with the full reservoir size instead of with
+    however many rows are actually being grouped here."""
+    x = df[_HOLE_HAND_GRID_RAW_X_COL].to_numpy()[row_index]
+    y = df[_HOLE_HAND_GRID_RAW_Y_COL].to_numpy()[row_index]
+    size = HOLE_HAND_GRID_SIZE
+    cols = np.rint(np.clip(x, 0.0, 1.0) * (size - 1)).astype(int)
+    rows = np.rint(np.clip(y, 0.0, 1.0) * (size - 1)).astype(int)
+    cell = np.where(x < 0.0, -1, rows * size + cols)
+    return cell.astype(str)
 
 
 def _feature_col(key: str) -> str:
@@ -759,21 +773,22 @@ def _decision_variance_by_key(
     already in `pair_with` explain *together*" otherwise (used to rank a
     second Split By candidate, a cross-graph target, or a child-split
     candidate against the current Split By -- see each caller). 0.0 for a
-    key already in `pair_with` (nothing left for it to add) and for every
-    key when `pair_with` contains Exact Hole Hand (_HOLE_HAND_GRID_KEY) --
-    it has no ordinary bucket-label column, so _group_labels_for_rows can't
-    jointly group it with anything else.
+    key already in `pair_with` (nothing left for it to add).
 
-    Exact Hole Hand *as a candidate* (as opposed to already being in
-    `pair_with`) is the one exception to the "[*pair_with, key]" rule
-    above: it's always scored solo ([key] alone), regardless of whatever's
-    in `pair_with`. That's not an approximation -- it's what picking it
-    would actually do, since _resolve_split_by makes it replace, not join,
-    whatever Split By already held (see _splittable_candidates'
-    `include_hole_hand_grid`, the only way it ever reaches here as a
-    candidate)."""
-    if _HOLE_HAND_GRID_KEY in pair_with:
-        return [(key, 0.0) for key in candidate_keys]
+    Exact Hole Hand (_HOLE_HAND_GRID_KEY), whether in `candidate_keys` or
+    `pair_with`, is not a special case here: _group_labels_for_rows can
+    jointly group it with any other key (its own 13x13 grid cell alongside
+    each other key's ordinary bucket label), so `[*pair_with, key]` is
+    exactly as well-defined as it is for any other feature -- even though
+    a person could never adopt that specific combination as their own
+    Split By pick (it always fills both of Split By's own slots by itself
+    -- see _resolve_split_by), the joint decision variance it and another
+    feature explain *together* is still a real, answerable question, and
+    every caller that means "what would Split By become if I picked this"
+    rather than "how much does this explain jointly" asks it a different
+    way instead (see _add_optimise_split_by's own solo evaluation of it,
+    and _splittable_candidates' `include_hole_hand_grid`, which
+    _add_best_second_split_by deliberately never passes)."""
     pool_digest = _rows_digest(pool_df)
     parent_digest = _rows_digest(parent_node_df)
     scores = {}
@@ -781,10 +796,9 @@ def _decision_variance_by_key(
         if key in pair_with:
             scores[key] = 0.0
             continue
-        grouping = [key] if key == _HOLE_HAND_GRID_KEY else [*pair_with, key]
         pct = _decision_variance_explained(
             root_df, pool_df, parent_node_df, pool_digest, parent_digest,
-            parent_group_by_keys, grouping, collapsed,
+            parent_group_by_keys, [*pair_with, key], collapsed,
         )
         scores[key] = pct if pct is not None else 0.0
     return sorted(scores.items(), key=lambda kv: -kv[1])
@@ -1054,14 +1068,15 @@ def _splittable_candidates(
     `include_hole_hand_grid` opts Exact Hole Hand back in -- appended, not
     subject to the same >=2-observed-levels check (_observed_categories
     can't compute one for it anyway; see _hole_hand_grid_split_by_available
-    instead) -- for callers that only ever *set* Split By directly rather
-    than claiming one level per child (_add_best_second_split_by/
-    _add_optimise_split_by): picking it there just replaces whatever Split
-    By already held (see _resolve_split_by), unlike the two
-    _add_children_for_each_level-based buttons, which have no way to filter
-    a child down to one exact grid cell -- see _decision_variance_by_key's
-    own matching special case for how its score gets computed once
-    included."""
+    instead) -- for _add_optimise_split_by alone, the one caller that
+    searches for the single best pick from scratch rather than adding to
+    or claiming levels of one already in place: picking Exact Hole Hand
+    there just replaces whatever Split By already held (see
+    _resolve_split_by), unlike _add_best_second_split_by (which is adding
+    a *second* feature alongside one already chosen -- no room left for
+    something that needs both slots to itself, so it never passes this)
+    or the two _add_children_for_each_level-based buttons (no way to
+    filter a child down to one exact grid cell)."""
     candidates = [
         k for k in split_by_options
         if k not in exclude and k != _HOLE_HAND_GRID_KEY and len(_observed_categories(default_df, k)) >= 2
@@ -1161,6 +1176,16 @@ def _add_best_second_split_by(
     feature is currently chosen (nothing to pair up with 0 -- and
     MAX_SPLIT_BY_FEATURES already caps a pair at 2, so there's no "third").
 
+    Exact Hole Hand is deliberately excluded from `candidates` here (unlike
+    _add_optimise_split_by, which does include it) -- it always fills
+    *both* Split By slots by itself (see _resolve_split_by), so with one
+    slot already taken by whatever's in `resolved_split_by`, there's no
+    room left to add it: picking it wouldn't extend this node's existing
+    rule the way this button promises, it would silently discard the
+    feature already chosen instead. _add_optimise_split_by has no such
+    conflict, since it searches for the single best pick from scratch
+    rather than adding to one already in place.
+
     Sets `st.session_state[f"{key_prefix}split_by"]` directly (not just
     the sticky-shadow store _set_split_by normally goes through) since
     this node's own Split By widget already exists (unlike a brand-new
@@ -1171,9 +1196,7 @@ def _add_best_second_split_by(
     if len(resolved_split_by) != 1:
         return
     first = resolved_split_by[0]
-    candidates = _splittable_candidates(
-        default_df, split_by_options, resolved_split_by, include_hole_hand_grid=True,
-    )
+    candidates = _splittable_candidates(default_df, split_by_options, resolved_split_by)
     if not candidates:
         return
     scores = dict(_decision_variance_by_key(
@@ -1202,10 +1225,14 @@ def _add_optimise_split_by(
 
     Exact Hole Hand is included as a candidate (when 100% preflop -- see
     _hole_hand_grid_split_by_available), but only ever evaluated *alone*,
-    never jointly grouped with another feature (_group_labels_for_rows has
-    no column to combine it with -- see the module docstring's Edge case),
-    so it competes against every genuine 2-feature pair as a single-feature
-    alternative rather than being paired up itself."""
+    never jointly grouped with another feature: not because
+    _group_labels_for_rows can't do that (it can -- see
+    _decision_variance_by_key), but because picking it here would actually
+    *replace* whatever else got paired with it, not join it (it always
+    fills both of Split By's own slots by itself -- see
+    _resolve_split_by), so a joint score would misrepresent what this
+    button's own pick would actually resolve to. It competes against every
+    genuine 2-feature pair as a single-feature alternative instead."""
     candidates = _splittable_candidates(
         default_df, split_by_options, (), include_hole_hand_grid=True,
     )
@@ -1438,10 +1465,16 @@ def _render_substrategy(
     # node's own default_df (or incoming_df for "Add filter", above), so
     # this table always reflects exactly the sample currently matching this
     # sub-strategy's own filters, never a broader or narrower one.
-    table_keys = [k for k, _ in default_importance if k != _HOLE_HAND_GRID_KEY]
-    if _HOLE_HAND_GRID_KEY in importance_by_key and _hole_hand_grid_split_by_available(default_df):
-        table_keys.append(_HOLE_HAND_GRID_KEY)
-    show_interaction = bool(resolved_split_by) and resolved_split_by != [_HOLE_HAND_GRID_KEY]
+    # default_importance is already sorted strongest-first (see
+    # _decision_variance_by_key) -- filtering it in place, rather than
+    # dropping Exact Hole Hand and re-appending it separately, keeps it in
+    # its own correctly-ranked spot instead of always trailing last
+    # regardless of its actual importance.
+    table_keys = [
+        k for k, _ in default_importance
+        if k != _HOLE_HAND_GRID_KEY or _hole_hand_grid_split_by_available(default_df)
+    ]
+    show_interaction = bool(resolved_split_by)
     table_interaction_by_key = dict(_decision_variance_by_key(
         root_df, default_df, parent_node_df, parent_group_by_keys, table_keys, tuple(resolved_split_by), collapsed,
     )) if show_interaction else {}
