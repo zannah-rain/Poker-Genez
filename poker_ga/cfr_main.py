@@ -381,6 +381,8 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
                 min_tables=args.benchmark_min_tables, max_tables=args.benchmark_max_tables,
                 table_batch=args.benchmark_table_batch, p_value=args.benchmark_p_value,
                 show_progress=True, num_workers=num_workers, executor=executor,
+                min_starting_stack_bb=config.min_starting_stack_bb,
+                max_starting_stack_bb=config.max_starting_stack_bb,
             )
             if outcome.resolved:
                 verdict = "IMPROVED" if outcome.improved else "REGRESSED"

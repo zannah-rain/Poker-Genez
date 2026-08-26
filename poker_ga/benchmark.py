@@ -27,6 +27,7 @@ from dataclasses import dataclass
 import numpy as np
 from tqdm import tqdm
 
+from cfr_tree import DEFAULT_MAX_STARTING_STACK_BB, DEFAULT_MIN_STARTING_STACK_BB
 from game import GameConfig, SeatState, play_hand
 from opponent_model import OpponentModel
 from player import Player
@@ -35,26 +36,64 @@ from simulate import _executor_scope
 SEATS_PER_SIDE = 3
 
 
+def _draw_mirrored_stacks(
+    rng: np.random.Generator, n: int, min_bb: float, max_bb: float, big_blind: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Draws `n` stack depths (in chips) independently and uniformly from
+    [min_bb, max_bb] big blinds, then deals the identical multiset of
+    depths to two sides, each independently shuffled -- so the two returned
+    arrays always sum to the same total, however the depths themselves
+    happen to be drawn. Used to seat both sides of a benchmark table so a
+    lucky/unlucky spread of stack depths can never itself produce an edge,
+    leaving play quality as the only thing that can."""
+    stacks = rng.uniform(min_bb, max_bb, size=n) * big_blind
+    return rng.permutation(stacks), rng.permutation(stacks)
+
+
 def _play_side_match(
     current_pool: list[Player],
     checkpoint_pool: list[Player],
     game_config: GameConfig,
     rng: np.random.Generator,
+    min_starting_stack_bb: float = DEFAULT_MIN_STARTING_STACK_BB,
+    max_starting_stack_bb: float = DEFAULT_MAX_STARTING_STACK_BB,
 ) -> tuple[float, float, int, int]:
     """Plays one 3-vs-3 table to the hand cap. Any busted seat is refilled
     with a fresh player from its OWN side's pool (current or checkpoint), so
     the match stays a genuine 3v3 for the whole session instead of one side
     slowly being replaced by the other. Returns (current_net,
-    checkpoint_net, current_hands, checkpoint_hands)."""
+    checkpoint_net, current_hands, checkpoint_hands).
+
+    Starting stacks are drawn from the same [min_starting_stack_bb,
+    max_starting_stack_bb] spread that cfr_tree.traverse_hand trains on
+    (defaulting to cfr_tree.DEFAULT_MIN/MAX_STARTING_STACK_BB), rather than
+    a single fixed depth -- otherwise this benchmark would only ever judge
+    play at one stack depth while training optimizes across the whole
+    range, and a real edge or regression confined to shove/fold or
+    deep-stack play would never show up here. The SEATS_PER_SIDE depths are
+    drawn once and dealt as the identical multiset to both sides
+    (independently shuffled per side), so the two sides always start a
+    table with exactly the same total chips -- any edge that emerges is
+    from play quality, never from one side getting luckier stack draws."""
     current_idx = rng.choice(len(current_pool), size=SEATS_PER_SIDE, replace=False)
     checkpoint_idx = rng.choice(len(checkpoint_pool), size=SEATS_PER_SIDE, replace=False)
-    seats = [SeatState(player=current_pool[i], stack=game_config.starting_stack) for i in current_idx] + [
-        SeatState(player=checkpoint_pool[i], stack=game_config.starting_stack) for i in checkpoint_idx
+
+    current_stacks, checkpoint_stacks = _draw_mirrored_stacks(
+        rng, SEATS_PER_SIDE, min_starting_stack_bb, max_starting_stack_bb, game_config.big_blind,
+    )
+
+    seats = [SeatState(player=current_pool[i], stack=float(cs)) for i, cs in zip(current_idx, current_stacks)] + [
+        SeatState(player=checkpoint_pool[i], stack=float(cs)) for i, cs in zip(checkpoint_idx, checkpoint_stacks)
     ]
+    # Each seat's own cost basis -- what it was dealt at the start of its
+    # current lifetime -- since that's no longer a single constant once
+    # stacks are randomized per seat (and re-randomized on each bust below).
+    basis = list(current_stacks) + list(checkpoint_stacks)
     sides = ["current"] * SEATS_PER_SIDE + ["checkpoint"] * SEATS_PER_SIDE
     order = rng.permutation(len(seats))  # so "current" isn't always dealt the button first
     seats = [seats[i] for i in order]
     sides = [sides[i] for i in order]
+    basis = [float(basis[i]) for i in order]
     opp_model = OpponentModel()
 
     current_net = checkpoint_net = 0.0
@@ -76,18 +115,20 @@ def _play_side_match(
         for i, s in enumerate(seats):
             if s.stack <= 1e-9:
                 if sides[i] == "current":
-                    current_net -= game_config.starting_stack
+                    current_net -= basis[i]
                     replacement = current_pool[int(rng.integers(0, len(current_pool)))]
                 else:
-                    checkpoint_net -= game_config.starting_stack
+                    checkpoint_net -= basis[i]
                     replacement = checkpoint_pool[int(rng.integers(0, len(checkpoint_pool)))]
-                seats[i] = SeatState(player=replacement, stack=game_config.starting_stack)
+                new_stack = float(rng.uniform(min_starting_stack_bb, max_starting_stack_bb) * game_config.big_blind)
+                seats[i] = SeatState(player=replacement, stack=new_stack)
+                basis[i] = new_stack
 
     for i, s in enumerate(seats):
         if sides[i] == "current":
-            current_net += s.stack - game_config.starting_stack
+            current_net += s.stack - basis[i]
         else:
-            checkpoint_net += s.stack - game_config.starting_stack
+            checkpoint_net += s.stack - basis[i]
 
     return current_net, checkpoint_net, current_hands, checkpoint_hands
 
@@ -97,6 +138,8 @@ def _play_one_bb100_sample(
     checkpoint_players: list[Player],
     game_config: GameConfig,
     rng: np.random.Generator,
+    min_starting_stack_bb: float = DEFAULT_MIN_STARTING_STACK_BB,
+    max_starting_stack_bb: float = DEFAULT_MAX_STARTING_STACK_BB,
 ) -> float:
     """Plays one 3-vs-3 table and reduces it to the current side's bb/100 --
     the one independent sample run_benchmark_until_resolved accumulates.
@@ -104,6 +147,7 @@ def _play_one_bb100_sample(
     can be pickled and sent to a worker process."""
     cur_net, _chk_net, cur_hands, _chk_hands = _play_side_match(
         current_players, checkpoint_players, game_config, rng,
+        min_starting_stack_bb, max_starting_stack_bb,
     )
     return (cur_net / game_config.big_blind) / cur_hands * 100.0 if cur_hands else 0.0
 
@@ -190,6 +234,8 @@ def run_benchmark_until_resolved(
     show_progress: bool = True,
     num_workers: int = 1,
     executor: Executor | None = None,
+    min_starting_stack_bb: float = DEFAULT_MIN_STARTING_STACK_BB,
+    max_starting_stack_bb: float = DEFAULT_MAX_STARTING_STACK_BB,
 ) -> BenchmarkOutcome:
     """Plays 3-vs-3 tables against the checkpoint one at a time, treating
     each table's current-side bb/100 as one independent sample. After the
@@ -214,7 +260,13 @@ def run_benchmark_until_resolved(
     worker processes instead of one at a time -- see
     simulate.run_generation's docstring for the same option there, including
     why a parallel run doesn't reproduce the exact same tables as
-    num_workers=1 (the default) for the same seed."""
+    num_workers=1 (the default) for the same seed.
+
+    `min_starting_stack_bb`/`max_starting_stack_bb` set the range each
+    table's per-seat starting stacks are drawn from -- see
+    _play_side_match's docstring for why this should match the range
+    training draws from (cfr_tree's own min/max-starting-stack-bb) rather
+    than a single fixed depth."""
     if min_tables < 2:
         raise ValueError("min_tables must be at least 2 to compute a confidence interval.")
     if table_batch < 1:
@@ -231,14 +283,20 @@ def run_benchmark_until_resolved(
             if num_workers <= 1:
                 while len(samples) < target:
                     samples.append(
-                        _play_one_bb100_sample(current_players, checkpoint_players, game_config, rng)
+                        _play_one_bb100_sample(
+                            current_players, checkpoint_players, game_config, rng,
+                            min_starting_stack_bb, max_starting_stack_bb,
+                        )
                     )
                     progress.update(1)
             else:
                 batch_rngs = rng.spawn(batch_size)
                 with _executor_scope(executor, num_workers) as pool:
                     futures = [
-                        pool.submit(_play_one_bb100_sample, current_players, checkpoint_players, game_config, table_rng)
+                        pool.submit(
+                            _play_one_bb100_sample, current_players, checkpoint_players, game_config, table_rng,
+                            min_starting_stack_bb, max_starting_stack_bb,
+                        )
                         for table_rng in batch_rngs
                     ]
                     for future in as_completed(futures):

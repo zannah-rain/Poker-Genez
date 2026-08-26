@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 
 from benchmark import (
-    SEATS_PER_SIDE, BenchmarkOutcome, _inverse_normal_cdf, confidence_interval,
-    run_benchmark_until_resolved,
+    SEATS_PER_SIDE, BenchmarkOutcome, _draw_mirrored_stacks, _inverse_normal_cdf, _play_side_match,
+    confidence_interval, run_benchmark_until_resolved,
 )
 from game import GameConfig
 from genome import BET_RAISE, CHECK_CALL, FOLD
@@ -92,6 +92,50 @@ class TestConfidenceInterval:
             confidence_interval([1.0], p_value=0.05)
 
 
+class TestDrawMirroredStacks:
+    def test_both_sides_get_the_same_total_chips(self):
+        rng = np.random.default_rng(0)
+        for _ in range(200):
+            current_stacks, checkpoint_stacks = _draw_mirrored_stacks(rng, 3, 20.0, 200.0, 2.0)
+            assert sum(current_stacks) == pytest.approx(sum(checkpoint_stacks))
+
+    def test_both_sides_get_the_identical_multiset_of_depths(self):
+        rng = np.random.default_rng(0)
+        current_stacks, checkpoint_stacks = _draw_mirrored_stacks(rng, 3, 20.0, 200.0, 2.0)
+        assert sorted(current_stacks) == pytest.approx(sorted(checkpoint_stacks))
+
+    def test_depths_stay_within_the_requested_bb_range(self):
+        rng = np.random.default_rng(0)
+        for _ in range(200):
+            current_stacks, _ = _draw_mirrored_stacks(rng, 3, 20.0, 200.0, big_blind=2.0)
+            for stack in current_stacks:
+                assert 20.0 * 2.0 <= stack <= 200.0 * 2.0
+
+    def test_varies_across_calls_rather_than_always_matching_a_fixed_depth(self):
+        rng = np.random.default_rng(0)
+        depths_seen = {tuple(sorted(_draw_mirrored_stacks(rng, 3, 20.0, 200.0, 2.0)[0])) for _ in range(20)}
+        assert len(depths_seen) > 1
+
+
+class TestPlaySideMatchStackAccounting:
+    def test_net_is_zero_when_no_hands_are_played(self):
+        # With max_hands_per_session=0 no hand is dealt, so however the
+        # (now-randomized) starting stacks are drawn, each seat's final
+        # stack must equal its own basis exactly -- a regression here would
+        # mean stack randomization is leaking a phantom net purely from
+        # seating, independent of any actual play.
+        current = make_random_players(SEATS_PER_SIDE, seed=0)
+        checkpoint = make_random_players(SEATS_PER_SIDE, seed=1)
+        config = GameConfig(max_hands_per_session=0)
+        rng = np.random.default_rng(0)
+        for _ in range(20):
+            cur_net, chk_net, cur_hands, chk_hands = _play_side_match(current, checkpoint, config, rng)
+            assert cur_net == 0.0
+            assert chk_net == 0.0
+            assert cur_hands == 0
+            assert chk_hands == 0
+
+
 class TestRunBenchmarkUntilResolved:
     def test_rejects_too_small_min_tables(self):
         with pytest.raises(ValueError):
@@ -144,7 +188,7 @@ class TestRunBenchmarkUntilResolved:
         checkpoint = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=100)
         config = GameConfig(max_hands_per_session=5, starting_stack=200.0)
         outcome = run_benchmark_until_resolved(
-            current, checkpoint, config, np.random.default_rng(2),
+            current, checkpoint, config, np.random.default_rng(1),
             min_tables=5, max_tables=15, table_batch=5, p_value=0.05,
         )
         assert outcome.tables_played == 15
