@@ -762,7 +762,16 @@ def _decision_variance_by_key(
     key already in `pair_with` (nothing left for it to add) and for every
     key when `pair_with` contains Exact Hole Hand (_HOLE_HAND_GRID_KEY) --
     it has no ordinary bucket-label column, so _group_labels_for_rows can't
-    jointly group it with anything else."""
+    jointly group it with anything else.
+
+    Exact Hole Hand *as a candidate* (as opposed to already being in
+    `pair_with`) is the one exception to the "[*pair_with, key]" rule
+    above: it's always scored solo ([key] alone), regardless of whatever's
+    in `pair_with`. That's not an approximation -- it's what picking it
+    would actually do, since _resolve_split_by makes it replace, not join,
+    whatever Split By already held (see _splittable_candidates'
+    `include_hole_hand_grid`, the only way it ever reaches here as a
+    candidate)."""
     if _HOLE_HAND_GRID_KEY in pair_with:
         return [(key, 0.0) for key in candidate_keys]
     pool_digest = _rows_digest(pool_df)
@@ -772,9 +781,10 @@ def _decision_variance_by_key(
         if key in pair_with:
             scores[key] = 0.0
             continue
+        grouping = [key] if key == _HOLE_HAND_GRID_KEY else [*pair_with, key]
         pct = _decision_variance_explained(
             root_df, pool_df, parent_node_df, pool_digest, parent_digest,
-            parent_group_by_keys, [*pair_with, key], collapsed,
+            parent_group_by_keys, grouping, collapsed,
         )
         scores[key] = pct if pct is not None else 0.0
     return sorted(scores.items(), key=lambda kv: -kv[1])
@@ -1029,18 +1039,39 @@ def _add_children_for_each_level(key_prefix: str, feature_key: str, default_df: 
         _set_split_by(child_prefix, list(split_by))
 
 
-def _splittable_candidates(default_df: pd.DataFrame, split_by_options: list[str], exclude: list[str]) -> list[str]:
+def _splittable_candidates(
+    default_df: pd.DataFrame, split_by_options: list[str], exclude: list[str],
+    include_hole_hand_grid: bool = False,
+) -> list[str]:
     """`split_by_options` minus `exclude` and Exact Hole Hand (no ordinary
     per-level claim makes sense for its own 2D grid -- see
     _HOLE_HAND_GRID_KEY), minus any feature that's constant across
     `default_df` (fewer than 2 observed levels -- splitting on it would
     just recreate a single child claiming everything, not an actual
     split) -- the pool _add_max_interaction_split/_add_max_importance_split
-    pick their one candidate from."""
-    return [
+    pick their one candidate from.
+
+    `include_hole_hand_grid` opts Exact Hole Hand back in -- appended, not
+    subject to the same >=2-observed-levels check (_observed_categories
+    can't compute one for it anyway; see _hole_hand_grid_split_by_available
+    instead) -- for callers that only ever *set* Split By directly rather
+    than claiming one level per child (_add_best_second_split_by/
+    _add_optimise_split_by): picking it there just replaces whatever Split
+    By already held (see _resolve_split_by), unlike the two
+    _add_children_for_each_level-based buttons, which have no way to filter
+    a child down to one exact grid cell -- see _decision_variance_by_key's
+    own matching special case for how its score gets computed once
+    included."""
+    candidates = [
         k for k in split_by_options
         if k not in exclude and k != _HOLE_HAND_GRID_KEY and len(_observed_categories(default_df, k)) >= 2
     ]
+    if (
+        include_hole_hand_grid and _HOLE_HAND_GRID_KEY in split_by_options
+        and _HOLE_HAND_GRID_KEY not in exclude and _hole_hand_grid_split_by_available(default_df)
+    ):
+        candidates.append(_HOLE_HAND_GRID_KEY)
+    return candidates
 
 
 def _add_max_interaction_split(
@@ -1140,7 +1171,9 @@ def _add_best_second_split_by(
     if len(resolved_split_by) != 1:
         return
     first = resolved_split_by[0]
-    candidates = _splittable_candidates(default_df, split_by_options, resolved_split_by)
+    candidates = _splittable_candidates(
+        default_df, split_by_options, resolved_split_by, include_hole_hand_grid=True,
+    )
     if not candidates:
         return
     scores = dict(_decision_variance_by_key(
@@ -1165,21 +1198,38 @@ def _add_optimise_split_by(
     samples" (see _decision_variance_explained) directly -- the single best
     *pair* this node's own claimed rows support, not just the best partner
     for whatever's already chosen. No-op if fewer than 2 eligible
-    candidates remain (nothing to pair)."""
-    candidates = _splittable_candidates(default_df, split_by_options, ())
-    if len(candidates) < 2:
+    candidates remain (nothing to pair).
+
+    Exact Hole Hand is included as a candidate (when 100% preflop -- see
+    _hole_hand_grid_split_by_available), but only ever evaluated *alone*,
+    never jointly grouped with another feature (_group_labels_for_rows has
+    no column to combine it with -- see the module docstring's Edge case),
+    so it competes against every genuine 2-feature pair as a single-feature
+    alternative rather than being paired up itself."""
+    candidates = _splittable_candidates(
+        default_df, split_by_options, (), include_hole_hand_grid=True,
+    )
+    ordinary_candidates = [k for k in candidates if k != _HOLE_HAND_GRID_KEY]
+    if len(ordinary_candidates) < 2 and _HOLE_HAND_GRID_KEY not in candidates:
         return
     default_digest = _rows_digest(default_df)
     parent_digest = _rows_digest(parent_node_df)
     best_pair, best_pct = None, -1.0
-    for i, a in enumerate(candidates):
-        for b in candidates[i + 1:]:
-            pct = _decision_variance_explained(
-                root_df, default_df, parent_node_df, default_digest, parent_digest,
-                parent_group_by_keys, [a, b], collapsed,
-            )
-            if pct is not None and pct > best_pct:
-                best_pair, best_pct = [a, b], pct
+
+    def _try(grouping: list[str]) -> None:
+        nonlocal best_pair, best_pct
+        pct = _decision_variance_explained(
+            root_df, default_df, parent_node_df, default_digest, parent_digest,
+            parent_group_by_keys, grouping, collapsed,
+        )
+        if pct is not None and pct > best_pct:
+            best_pair, best_pct = grouping, pct
+
+    if _HOLE_HAND_GRID_KEY in candidates:
+        _try([_HOLE_HAND_GRID_KEY])
+    for i, a in enumerate(ordinary_candidates):
+        for b in ordinary_candidates[i + 1:]:
+            _try([a, b])
     if best_pair is not None:
         st.session_state[f"{key_prefix}split_by"] = best_pair
         _set_split_by(key_prefix, best_pair)
@@ -1389,6 +1439,8 @@ def _render_substrategy(
     # this table always reflects exactly the sample currently matching this
     # sub-strategy's own filters, never a broader or narrower one.
     table_keys = [k for k, _ in default_importance if k != _HOLE_HAND_GRID_KEY]
+    if _HOLE_HAND_GRID_KEY in importance_by_key and _hole_hand_grid_split_by_available(default_df):
+        table_keys.append(_HOLE_HAND_GRID_KEY)
     show_interaction = bool(resolved_split_by) and resolved_split_by != [_HOLE_HAND_GRID_KEY]
     table_interaction_by_key = dict(_decision_variance_by_key(
         root_df, default_df, parent_node_df, parent_group_by_keys, table_keys, tuple(resolved_split_by), collapsed,

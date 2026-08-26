@@ -119,7 +119,7 @@ def parse_args() -> argparse.Namespace:
         "always start from a fresh random net).",
     )
     p.add_argument(
-        "--benchmark-interval", type=int, default=10,
+        "--benchmark-interval", type=int, default=30,
         help="The progress check: every this many iterations, play the current net "
         "head-to-head (3-vs-3 tables, benchmark.py) against a snapshot taken this many iterations "
         "ago -- e.g. at 100, the first check is iteration 100 vs the net as it stood when this run "
@@ -133,7 +133,7 @@ def parse_args() -> argparse.Namespace:
         "run). Set to 0 to disable.",
     )
     p.add_argument(
-        "--benchmark-min-tables", type=int, default=200,
+        "--benchmark-min-tables", type=int, default=500,
         help="Minimum number of 3-vs-3 tables played against the checkpoint before checking "
         "whether the result is statistically resolved.",
     )
@@ -144,19 +144,19 @@ def parse_args() -> argparse.Namespace:
         "'not improved'.",
     )
     p.add_argument(
-        "--benchmark-table-batch", type=int, default=200,
+        "--benchmark-table-batch", type=int, default=500,
         help="Additional tables played per round once --benchmark-min-tables isn't enough to "
         "resolve the confidence interval (repeats until it resolves or --benchmark-max-tables is hit).",
     )
     p.add_argument(
-        "--benchmark-p-value", type=float, default=0.2,
+        "--benchmark-p-value", type=float, default=0.1,
         help="Improvement p-value threshold: the benchmark keeps playing tables until the "
         "(1 - N) confidence interval of the current net's bb/100 edge over the checkpoint no "
         "longer includes 0. Lower values demand stronger evidence before calling an iteration "
         "improved or regressed.",
     )
     p.add_argument(
-        "--early-stop-patience", type=int, default=2,
+        "--early-stop-patience", type=int, default=3,
         help="Whenever a --benchmark-interval check doesn't show a resolved improvement, the net's "
         "weights (and optimizer state) revert to that checkpoint. If this happens this many times "
         "in a row, training stops early rather than running out --iterations. 0 disables early "

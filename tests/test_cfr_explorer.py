@@ -1309,6 +1309,18 @@ class TestFeatureTable:
         assert aggressor_value != "—"
         assert connected_value != aggressor_value
 
+    def test_includes_exact_hole_hand_when_the_substrategy_is_100_percent_preflop(
+        self, all_preflop_hole_hand_grid_checkpoint,
+    ):
+        at = _run_app()
+        table = _feature_table(at)
+        assert "Exact Hole Hand" in set(table["Feature"])
+
+    def test_excludes_exact_hole_hand_when_rows_are_mixed_streets(self, hole_hand_grid_checkpoint):
+        at = _run_app()
+        table = _feature_table(at)
+        assert "Exact Hole Hand" not in set(table["Feature"])
+
 
 class TestNavigation:
     """The sidebar's nested outline of the current sub-strategy tree
@@ -1632,6 +1644,51 @@ def all_preflop_hole_hand_grid_checkpoint(_all_preflop_hole_hand_grid_checkpoint
     return _all_preflop_hole_hand_grid_checkpoint_path
 
 
+_MAX_SPLIT_EXCLUDES_GRID_FEATURE_KEYS = ("hole_suited", "is_aggressor", "hole_hand_grid_x_norm", "hole_hand_grid_y_norm")
+
+
+@pytest.fixture(scope="module")
+def _max_split_excludes_hole_hand_grid_checkpoint_path(tmp_path_factory) -> str:
+    """All rows preflop (Exact Hole Hand's own 100%-preflop Split By
+    requirement holds -- see _hole_hand_grid_split_by_available), with two
+    ordinary candidate features (hole_suited, is_aggressor) alongside it --
+    used to prove "Add maximum interaction split"/"Add maximum importance
+    split" never treat Exact Hole Hand as an eligible candidate even when
+    it's genuinely available (unlike "Add best second Split By feature"/
+    "Optimise split by features", which the user explicitly asked to
+    support it -- see _splittable_candidates' own include_hole_hand_grid)."""
+    path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_max_split_excludes_grid")), "checkpoint")
+    rng = np.random.default_rng(0)
+    feature_dim = len(cfr_features.feature_indices(_MAX_SPLIT_EXCLUDES_GRID_FEATURE_KEYS))
+    net = cfr_networks.AdvantageNet(input_dim=feature_dim, hidden_sizes=(8, 8))
+    net_config = cfr_networks.AdvantageNetConfig(
+        feature_keys=_MAX_SPLIT_EXCLUDES_GRID_FEATURE_KEYS, hidden_sizes=(8, 8), table_size=3,
+    )
+    cfr_networks.save(net, net_config, path)
+    num_samples = 200
+    reservoir = cfr_reservoir.ReservoirBuffer(
+        capacity=num_samples, feature_dim=feature_dim, num_actions=strategy.NUM_ACTION_CATEGORIES, rng=rng,
+    )
+    x_idx = _MAX_SPLIT_EXCLUDES_GRID_FEATURE_KEYS.index("hole_hand_grid_x_norm")
+    y_idx = _MAX_SPLIT_EXCLUDES_GRID_FEATURE_KEYS.index("hole_hand_grid_y_norm")
+    for _ in range(num_samples):
+        feats = rng.random(feature_dim).astype(np.float32)
+        feats[x_idx] = rng.integers(0, 13) / 12.0
+        feats[y_idx] = rng.integers(0, 13) / 12.0
+        regrets = rng.normal(size=strategy.NUM_ACTION_CATEGORIES).astype(np.float32)
+        legal_mask = rng.random(strategy.NUM_ACTION_CATEGORIES) > 0.3
+        legal_mask[strategy.ACTION_CALL] = True
+        reservoir.add(feats, regrets, legal_mask, float(rng.integers(1, 10)))
+    reservoir.save(path)
+    return path
+
+
+@pytest.fixture
+def max_split_excludes_hole_hand_grid_checkpoint(_max_split_excludes_hole_hand_grid_checkpoint_path, monkeypatch):
+    monkeypatch.setenv("CFR_EXPLORER_CHECKPOINT_PATH", _max_split_excludes_hole_hand_grid_checkpoint_path)
+    return _max_split_excludes_hole_hand_grid_checkpoint_path
+
+
 class TestExactHoleHand:
     def test_excluded_from_add_filter_options(self, hole_hand_grid_checkpoint):
         at = _run_app()
@@ -1755,6 +1812,73 @@ class TestExactHoleHand:
 
         assert not at.exception
         assert any("fills both Split By slots by itself" in c.value for c in at.caption)
+
+    def test_add_best_second_split_by_can_pick_it_when_the_substrategy_is_100_percent_preflop(
+        self, all_preflop_hole_hand_grid_checkpoint,
+    ):
+        # street_norm is this checkpoint's only ordinary feature and it's
+        # pinned constant (see _all_preflop_hole_hand_grid_checkpoint_path),
+        # so once it's the current (sole) Split By pick, Exact Hole Hand is
+        # the only thing left for "Add best second Split By feature" to
+        # offer -- proving the button can reach it at all (see
+        # _splittable_candidates' own include_hole_hand_grid).
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["street_norm"]).run(timeout=60)
+        at.button(key="root::add_best_second_split_by").click().run(timeout=60)
+
+        assert not at.exception
+        assert at.multiselect(key="root::split_by").value == ["street_norm", "hole_hand_grid_x_norm"]
+        assert any("fills both Split By slots by itself" in c.value for c in at.caption)
+
+    def test_optimise_split_by_can_pick_it_alone_as_the_winning_pair(
+        self, all_preflop_hole_hand_grid_checkpoint,
+    ):
+        # With street_norm constant (see above), there are zero genuine
+        # 2-feature pairs available -- "Optimise split by features" must
+        # still not no-op here, since Exact Hole Hand alone is itself a
+        # valid (better than nothing) pick (see _add_optimise_split_by's
+        # own solo-evaluation branch).
+        at = _run_app()
+        at.button(key="root::optimise_split_by").click().run(timeout=60)
+
+        assert not at.exception
+        assert at.multiselect(key="root::split_by").value == ["hole_hand_grid_x_norm"]
+
+    def test_max_interaction_split_never_picks_it(self, max_split_excludes_hole_hand_grid_checkpoint):
+        # Regression guard for the user's explicit scope choice: unlike
+        # "Add best second Split By feature"/"Optimise split by features",
+        # this button must never treat Exact Hole Hand as an eligible
+        # candidate (it would create up to 169 children, one per grid
+        # cell -- see _splittable_candidates' own include_hole_hand_grid,
+        # which _add_max_interaction_split doesn't pass). is_aggressor is
+        # the sole legitimate ordinary candidate left once hole_suited is
+        # the current Split By pick, so picking it deterministically
+        # (rather than Exact Hole Hand, which is also genuinely available
+        # here -- every row is preflop) proves the exclusion held.
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["hole_suited"]).run(timeout=60)
+        at.button(key="root::add_max_interaction_split").click().run(timeout=60)
+
+        assert not at.exception
+        children = at.session_state["substrategy_children"]["root::"]
+        claims = at.session_state["substrategy_claims"]
+        claimed_features = {next(iter(claims[f"root::substrategy_{cid}::"])) for cid in children}
+        assert claimed_features == {"is_aggressor"}
+
+    def test_max_importance_split_never_picks_it(self, max_split_excludes_hole_hand_grid_checkpoint):
+        # Same guard, for "Add maximum importance split" -- here with no
+        # Split By chosen yet, so both hole_suited and is_aggressor are
+        # legitimate ordinary candidates alongside Exact Hole Hand (also
+        # genuinely available -- every row is preflop); the winner must
+        # still be one of the two ordinary features, never the grid key.
+        at = _run_app()
+        at.button(key="root::add_max_importance_split").click().run(timeout=60)
+
+        assert not at.exception
+        children = at.session_state["substrategy_children"]["root::"]
+        claims = at.session_state["substrategy_claims"]
+        claimed_features = {next(iter(claims[f"root::substrategy_{cid}::"])) for cid in children}
+        assert claimed_features <= {"hole_suited", "is_aggressor"}
 
 
 _GROUP_RELATIVE_FEATURE_KEYS = ("hole_hand_grid_x_norm", "hole_hand_grid_y_norm", "hole_suited")
