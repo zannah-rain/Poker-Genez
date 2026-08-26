@@ -719,7 +719,11 @@ def _decision_variance_explained(
         parent_labels = _group_labels_for_rows(df, parent_node_df.index.to_numpy(), parent_group_by_keys)
         parent_group_means = pd.DataFrame(parent_view[action_cols].to_numpy(), index=parent_labels).groupby(level=0).mean()
         own_parent_labels = _group_labels_for_rows(df, default_index, parent_group_by_keys)
-        baseline = parent_group_means.reindex(own_parent_labels).to_numpy()
+        # copy=True: under pandas's Copy-on-Write, .to_numpy() can hand back
+        # a read-only view when reindex ends up a no-op (index already
+        # matches) -- baseline is mutated in place just below, so it needs
+        # its own writable buffer regardless.
+        baseline = parent_group_means.reindex(own_parent_labels).to_numpy(copy=True)
         # A group observed among this node's own rows but never observed
         # in the parent's own claimed scope shouldn't normally happen
         # (this node's own rows are a subset of the parent's) -- fall back
@@ -1318,17 +1322,31 @@ def _add_max_interaction_split(
     split_by_options: list[str],
 ) -> None:
     """"Add maximum interaction split": finds the single candidate feature
-    (see _splittable_candidates) with the highest *total* decision variance
-    explained once grouped jointly with this node's own current Split By
-    pick (see _decision_variance_by_key) *per observed level* -- that total
-    divided by how many children claiming it would actually add (see
-    _observed_categories), like _add_max_importance_split's own per-level
-    normalization -- then adds one child per level it takes among this
-    node's own default rows (see _add_children_for_each_level). Maximizing
-    total variance explained (rather than, say, the incremental gain over
-    the current Split By alone) means the winning candidate is whichever
-    one leaves the *overall* rule -- current Split By plus this new child
-    split -- explaining as much of this node's own decisions as possible.
+    (see _splittable_candidates) with the highest *marginal* decision
+    variance explained once grouped jointly with this node's own current
+    Split By pick, on top of what that Split By pick already explains
+    alone (see _decision_variance_by_key/_decision_variance_explained) --
+    that marginal gain divided by how many children claiming it would
+    actually add (see _observed_categories), like _add_max_importance_split's
+    own per-level normalization -- then adds one child per level it takes
+    among this node's own default rows (see _add_children_for_each_level).
+
+    Normalizing the *marginal* gain, not the joint total, matters here
+    specifically because the joint total always also includes whatever the
+    current Split By pick already explains *by itself* -- a constant
+    across every candidate, but one that dividing by a candidate's own
+    (varying) level count doesn't treat as constant: dividing a large
+    already-explained-anyway baseline by a small level count can
+    trivially outscore a real, informative candidate's own genuinely
+    smaller marginal contribution divided by a larger one, favoring a
+    candidate that adds nothing beyond what was already known just because
+    it happens to have few levels. Subtracting that shared baseline first
+    removes it from the comparison entirely, leaving only what each
+    candidate actually, distinctly contributes -- exactly the numerator
+    _add_max_importance_split already effectively uses (see its own
+    docstring): with no existing Split By to net out there, its own solo
+    variance explained *is* already the marginal gain over nothing.
+
     A quick way to check "is there a feature whose relationship to my
     current Split By isn't just additive -- does my chosen breakdown
     actually behave differently depending on its own value" without
@@ -1346,7 +1364,14 @@ def _add_max_interaction_split(
     scores = dict(_decision_variance_by_key(
         root_df, default_df, parent_node_df, parent_group_by_keys, candidates, tuple(resolved_split_by), collapsed,
     ))
-    best_key = max(candidates, key=lambda k: scores[k] / len(_observed_categories(default_df, k)))
+    baseline_pct = _decision_variance_explained(
+        root_df, default_df, parent_node_df, _rows_digest(default_df), _rows_digest(parent_node_df),
+        parent_group_by_keys, list(resolved_split_by), collapsed,
+    ) or 0.0
+    best_key = max(
+        candidates,
+        key=lambda k: max(0.0, scores[k] - baseline_pct) / len(_observed_categories(default_df, k)),
+    )
     _add_children_for_each_level(key_prefix, best_key, default_df, resolved_split_by)
 
 
@@ -1367,7 +1392,15 @@ def _add_max_importance_split(
     person has to learn," not just "biggest lever, full stop" (unlike
     _add_max_interaction_split, which specifically looks for features that
     interact with the current Split By rather than simply mattering a lot
-    on their own). No-op if no eligible candidate remains."""
+    on their own). `default_importance` is always each candidate's own
+    solo variance explained *ignoring* whatever Split By is already
+    chosen (see its own `pair_with=()` in _render_substrategy), so unlike
+    _add_max_interaction_split's own joint total, there's no shared
+    already-explained-by-something-else baseline riding along in the
+    numerator here to strip out first -- a candidate's raw importance
+    *is* already its own marginal contribution over nothing, so dividing
+    it directly by level count is correct as written. No-op if no
+    eligible candidate remains."""
     ranked_keys = [k for k, _ in default_importance]
     importance_by_key = dict(default_importance)
     candidates = _splittable_candidates(default_df, ranked_keys, resolved_split_by)
@@ -1852,61 +1885,49 @@ def _nav_label(key_prefix: str, is_root: bool) -> str:
     return desc or "Sub-strategy (unclaimed)"
 
 
-# Tree-drawing glyphs for the sidebar nav (see _tree_prefix) -- the same
-# convention every CLI `tree` command uses, so a glance at the sidebar
-# shows exactly which nodes are siblings/children of which others, not
-# just how deep each one is (plain indentation alone can't distinguish "my
-# parent's next child" from "my own child" at the same depth). \u00a0
-# (non-breaking space), not a plain " ", for every blank-filler position --
-# regular spaces collapse away in the rendered HTML, undoing the alignment.
-_TREE_VERTICAL, _TREE_BRANCH, _TREE_LAST_BRANCH, _TREE_HORIZONTAL, _NBSP = "│", "├", "└", "─", " "
+# Per-depth indentation for the sidebar nav tree (see _render_navigation_node).
+# A previous version drew an ASCII tree (glyphs like "│├└─") as plain text in
+# front of each button's own label, the same convention any CLI `tree`
+# command uses -- but Streamlit centers a button's label within it, so a
+# longer label re-centers the whole string and drags its glyphs out of
+# alignment with everything else, defeating the entire point. Real CSS
+# padding-left, keyed to each button's own `key=` (Streamlit turns that into
+# a `st-key-<sanitized key>` class on the button's wrapper -- see
+# _nav_button_css_class), indents correctly regardless of label length.
+_NAV_INDENT_BASE_PX = 8
+_NAV_INDENT_STEP_PX = 18
 
 
-def _tree_prefix(ancestor_is_last: list[bool], is_last: bool) -> str:
-    """A tree-drawing prefix (e.g. "│  ├─ ") for a non-root
-    nav node: one 2-character segment per ancestor level -- "│ " if that
-    ancestor still has more siblings below it (so its own branch line must
-    keep drawing down through this row), blank otherwise (its branch
-    already closed) -- followed by this node's own glyph: "├─" if it has
-    more siblings after it, "└─" if it's the last child. `ancestor_is_last`
-    holds one bool per ancestor strictly between root and this node's own
-    parent (root itself draws no segment -- see _render_navigation_node)."""
-    segments = ["" if last else _TREE_VERTICAL + _NBSP for last in ancestor_is_last]
-    segments = [s + _NBSP if s else _NBSP * 2 for s in segments]
-    branch = _TREE_LAST_BRANCH if is_last else _TREE_BRANCH
-    return "".join(segments) + branch + _TREE_HORIZONTAL + _NBSP
+def _nav_button_css_class(key: str) -> str:
+    """The CSS class Streamlit's own frontend derives from a widget's
+    `key=` ("if key is provided, it will be used as a CSS class name
+    prefixed with st-key-"): the key, trimmed, with every character outside
+    [a-zA-Z0-9_-] replaced by '-'."""
+    return "st-key-" + re.sub(r"[^a-zA-Z0-9_-]", "-", key.strip())
 
 
-def _render_navigation_node(key_prefix: str, is_root: bool, ancestor_is_last: list[bool], is_last: bool) -> None:
+def _render_navigation_node(key_prefix: str, is_root: bool, depth: int, css_rules: list[str]) -> None:
     """One sidebar button for the node at `key_prefix` -- clicking it
     switches the central column to show that node (see _select_node) --
-    plus one more, prefixed with its own tree-drawing glyph (see
-    _tree_prefix), for each of its own children, recursively. The
-    currently selected node's own button renders as `type="primary"` so it
-    stands out from the rest of the tree.
-
-    `ancestor_is_last`/`is_last` are this node's own position in the tree:
-    `is_last` is whether it's the last (bottom-most) child among its own
-    siblings; `ancestor_is_last` is the same "was it the last child"
-    reading for every ancestor from just below root down to (not
-    including) this node's own parent -- both needed to draw
-    `_tree_prefix` correctly. Root gets neither (it draws no prefix at
-    all), and doesn't contribute its own segment to its children's
-    `ancestor_is_last` either -- root is the sidebar's own header, not a
-    branch in the tree it's heading."""
+    plus one more for each of its own children, recursively, each indented
+    `_NAV_INDENT_STEP_PX` further than its parent (root sits at `depth` 0).
+    Appends this node's own indentation rule to `css_rules`; _render_navigation
+    joins the whole list into one <style> block once the full tree has been
+    rendered. The currently selected node's own button renders as
+    `type="primary"` so it stands out from the rest of the tree."""
     is_selected = _selected_node() == key_prefix
-    prefix = "" if is_root else _tree_prefix(ancestor_is_last, is_last)
+    button_key = f"nav::{key_prefix}"
+    css_rules.append(
+        f".{_nav_button_css_class(button_key)} button "
+        f"{{ justify-content: flex-start; padding-left: {_NAV_INDENT_BASE_PX + depth * _NAV_INDENT_STEP_PX}px; }}"
+    )
     st.sidebar.button(
-        f"{prefix}{_nav_label(key_prefix, is_root)}", key=f"nav::{key_prefix}",
+        _nav_label(key_prefix, is_root), key=button_key,
         type="primary" if is_selected else "secondary",
         on_click=_select_node, args=(key_prefix,), use_container_width=True,
     )
-    children = _substrategy_children(key_prefix)
-    child_ancestor_is_last = ancestor_is_last if is_root else ancestor_is_last + [is_last]
-    for i, child_id in enumerate(children):
-        _render_navigation_node(
-            _child_key_prefix(key_prefix, child_id), False, child_ancestor_is_last, i == len(children) - 1,
-        )
+    for child_id in _substrategy_children(key_prefix):
+        _render_navigation_node(_child_key_prefix(key_prefix, child_id), False, depth + 1, css_rules)
 
 
 def _render_navigation() -> None:
@@ -1918,7 +1939,9 @@ def _render_navigation() -> None:
     which node is currently selected) is already fresh."""
     st.sidebar.header("Navigation")
     st.sidebar.caption("Click a sub-strategy to view it.")
-    _render_navigation_node("root::", True, [], True)
+    css_rules: list[str] = []
+    _render_navigation_node("root::", True, 0, css_rules)
+    st.sidebar.html(f"<style>{''.join(css_rules)}</style>")
 
 
 def main() -> None:

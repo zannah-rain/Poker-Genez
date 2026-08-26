@@ -46,11 +46,27 @@ def _strip_variance_suffix(option: str) -> str:
     return re.sub(r"\s+\(\d+% variance explained\)$", "", option)
 
 
-def _strip_nav_prefix(label: str) -> str:
-    """A sidebar nav button's own tree-drawing prefix (see
-    _tree_prefix -- non-breaking spaces plus any of "│├└─") stripped off,
-    leaving just its plain _nav_label text."""
-    return re.sub(r"^[\u00a0│├└─]+", "", label)
+def _nav_button_css_class(key: str) -> str:
+    """Reproduces Streamlit's own key -> CSS class sanitization (its `key`
+    docs: "it will be used as a CSS class name prefixed with st-key-") --
+    duplicated here (see _nav_button_css_class in cfr_explorer.py) rather
+    than imported, since cfr_explorer.py is a script driven only via
+    AppTest.from_file, not an importable module."""
+    return "st-key-" + re.sub(r"[^a-zA-Z0-9_-]", "-", key.strip())
+
+
+def _nav_indent_px(at, key_prefix: str) -> int:
+    """The padding-left (px) the sidebar nav's injected <style> block (see
+    _render_navigation_node) assigns to the button for `key_prefix`. Read
+    off `at.get("html")` rather than `at.sidebar.get("html")` -- Streamlit
+    routes style-only `st.html` content to a separate internal "event"
+    container instead of the block it was actually called on, so it never
+    shows up nested under the sidebar's own element tree."""
+    css_class = _nav_button_css_class(f"nav::{key_prefix}")
+    style = "".join(e.proto.body for e in at.get("html"))
+    match = re.search(rf"\.{re.escape(css_class)}\s*button\s*\{{[^}}]*padding-left:\s*(\d+)px", style)
+    assert match, f"no indent rule found for {css_class!r} in:\n{style}"
+    return int(match.group(1))
 
 
 def _variance_values_by_label(widget) -> dict[str, float]:
@@ -459,6 +475,94 @@ def interaction_per_level_checkpoint(_interaction_per_level_checkpoint_path, mon
     return _interaction_per_level_checkpoint_path
 
 
+_MARGINAL_INTERACTION_FEATURE_KEYS = ("street_norm", "hand_category_norm", "is_aggressor")
+
+
+def _make_marginal_interaction_checkpoint(path: str, n: int = 8000, seed: int = 0) -> None:
+    """Regression coverage for _add_max_interaction_split's own
+    per-level normalization dividing the *marginal* gain over the current
+    Split By, not the joint total (see its own docstring): street_norm
+    (this checkpoint's own current Split By, 4 levels) genuinely explains
+    action column 0 entirely on its own; hand_category_norm (26 levels)
+    genuinely explains action column 1, which street_norm alone can't
+    touch at all; is_aggressor (2 levels) explains nothing anywhere -- a
+    pure no-op feature. So street_norm alone already carries a real,
+    substantial baseline, hand_category_norm's own *marginal* gain over
+    that baseline is large, and is_aggressor's marginal gain is exactly
+    zero. Dividing the old way (joint *total*, which includes street_norm's
+    own already-explained-anyway baseline) by level count made is_aggressor
+    (baseline/2, a big number over a tiny divisor) beat hand_category_norm
+    (baseline+real gain, over 26) despite contributing nothing new --
+    "Add maximum interaction split" should pick hand_category_norm."""
+    feature_dim = len(cfr_features.feature_indices(_MARGINAL_INTERACTION_FEATURE_KEYS))
+    street_idx = _MARGINAL_INTERACTION_FEATURE_KEYS.index("street_norm")
+    hand_idx = _MARGINAL_INTERACTION_FEATURE_KEYS.index("hand_category_norm")
+    aggressor_idx = _MARGINAL_INTERACTION_FEATURE_KEYS.index("is_aggressor")
+    rng = np.random.default_rng(seed)
+
+    street_choice = rng.integers(0, 4, size=n)
+    street = np.array([0.0, 1 / 3, 2 / 3, 1.0], dtype=np.float32)[street_choice]
+    is_flop = street_choice == 1
+    hand_raw = rng.random(n).astype(np.float32)
+    is_weak_hand = hand_raw < 0.5
+    aggressor = rng.random(n).astype(np.float32)
+
+    signal_street = np.where(is_flop, -20.0, 20.0)
+    signal_hand = np.where(is_weak_hand, -20.0, 20.0)
+
+    X = np.zeros((n, feature_dim), dtype=np.float32)
+    X[:, street_idx] = street
+    X[:, hand_idx] = hand_raw
+    X[:, aggressor_idx] = aggressor
+    y = np.zeros((n, strategy.NUM_ACTION_CATEGORIES), dtype=np.float32)
+    y[:, 0] = signal_street + rng.normal(scale=0.1, size=n)  # fully explained by street_norm alone
+    y[:, 1] = signal_hand + rng.normal(scale=0.1, size=n)  # street_norm alone can't touch this
+    y[:, 2:] = rng.normal(scale=0.1, size=(n, strategy.NUM_ACTION_CATEGORIES - 2))
+
+    torch.manual_seed(0)
+    net = cfr_networks.AdvantageNet(input_dim=feature_dim, hidden_sizes=(32, 32), dropout=0.0)
+    optimizer = torch.optim.Adam(net.parameters(), lr=2e-3, weight_decay=1e-4)
+    Xt, yt = torch.from_numpy(X), torch.from_numpy(y)
+    net.train()
+    train_rng = np.random.default_rng(0)
+    for _ in range(2000):
+        idx = train_rng.integers(0, n, size=256)
+        pred = net(Xt[idx])
+        loss = ((pred - yt[idx]) ** 2).mean()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    net.eval()
+
+    net_config = cfr_networks.AdvantageNetConfig(
+        feature_keys=_MARGINAL_INTERACTION_FEATURE_KEYS, hidden_sizes=(32, 32), table_size=3,
+    )
+    cfr_networks.save(net, net_config, path)
+
+    reservoir = cfr_reservoir.ReservoirBuffer(
+        capacity=n, feature_dim=feature_dim, num_actions=strategy.NUM_ACTION_CATEGORIES, rng=rng,
+    )
+    for i in range(n):
+        regrets = rng.normal(size=strategy.NUM_ACTION_CATEGORIES).astype(np.float32)
+        legal_mask = rng.random(strategy.NUM_ACTION_CATEGORIES) > 0.3
+        legal_mask[strategy.ACTION_CALL] = True
+        reservoir.add(X[i], regrets, legal_mask, float(rng.integers(1, 10)))
+    reservoir.save(path)
+
+
+@pytest.fixture(scope="module")
+def _marginal_interaction_checkpoint_path(tmp_path_factory) -> str:
+    path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_marginal_interaction_checkpoint")), "checkpoint")
+    _make_marginal_interaction_checkpoint(path)
+    return path
+
+
+@pytest.fixture
+def marginal_interaction_checkpoint(_marginal_interaction_checkpoint_path, monkeypatch):
+    monkeypatch.setenv("CFR_EXPLORER_CHECKPOINT_PATH", _marginal_interaction_checkpoint_path)
+    return _marginal_interaction_checkpoint_path
+
+
 _THREE_WAY_FEATURE_KEYS = ("street_norm", "hole_suited", "connected_flop", "is_aggressor")
 
 
@@ -831,6 +935,30 @@ class TestSuggestedSubstrategyButtons:
         claims = at.session_state["substrategy_claims"]
         claimed_features = {next(iter(claims[f"root::substrategy_{cid}::"])) for cid in children}
         assert claimed_features == {"street_norm"}
+
+    def test_max_interaction_split_normalizes_the_marginal_gain_not_the_joint_total(
+        self, marginal_interaction_checkpoint,
+    ):
+        # Regression coverage: is_aggressor contributes nothing beyond
+        # what street_norm (this node's own current Split By) already
+        # explains alone, while hand_category_norm genuinely explains a
+        # large share street_norm alone can't touch (see
+        # _make_marginal_interaction_checkpoint). Dividing the joint
+        # *total* (which always also includes street_norm's own
+        # already-explained-anyway baseline) by level count let
+        # is_aggressor's 2 levels beat hand_category_norm's 26 purely
+        # because that shared baseline is a bigger number than
+        # hand_category_norm's own genuine marginal gain -- dividing the
+        # marginal gain instead should pick hand_category_norm.
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["street_norm"]).run(timeout=60)
+        at.button(key="root::add_max_interaction_split").click().run(timeout=60)
+
+        assert not at.exception
+        children = at.session_state["substrategy_children"]["root::"]
+        claims = at.session_state["substrategy_claims"]
+        claimed_features = {next(iter(claims[f"root::substrategy_{cid}::"])) for cid in children}
+        assert claimed_features == {"hand_category_norm"}
 
     def test_max_importance_split_works_without_any_split_by_chosen(self, synthetic_checkpoint):
         at = _run_app()
@@ -1394,31 +1522,25 @@ class TestNavigation:
         assert root_btn.label == "Overall Strategy"
         assert root_btn.proto.type == "primary"
 
-    def test_child_gets_its_own_prefixed_nav_button_and_becomes_selected(self, synthetic_checkpoint):
+    def test_child_gets_its_own_indented_nav_button_and_becomes_selected(self, synthetic_checkpoint):
         at = _run_app()
         c0 = _add_substrategy(at, "root::")  # auto-selected
 
         child_btn = at.sidebar.button(key=f"nav::{c0}")
-        assert _strip_nav_prefix(child_btn.label) != child_btn.label  # has a tree-drawing prefix root's own button lacks
+        assert _nav_indent_px(at, c0) > _nav_indent_px(at, "root::")
         assert child_btn.proto.type == "primary"
         assert at.sidebar.button(key="nav::root::").proto.type == "secondary"
 
-    def test_siblings_get_mid_and_last_branch_glyphs(self, synthetic_checkpoint):
-        # First-added child still has a sibling below it (c1) -- "├";
-        # last-added child has none below it -- "└" (see _tree_prefix).
+    def test_siblings_share_the_same_indent_level(self, synthetic_checkpoint):
         at = _run_app()
         c0 = _add_substrategy(at, "root::")
         _select(at, "root::")
         c1 = _add_substrategy(at, "root::")
 
-        assert at.sidebar.button(key=f"nav::{c0}").label.startswith("├")
-        assert at.sidebar.button(key=f"nav::{c1}").label.startswith("└")
+        assert _nav_indent_px(at, c0) == _nav_indent_px(at, c1)
+        assert _nav_indent_px(at, c0) > _nav_indent_px(at, "root::")
 
-    def test_grandchild_prefix_continues_its_parents_vertical_line(self, synthetic_checkpoint):
-        # c0 isn't root's last child (c1 comes after it), so a grandchild
-        # under c0 should see that ancestor's branch line still drawing
-        # through its own row (a "│" continuation segment) before its own
-        # (last-child) glyph.
+    def test_grandchild_is_indented_one_level_deeper_than_its_parent(self, synthetic_checkpoint):
         at = _run_app()
         c0 = _add_substrategy(at, "root::")
         _select(at, "root::")
@@ -1426,14 +1548,12 @@ class TestNavigation:
         _select(at, c0)
         grandchild = _add_substrategy(at, c0)
 
-        label = at.sidebar.button(key=f"nav::{grandchild}").label
-        assert label.startswith("│")
-        assert "└" in label
+        assert _nav_indent_px(at, grandchild) > _nav_indent_px(at, c0)
 
     def test_unclaimed_child_label_says_unclaimed(self, synthetic_checkpoint):
         at = _run_app()
         c0 = _add_substrategy(at, "root::")
-        assert _strip_nav_prefix(at.sidebar.button(key=f"nav::{c0}").label) == "Sub-strategy (unclaimed)"
+        assert at.sidebar.button(key=f"nav::{c0}").label == "Sub-strategy (unclaimed)"
 
     def test_child_claim_shows_up_in_its_nav_label(self, synthetic_checkpoint):
         at = _run_app()
