@@ -20,6 +20,22 @@ _FEATURE_KEYS = ("street_norm", "hole_suited", "hand_category_norm")
 _COLLAPSED_LABELS = ("Fold", "Call", "Raise", "All-In")
 
 
+@pytest.fixture(autouse=True)
+def isolated_strategies_dir(tmp_path, monkeypatch) -> str:
+    """Every test in this file gets its own empty scratch directory for
+    cfr_explorer.py's own saved/autosaved strategy files (see
+    _strategies_dir's own CFR_EXPLORER_STRATEGIES_DIR override) --
+    autouse, since plenty of tests here share one on-disk checkpoint path
+    via a module-scoped fixture (kept slow-to-build net inference results
+    cached across tests -- see _synthetic_checkpoint_path), which would
+    otherwise leak one test's own saved/autosaved strategy state into
+    every other test that happens to reuse the same checkpoint path,
+    entirely unrelated to what that other test is actually exercising."""
+    strategies_dir = str(tmp_path / "explorer_strategies")
+    monkeypatch.setenv("CFR_EXPLORER_STRATEGIES_DIR", strategies_dir)
+    return strategies_dir
+
+
 def _strip_variance_suffix(option: str) -> str:
     """A "Add filter/graph/table", "Split By", or "Cross with other
     features" dropdown option's plain feature label, with its own
@@ -2291,3 +2307,130 @@ class TestDecisionVarianceExplained:
         assert not at.exception
         value = _decision_variance_metric_value(at)
         assert 0 <= value <= 100
+
+
+class TestStrategySaveLoad:
+    """Save/load for a sub-strategy tree's own structure -- which nodes
+    exist and in what order, each one's own claim filters, and each one's
+    own Split By pick (deliberately not the "purely illustrative" Add
+    table/Add graph extras -- see _current_strategy_state) -- plus an
+    always-on autosave/autoload of that exact same shape, so a session
+    resumes right where it left off with no deliberate action required."""
+
+    def _autosave_path(self, isolated_strategies_dir: str) -> str:
+        return os.path.join(isolated_strategies_dir, "_autosave.json")
+
+    def test_nothing_is_autosaved_before_any_change_is_made(self, synthetic_checkpoint, isolated_strategies_dir):
+        _run_app()
+        assert not os.path.exists(self._autosave_path(isolated_strategies_dir))
+
+    def test_adding_a_substrategy_triggers_an_autosave(self, synthetic_checkpoint, isolated_strategies_dir):
+        at = _run_app()
+        _add_substrategy(at, "root::")
+
+        autosave_path = self._autosave_path(isolated_strategies_dir)
+        assert os.path.exists(autosave_path)
+        with open(autosave_path) as f:
+            state = json.load(f)
+        assert state["children"]["root::"] == at.session_state["substrategy_children"]["root::"]
+
+    def test_a_fresh_app_instance_resumes_the_previous_sessions_autosave(
+        self, synthetic_checkpoint, isolated_strategies_dir,
+    ):
+        at = _run_app()
+        child_prefix = _add_substrategy(at, "root::")
+        at.multiselect(key=f"{child_prefix}claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        _batch_set(at, {f"{child_prefix}claim_filter_values::street_norm": ["Preflop"]})
+
+        at2 = _run_app()  # a brand new session, sharing only the checkpoint + strategies dir on disk
+
+        assert not at2.exception
+        assert at2.session_state["substrategy_children"]["root::"] == at.session_state["substrategy_children"]["root::"]
+        assert at2.session_state["substrategy_claims"][child_prefix] == {"street_norm": ["Preflop"]}
+
+    def test_autoload_restores_the_previously_selected_node(self, synthetic_checkpoint, isolated_strategies_dir):
+        at = _run_app()
+        child_prefix = _add_substrategy(at, "root::")  # also selects the new child
+        assert at.session_state["selected_substrategy"] == child_prefix
+
+        at2 = _run_app()
+        assert at2.session_state["selected_substrategy"] == child_prefix
+
+    def test_save_and_load_round_trips_a_named_strategy(self, synthetic_checkpoint, isolated_strategies_dir):
+        at = _run_app()
+        child_prefix = _add_substrategy(at, "root::")
+        at.multiselect(key=f"{child_prefix}claim_filter_keys").set_value(["street_norm"]).run(timeout=60)
+        # The claim filter's own "keep values" multiselect and the "Save
+        # as" text input are set together in one .run() (rather than the
+        # text input getting its own later .run()) -- see _batch_set's own
+        # docstring: a format_func-based multiselect (every "keep values"
+        # widget included) isn't reliably preserved by AppTest across a
+        # run where it's not re-asserted alongside whatever else changed.
+        at.multiselect(key=f"{child_prefix}claim_filter_values::street_norm").set_value(["Preflop"])
+        at.text_input(key="strategy_save_name").set_value("My Strategy")
+        at.run(timeout=60)
+        at.button(key="strategy_save_button").click().run(timeout=60)
+
+        # Diverge from what was saved: remove the child sub-strategy (its
+        # own "remove" button lives on its own page -- see
+        # _render_substrategy -- and _add_substrategy already left it
+        # selected).
+        at.button(key=f"{child_prefix}remove").click().run(timeout=60)
+        assert at.session_state["substrategy_children"]["root::"] == []
+
+        at.selectbox(key="strategy_load_choice").set_value("My Strategy").run(timeout=60)
+        at.button(key="strategy_load_button").click().run(timeout=60)
+
+        assert not at.exception
+        assert at.session_state["substrategy_children"]["root::"] == [
+            child_prefix.rstrip(":").rsplit("substrategy_", 1)[-1]
+        ]
+        assert at.session_state["substrategy_claims"][child_prefix] == {"street_norm": ["Preflop"]}
+
+    def test_saved_strategy_appears_as_a_load_option(self, synthetic_checkpoint, isolated_strategies_dir):
+        at = _run_app()
+        at.text_input(key="strategy_save_name").set_value("Tight range").run(timeout=60)
+        at.button(key="strategy_save_button").click().run(timeout=60)
+
+        assert "Tight range" in at.selectbox(key="strategy_load_choice").options
+
+    def test_save_button_disabled_until_a_name_is_entered(self, synthetic_checkpoint, isolated_strategies_dir):
+        at = _run_app()
+        assert at.button(key="strategy_save_button").disabled
+
+        at.text_input(key="strategy_save_name").set_value("   ").run(timeout=60)
+        assert at.button(key="strategy_save_button").disabled  # blank after stripping -- still disabled
+
+        at.text_input(key="strategy_save_name").set_value("Loose range").run(timeout=60)
+        assert not at.button(key="strategy_save_button").disabled
+
+    def test_load_button_disabled_until_a_saved_strategy_is_chosen(self, synthetic_checkpoint, isolated_strategies_dir):
+        at = _run_app()
+        assert at.button(key="strategy_load_button").disabled
+
+    def test_save_name_is_sanitized_against_directory_traversal(
+        self, synthetic_checkpoint, isolated_strategies_dir,
+    ):
+        at = _run_app()
+        at.text_input(key="strategy_save_name").set_value("../../evil").run(timeout=60)
+        at.button(key="strategy_save_button").click().run(timeout=60)
+
+        assert not at.exception
+        # The traversal characters are stripped, not honored -- the file
+        # lands inside the isolated strategies dir itself, nowhere above it.
+        assert os.listdir(isolated_strategies_dir) == ["evil.json"]
+
+    def test_illustrative_extras_are_not_part_of_the_saved_state(self, synthetic_checkpoint, isolated_strategies_dir):
+        # Add table/Add graph are scratch analysis, not part of a
+        # sub-strategy's own implementable rule -- see the module docstring
+        # and _current_strategy_state -- so they're deliberately excluded
+        # from what gets saved.
+        at = _run_app()
+        at.multiselect(key="root::extra_table").set_value(["hole_suited"]).run(timeout=60)
+        at.text_input(key="strategy_save_name").set_value("No extras").run(timeout=60)
+        at.button(key="strategy_save_button").click().run(timeout=60)
+
+        with open(os.path.join(isolated_strategies_dir, "No extras.json")) as f:
+            state = json.load(f)
+        assert set(state.keys()) == {"children", "claims", "split_by", "selected"}
+

@@ -61,7 +61,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
+import re
 import uuid
 
 import numpy as np
@@ -940,6 +942,227 @@ def _set_split_by(key_prefix: str, split_by: list[str]) -> None:
     st.session_state.setdefault(_SUBSTRATEGY_SPLIT_BY_STATE_KEY, {})[key_prefix] = split_by
 
 
+# Save & load: a saved strategy is exactly the tree structure the three
+# sticky stores above hold -- which nodes exist and in what nesting/
+# priority order, each one's own claim filters, and each one's own Split
+# By pick -- round-tripped through a small JSON file per checkpoint, on
+# top of an always-on autosave/autoload of the same shape so a session
+# resumes where it left off with no deliberate action required (see
+# _autosave_strategy/_autoload_strategy_once, both called once per run
+# from main). Deliberately excludes the "purely illustrative" Add table/
+# Add graph extras (_WIDGET_VALUE_SHADOW_STATE_KEY) -- those aren't part
+# of a sub-strategy's own implementable rule, just scratch analysis.
+_STRATEGY_SAVE_EXTENSION = ".json"
+_AUTOSAVE_STRATEGY_NAME = "_autosave"
+_STRATEGY_AUTOSAVE_DIGEST_STATE_KEY = "strategy_autosave_digest"
+_STRATEGY_AUTOLOAD_CHECKPOINT_STATE_KEY = "strategy_autoload_checkpoint"
+
+
+def _strategies_dir(checkpoint_path: str) -> str:
+    """Where this checkpoint's own saved sub-strategy-tree structures (see
+    _current_strategy_state) live on disk -- colocated with, and named
+    after, `checkpoint_path` itself (not one shared global directory),
+    since a saved tree's own claim filters and Split By picks name feature
+    keys and bucket values that are only meaningful for the checkpoint
+    they were built against. Overridable via CFR_EXPLORER_STRATEGIES_DIR
+    (mirrors _default_checkpoint_path's own env-var override) purely so
+    tests/test_cfr_explorer.py can point every test at its own isolated
+    scratch directory -- several tests share one on-disk checkpoint path
+    (module-scoped fixtures, keeping slow-to-build net inference results
+    cached across tests -- see _synthetic_checkpoint_path), which would
+    otherwise leak one test's saved/autosaved strategies into the next.
+    Real usage never sets this, and always gets one scoped to its own
+    checkpoint_path instead."""
+    override = os.environ.get("CFR_EXPLORER_STRATEGIES_DIR")
+    return override if override else f"{checkpoint_path}.explorer_strategies"
+
+
+def _sanitize_strategy_name(name: str) -> str:
+    """A user-typed "Save as" name, restricted to characters safe to use
+    verbatim as a filename -- prevents directory traversal (a name like
+    "../../etc/passwd" collapses to just "etcpasswd")."""
+    return re.sub(r"[^A-Za-z0-9_ -]", "", name).strip()
+
+
+def _strategy_path(checkpoint_path: str, name: str) -> str:
+    return os.path.join(_strategies_dir(checkpoint_path), f"{name}{_STRATEGY_SAVE_EXTENSION}")
+
+
+def _saved_strategy_names(checkpoint_path: str) -> list[str]:
+    """Every named (i.e. not the reserved autosave) strategy currently
+    saved for `checkpoint_path`, sorted alphabetically -- the options
+    "Load a saved strategy" offers. [] if nothing's been saved yet (no
+    directory to list)."""
+    strategies_dir = _strategies_dir(checkpoint_path)
+    if not os.path.isdir(strategies_dir):
+        return []
+    names = [
+        filename[: -len(_STRATEGY_SAVE_EXTENSION)]
+        for filename in os.listdir(strategies_dir)
+        if filename.endswith(_STRATEGY_SAVE_EXTENSION)
+    ]
+    return sorted(name for name in names if name != _AUTOSAVE_STRATEGY_NAME)
+
+
+def _node_exists(key_prefix: str, children_by_prefix: dict[str, list[str]]) -> bool:
+    """Whether `key_prefix` is still reachable from root through
+    `children_by_prefix` -- used to validate a saved "selected" node (see
+    _current_strategy_state/_apply_strategy_state) still exists in the
+    tree being restored, rather than blindly trusting a value that could
+    point at a node a since-edited tree no longer has."""
+    if key_prefix == "root::":
+        return True
+    parent_prefix, child_id = _parent_key_prefix_and_child_id(key_prefix)
+    if parent_prefix is None:
+        return False
+    return child_id in children_by_prefix.get(parent_prefix, []) and _node_exists(parent_prefix, children_by_prefix)
+
+
+def _current_strategy_state() -> dict:
+    """This session's own sub-strategy tree structure -- exactly, and
+    only, what "Save"/autosave persist and "Load" restores: which nodes
+    exist and in what nesting/priority order (`children`), each one's own
+    claim filters (`claims`) and Split By pick (`split_by`), plus whichever
+    node is currently on screen (`selected`), so reopening a saved
+    strategy also returns you to where you left off within it."""
+    return {
+        "children": st.session_state.setdefault(_SUBSTRATEGY_CHILDREN_STATE_KEY, {}),
+        "claims": st.session_state.setdefault(_SUBSTRATEGY_CLAIMS_STATE_KEY, {}),
+        "split_by": st.session_state.setdefault(_SUBSTRATEGY_SPLIT_BY_STATE_KEY, {}),
+        "selected": _selected_node(),
+    }
+
+
+def _strategy_state_digest(state: dict) -> str:
+    return hashlib.sha1(json.dumps(state, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _apply_strategy_state(state: dict) -> None:
+    """Overwrites this session's own sub-strategy tree with `state` (as
+    produced by _current_strategy_state, then round-tripped through JSON
+    -- see _save_strategy/_load_strategy), and clears every currently
+    -instantiated per-node widget's own session_state entry (every key
+    starting with the shared "root::" prefix every node's own key_prefix
+    is built from -- see _child_key_prefix) so each one re-initializes
+    from the newly loaded sticky state on its own next render, rather than
+    an already-instantiated widget silently keeping its own stale value (a
+    widget's `default=` is only ever honored the very first time its key
+    is instantiated -- see the module-level comment on the sticky-state
+    stores, and _add_best_second_split_by for the same fix applied to one
+    single widget instead of every one at once)."""
+    children = state.get("children", {})
+    st.session_state[_SUBSTRATEGY_CHILDREN_STATE_KEY] = children
+    st.session_state[_SUBSTRATEGY_CLAIMS_STATE_KEY] = state.get("claims", {})
+    st.session_state[_SUBSTRATEGY_SPLIT_BY_STATE_KEY] = state.get("split_by", {})
+    for key in [k for k in st.session_state if k.startswith("root::")]:
+        del st.session_state[key]
+    selected = state.get("selected", "root::")
+    _select_node(selected if _node_exists(selected, children) else "root::")
+
+
+def _save_strategy(checkpoint_path: str, name: str) -> None:
+    strategies_dir = _strategies_dir(checkpoint_path)
+    os.makedirs(strategies_dir, exist_ok=True)
+    with open(_strategy_path(checkpoint_path, name), "w", encoding="utf-8") as f:
+        json.dump(_current_strategy_state(), f, indent=2)
+
+
+def _load_strategy(checkpoint_path: str, name: str) -> None:
+    path = _strategy_path(checkpoint_path, name)
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        state = json.load(f)
+    _apply_strategy_state(state)
+
+
+def _autoload_strategy_once(checkpoint_path: str) -> None:
+    """Restores this checkpoint's own most recent autosave (see
+    _autosave_strategy) the first time `checkpoint_path` is seen in this
+    session -- "starting up" pointed at a checkpoint that already has one
+    resumes exactly where that autosave left off, rather than an empty
+    tree, without repeatedly re-applying it (clobbering live edits) on
+    every later rerun. Guarded per checkpoint_path, not just "ever done
+    once", so switching to a different checkpoint via the sidebar's own
+    text input also resumes *that* checkpoint's own most recent autosave
+    the first time it's selected.
+
+    Clears the autosave-change-detection baseline (see _autosave_strategy)
+    rather than establishing it here directly -- every node's own widgets
+    still stamp a "no filters"/"no Split By yet" entry into the sticky
+    stores the very first time they're rendered, even when nothing was
+    actually picked (see _set_local_filters/_set_split_by, called
+    unconditionally), so the state immediately after this first render
+    would otherwise almost always read as "different" from whatever was
+    just loaded (or from the untouched empty default) purely from that
+    bookkeeping -- not a real change -- and get needlessly (if
+    harmlessly) written straight back out before anyone's done anything.
+    Leaving the baseline unset instead means _autosave_strategy's own
+    first call this checkpoint just quietly establishes it against
+    whatever this first render actually produces."""
+    if st.session_state.get(_STRATEGY_AUTOLOAD_CHECKPOINT_STATE_KEY) == checkpoint_path:
+        return
+    st.session_state[_STRATEGY_AUTOLOAD_CHECKPOINT_STATE_KEY] = checkpoint_path
+    _load_strategy(checkpoint_path, _AUTOSAVE_STRATEGY_NAME)
+    st.session_state.pop(_STRATEGY_AUTOSAVE_DIGEST_STATE_KEY, None)
+
+
+def _autosave_strategy(checkpoint_path: str) -> None:
+    """Silently persists this session's own current sub-strategy tree (see
+    _current_strategy_state) as this checkpoint's own autosave, but only
+    when it's actually different from the baseline established the first
+    time this checkpoint was seen this session (tracked via a plain
+    content digest, not a dirty flag threaded through every mutating
+    callback -- cheaper to compute once per render than to keep correct at
+    every single call site that can change the tree; see
+    _autoload_strategy_once for why that baseline is established here, on
+    this function's own first call, rather than any earlier). Called once
+    per script run, after every other widget/callback has already had its
+    chance to mutate state this run (see main), so it always reflects this
+    run's own final state."""
+    state = _current_strategy_state()
+    digest = _strategy_state_digest(state)
+    previous_digest = st.session_state.get(_STRATEGY_AUTOSAVE_DIGEST_STATE_KEY)
+    st.session_state[_STRATEGY_AUTOSAVE_DIGEST_STATE_KEY] = digest
+    if previous_digest is None or previous_digest == digest:
+        return
+    strategies_dir = _strategies_dir(checkpoint_path)
+    os.makedirs(strategies_dir, exist_ok=True)
+    with open(_strategy_path(checkpoint_path, _AUTOSAVE_STRATEGY_NAME), "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+
+def _render_strategy_controls(checkpoint_path: str) -> None:
+    """Sidebar "Strategy" section: explicit named Save/Load for this
+    checkpoint's own saved sub-strategy-tree structures, on top of (not
+    instead of) the automatic autosave/autoload every session already gets
+    regardless (see _autosave_strategy/_autoload_strategy_once, both
+    called from main) -- named saves are for deliberately keeping several
+    distinct trees around (e.g. one implementable strategy per stack
+    depth), while autosave/autoload alone is what makes closing and
+    reopening the app resume the very last thing worked on with no
+    deliberate action required."""
+    st.sidebar.subheader("Strategy")
+    st.sidebar.caption(
+        "Every change here autosaves for this checkpoint, and resumes automatically next time -- "
+        "use Save/Load below only to keep multiple named strategies around."
+    )
+    saved_names = _saved_strategy_names(checkpoint_path)
+    load_choice = st.sidebar.selectbox(
+        "Load a saved strategy", options=["Choose a saved strategy..."] + saved_names, key="strategy_load_choice",
+    )
+    st.sidebar.button(
+        "Load", key="strategy_load_button", disabled=load_choice == "Choose a saved strategy...",
+        on_click=_load_strategy, args=(checkpoint_path, load_choice),
+    )
+    save_name = st.sidebar.text_input("Save current strategy as", key="strategy_save_name")
+    sanitized_save_name = _sanitize_strategy_name(save_name)
+    st.sidebar.button(
+        "Save", key="strategy_save_button", disabled=not sanitized_save_name,
+        on_click=_save_strategy, args=(checkpoint_path, sanitized_save_name),
+    )
+
+
 def _sticky_multiselect(label: str, options: list[str], key: str, default: list[str], **kwargs) -> list[str]:
     """st.multiselect that remembers its own value across the widget not
     rendering for a run or more, via _WIDGET_VALUE_SHADOW_STATE_KEY (see
@@ -1725,6 +1948,8 @@ def main() -> None:
         st.error(f"No checkpoint found at {checkpoint_path}.{{pt,json}}")
         st.stop()
 
+    _autoload_strategy_once(checkpoint_path)
+
     _net, net_config, _reservoir = _load_checkpoint(checkpoint_path)
     df = _build_dataframe(checkpoint_path, int(max_samples))
     if df.empty:
@@ -1734,6 +1959,9 @@ def main() -> None:
     st.caption(f"{len(df):,} reservoir samples loaded.")
 
     display_keys = cfr_features.display_feature_keys(net_config.feature_keys)
+
+    st.sidebar.divider()
+    _render_strategy_controls(checkpoint_path)
 
     st.sidebar.divider()
     collapsed = st.sidebar.toggle("Collapse actions to Fold / Call / Raise / All-In", value=False)
@@ -1748,6 +1976,11 @@ def main() -> None:
     # freshly updated session_state (filter picks, child list, selection)
     # -- see _render_navigation.
     _render_navigation()
+
+    # Last, so it reflects this run's own final state -- every widget
+    # interaction/callback above has already had its chance to mutate the
+    # sub-strategy tree by this point (see _autosave_strategy).
+    _autosave_strategy(checkpoint_path)
 
 
 main()
