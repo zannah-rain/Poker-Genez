@@ -258,7 +258,17 @@ def _group_labels_for_rows(df: pd.DataFrame, row_index: np.ndarray, group_by_key
         return None
     columns = [
         _hole_hand_grid_cell_labels(df, row_index) if key == _HOLE_HAND_GRID_KEY
-        else df[_feature_col(key)].to_numpy()[row_index].astype(str)
+        # .iloc[row_index] *before* .to_numpy() -- df is often the whole
+        # loaded reservoir (root_df) while row_index is a much smaller
+        # subset (see _hole_hand_grid_cell_labels's own docstring on this
+        # same point). A categorical column's .to_numpy() materializes a
+        # full array of Python str objects for every one of df's own rows;
+        # doing that over the whole column and only then indexing down
+        # throws almost all of that work away, and scales with the full
+        # reservoir size instead of len(row_index) -- indexing the
+        # (cheap, codes-array-backed) Series first converts only the rows
+        # actually needed.
+        else df[_feature_col(key)].iloc[row_index].to_numpy().astype(str)
         for key in group_by_keys
     ]
     combined = columns[0]
@@ -644,6 +654,59 @@ def _rows_digest(df: pd.DataFrame | None) -> str:
     return hashlib.sha1(pd.util.hash_pandas_object(df, index=True).to_numpy().tobytes()).hexdigest()
 
 
+@st.cache_data(show_spinner=False)
+def _residual_and_total_variance(
+    _df: pd.DataFrame, _default_df: pd.DataFrame, _parent_node_df: pd.DataFrame | None,
+    default_digest: str, parent_digest: str,
+    parent_group_by_keys: tuple[str, ...], collapsed: bool,
+) -> tuple[np.ndarray, np.ndarray, float] | None:
+    """The part of _decision_variance_explained's own computation that
+    doesn't depend on `resolved_split_by` at all -- (default_index,
+    residual, total_variance), after subtracting whatever the parent's own
+    grouping (`parent_group_by_keys`) already predicts (see
+    _decision_variance_explained's own docstring for why). Split into its
+    own cached function because _decision_variance_by_key calls
+    _decision_variance_explained once per candidate key, every time with
+    the same default_df/parent_node_df/parent_group_by_keys/collapsed but
+    a *different* resolved_split_by -- without this split, every one of
+    those calls was a full cache miss recomputing this identical,
+    resolved_split_by-independent preamble (including its own two
+    _group_labels_for_rows calls, one of the more expensive steps here)
+    from scratch, once per candidate, instead of once per node visited.
+    None if `default_df` is empty (nothing to measure)."""
+    default_df, parent_node_df = _default_df, _parent_node_df
+    if default_df.empty:
+        return None
+    action_cols = _action_columns(collapsed)
+    default_view = _with_action_view(default_df, collapsed)
+    default_index = default_df.index.to_numpy()
+    default_actions = default_view[action_cols].to_numpy()
+
+    if parent_group_by_keys and parent_node_df is not None and not parent_node_df.empty:
+        parent_view = _with_action_view(parent_node_df, collapsed)
+        parent_labels = _group_labels_for_rows(_df, parent_node_df.index.to_numpy(), parent_group_by_keys)
+        parent_group_means = pd.DataFrame(parent_view[action_cols].to_numpy(), index=parent_labels).groupby(level=0).mean()
+        own_parent_labels = _group_labels_for_rows(_df, default_index, parent_group_by_keys)
+        # copy=True: under pandas's Copy-on-Write, .to_numpy() can hand back
+        # a read-only view when reindex ends up a no-op (index already
+        # matches) -- baseline is mutated in place just below, so it needs
+        # its own writable buffer regardless.
+        baseline = parent_group_means.reindex(own_parent_labels).to_numpy(copy=True)
+        # A group observed among this node's own rows but never observed
+        # in the parent's own claimed scope shouldn't normally happen
+        # (this node's own rows are a subset of the parent's) -- fall back
+        # to the parent's own grand mean rather than propagate a NaN.
+        missing = np.isnan(baseline).any(axis=1)
+        if missing.any():
+            baseline[missing] = parent_view[action_cols].mean().to_numpy()
+    else:
+        baseline = np.broadcast_to(default_actions.mean(axis=0), default_actions.shape)
+
+    residual = default_actions - baseline
+    total_variance = float((residual ** 2).sum(axis=1).mean())
+    return default_index, residual, total_variance
+
+
 @st.cache_data(show_spinner="Computing decision variance explained...")
 def _decision_variance_explained(
     _df: pd.DataFrame, _default_df: pd.DataFrame, _parent_node_df: pd.DataFrame | None,
@@ -704,42 +767,18 @@ def _decision_variance_explained(
     it's just empty) if `default_df` has no rows, e.g. a sub-strategy
     every one of whose children together claims its entire own scope,
     leaving nothing of its own "default behaviour" left to explain."""
-    df, default_df, parent_node_df = _df, _default_df, _parent_node_df
     if not resolved_split_by:
         return None
-    if default_df.empty:
+    shared = _residual_and_total_variance(
+        _df, _default_df, _parent_node_df, default_digest, parent_digest, parent_group_by_keys, collapsed,
+    )
+    if shared is None:
         return 0.0
-    action_cols = _action_columns(collapsed)
-    default_view = _with_action_view(default_df, collapsed)
-    default_index = default_df.index.to_numpy()
-    default_actions = default_view[action_cols].to_numpy()
-
-    if parent_group_by_keys and parent_node_df is not None and not parent_node_df.empty:
-        parent_view = _with_action_view(parent_node_df, collapsed)
-        parent_labels = _group_labels_for_rows(df, parent_node_df.index.to_numpy(), parent_group_by_keys)
-        parent_group_means = pd.DataFrame(parent_view[action_cols].to_numpy(), index=parent_labels).groupby(level=0).mean()
-        own_parent_labels = _group_labels_for_rows(df, default_index, parent_group_by_keys)
-        # copy=True: under pandas's Copy-on-Write, .to_numpy() can hand back
-        # a read-only view when reindex ends up a no-op (index already
-        # matches) -- baseline is mutated in place just below, so it needs
-        # its own writable buffer regardless.
-        baseline = parent_group_means.reindex(own_parent_labels).to_numpy(copy=True)
-        # A group observed among this node's own rows but never observed
-        # in the parent's own claimed scope shouldn't normally happen
-        # (this node's own rows are a subset of the parent's) -- fall back
-        # to the parent's own grand mean rather than propagate a NaN.
-        missing = np.isnan(baseline).any(axis=1)
-        if missing.any():
-            baseline[missing] = parent_view[action_cols].mean().to_numpy()
-    else:
-        baseline = np.broadcast_to(default_actions.mean(axis=0), default_actions.shape)
-
-    residual = default_actions - baseline
-    total_variance = float((residual ** 2).sum(axis=1).mean())
+    default_index, residual, total_variance = shared
     if total_variance <= 0.0:
         return 0.0
 
-    own_labels = _group_labels_for_rows(df, default_index, tuple(resolved_split_by))
+    own_labels = _group_labels_for_rows(_df, default_index, tuple(resolved_split_by))
     own_group_means = pd.DataFrame(residual, index=own_labels).groupby(level=0).transform("mean").to_numpy()
     in_sample_deviation = residual - own_group_means
 
