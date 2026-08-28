@@ -563,6 +563,93 @@ def marginal_interaction_checkpoint(_marginal_interaction_checkpoint_path, monke
     return _marginal_interaction_checkpoint_path
 
 
+_CELL_COUNT_FEATURE_KEYS = ("street_norm", "hole_suited", "hand_category_norm")
+
+
+def _make_cell_count_checkpoint(path: str, n: int = 8000, seed: int = 0) -> None:
+    """Regression coverage for _add_best_second_split_by/_add_optimise_split_by's
+    own per-cell normalization (see _split_by_cell_count): street_norm (4
+    observed levels) is this checkpoint's own current Split By, already
+    fully explaining action column 0 alone. hole_suited (2 levels -- paired
+    with street_norm, 4*2=8 cells) and hand_category_norm (26 levels --
+    4*26=104 cells) each add a genuine marginal gain on top of that -- a
+    *smaller* one for hole_suited (action column 1) than for
+    hand_category_norm (action column 2), so the raw (unnormalized) gain
+    favors hand_category_norm, but hole_suited's own gain-per-cell is still
+    far larger (13x fewer cells more than compensates for a smaller raw
+    gain) -- "Add best second Split By feature"/"Optimise split by
+    features" should each pick hole_suited, not hand_category_norm."""
+    feature_dim = len(cfr_features.feature_indices(_CELL_COUNT_FEATURE_KEYS))
+    street_idx = _CELL_COUNT_FEATURE_KEYS.index("street_norm")
+    suited_idx = _CELL_COUNT_FEATURE_KEYS.index("hole_suited")
+    hand_idx = _CELL_COUNT_FEATURE_KEYS.index("hand_category_norm")
+    rng = np.random.default_rng(seed)
+
+    street_choice = rng.integers(0, 4, size=n)
+    street = np.array([0.0, 1 / 3, 2 / 3, 1.0], dtype=np.float32)[street_choice]
+    is_flop = street_choice == 1
+    suited = (rng.random(n) < 0.5).astype(np.float32)
+    hand_raw = rng.random(n).astype(np.float32)
+    is_weak_hand = hand_raw < 0.5
+
+    signal_street = np.where(is_flop, -20.0, 20.0)
+    signal_suited = np.where(suited > 0.5, -15.0, 15.0)  # smaller raw gain, only 8 cells once paired
+    signal_hand = np.where(is_weak_hand, -18.0, 18.0)  # bigger raw gain, but 104 cells once paired
+
+    X = np.zeros((n, feature_dim), dtype=np.float32)
+    X[:, street_idx] = street
+    X[:, suited_idx] = suited
+    X[:, hand_idx] = hand_raw
+    y = np.zeros((n, strategy.NUM_ACTION_CATEGORIES), dtype=np.float32)
+    y[:, 0] = signal_street + rng.normal(scale=0.1, size=n)  # fully explained by street_norm alone
+    y[:, 1] = signal_suited + rng.normal(scale=0.1, size=n)  # street_norm alone can't touch this
+    y[:, 2] = signal_hand + rng.normal(scale=0.1, size=n)  # street_norm alone can't touch this either
+    y[:, 3:] = rng.normal(scale=0.1, size=(n, strategy.NUM_ACTION_CATEGORIES - 3))
+
+    torch.manual_seed(0)
+    net = cfr_networks.AdvantageNet(input_dim=feature_dim, hidden_sizes=(32, 32), dropout=0.0)
+    optimizer = torch.optim.Adam(net.parameters(), lr=2e-3, weight_decay=1e-4)
+    Xt, yt = torch.from_numpy(X), torch.from_numpy(y)
+    net.train()
+    train_rng = np.random.default_rng(0)
+    for _ in range(2000):
+        idx = train_rng.integers(0, n, size=256)
+        pred = net(Xt[idx])
+        loss = ((pred - yt[idx]) ** 2).mean()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    net.eval()
+
+    net_config = cfr_networks.AdvantageNetConfig(
+        feature_keys=_CELL_COUNT_FEATURE_KEYS, hidden_sizes=(32, 32), table_size=3,
+    )
+    cfr_networks.save(net, net_config, path)
+
+    reservoir = cfr_reservoir.ReservoirBuffer(
+        capacity=n, feature_dim=feature_dim, num_actions=strategy.NUM_ACTION_CATEGORIES, rng=rng,
+    )
+    for i in range(n):
+        regrets = rng.normal(size=strategy.NUM_ACTION_CATEGORIES).astype(np.float32)
+        legal_mask = rng.random(strategy.NUM_ACTION_CATEGORIES) > 0.3
+        legal_mask[strategy.ACTION_CALL] = True
+        reservoir.add(X[i], regrets, legal_mask, float(rng.integers(1, 10)))
+    reservoir.save(path)
+
+
+@pytest.fixture(scope="module")
+def _cell_count_checkpoint_path(tmp_path_factory) -> str:
+    path = os.path.join(str(tmp_path_factory.mktemp("cfr_explorer_cell_count_checkpoint")), "checkpoint")
+    _make_cell_count_checkpoint(path)
+    return path
+
+
+@pytest.fixture
+def cell_count_checkpoint(_cell_count_checkpoint_path, monkeypatch):
+    monkeypatch.setenv("CFR_EXPLORER_CHECKPOINT_PATH", _cell_count_checkpoint_path)
+    return _cell_count_checkpoint_path
+
+
 _THREE_WAY_FEATURE_KEYS = ("street_norm", "hole_suited", "connected_flop", "is_aggressor_previous_street")
 
 
@@ -1046,6 +1133,32 @@ class TestSuggestedSubstrategyButtons:
 
         assert not at.exception
         assert at.multiselect(key="root::split_by").value == ["hole_suited", "street_norm"]
+
+    def test_best_second_split_by_penalizes_a_larger_resulting_table(self, cell_count_checkpoint):
+        # Regression coverage for _split_by_cell_count's own normalization
+        # (see _make_cell_count_checkpoint): hand_category_norm has the
+        # bigger raw marginal gain paired with street_norm, but at 4*26=104
+        # cells against hole_suited's 4*2=8, hole_suited's gain-per-cell is
+        # far larger -- "Add best second Split By feature" should pick
+        # hole_suited, not the raw-gain winner.
+        at = _run_app()
+        at.multiselect(key="root::split_by").set_value(["street_norm"]).run(timeout=60)
+        at.button(key="root::add_best_second_split_by").click().run(timeout=60)
+
+        assert not at.exception
+        assert set(at.multiselect(key="root::split_by").value) == {"street_norm", "hole_suited"}
+
+    def test_optimise_split_by_penalizes_a_larger_resulting_table(self, cell_count_checkpoint):
+        # Same regression coverage as test_best_second_split_by_penalizes_a_
+        # larger_resulting_table above, for "Optimise split by features"
+        # instead -- searching from scratch, {street_norm, hole_suited} (8
+        # cells) should still beat {street_norm, hand_category_norm} (104
+        # cells) despite the latter's bigger raw score.
+        at = _run_app()
+        at.button(key="root::optimise_split_by").click().run(timeout=60)
+
+        assert not at.exception
+        assert set(at.multiselect(key="root::split_by").value) == {"street_norm", "hole_suited"}
 
     def test_best_second_split_by_and_max_interaction_split_run_safely_under_exact_hole_hand(
         self, hole_hand_grid_checkpoint,

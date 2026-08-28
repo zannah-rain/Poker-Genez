@@ -1355,6 +1355,32 @@ def _splittable_candidates(
     return candidates
 
 
+def _split_by_cell_count(root_df: pd.DataFrame, default_df: pd.DataFrame, keys: list[str]) -> int:
+    """Number of cells (rows in the implementable lookup table) a Split By
+    pick of `keys` -- one or two features -- would require memorizing: the
+    product of each key's own number of distinct values actually OBSERVED
+    in default_df (see _observed_categories), not its full theoretical
+    value table -- an unobserved value contributes nothing anyone actually
+    has to memorize, so two 2-valued features together count as 4 cells,
+    not e.g. 2 * 27 just because one of them happens to have a large
+    theoretical table. Exact Hole Hand is counted the same way in spirit --
+    via however many distinct grid cells default_df's own rows actually
+    land on (see _hole_hand_grid_cell_labels) -- since _observed_categories
+    can't compute one for it directly (see _splittable_candidates). Used by
+    _add_best_second_split_by/_add_optimise_split_by to divide out a pick's
+    own memorization cost from its explained-variance gain, so a bigger
+    table needs a proportionally bigger payoff to still win -- see each
+    one's own docstring. Always >= 1."""
+    total = 1
+    for key in keys:
+        if key == _HOLE_HAND_GRID_KEY:
+            cells = len(set(_hole_hand_grid_cell_labels(root_df, default_df.index.to_numpy())))
+        else:
+            cells = len(_observed_categories(default_df, key))
+        total *= max(cells, 1)
+    return total
+
+
 def _add_max_interaction_split(
     key_prefix: str, root_df: pd.DataFrame, default_df: pd.DataFrame, parent_node_df: pd.DataFrame | None,
     parent_group_by_keys: tuple[str, ...], collapsed: bool, resolved_split_by: list[str],
@@ -1459,17 +1485,25 @@ def _add_best_second_split_by(
     """"Add best second Split By feature": when this node currently has
     exactly one Split By feature chosen, adds whichever second feature (out
     of every other _splittable_candidates candidate -- so, as with the
-    other two buttons here, never one that's constant across this node's
-    own claimed default_df, respecting whatever local filters got it there)
-    maximizes "Decision variance explained by Split By features on claimed
-    samples" once paired with it (see _decision_variance_by_key) --
-    optimizes that exact metric directly, with no per-level normalization
-    (unlike _add_max_interaction_split/_add_max_importance_split): this
-    button doesn't add any new sub-strategies for a person to learn, just a
-    second dimension to the *same* node's own existing rule, so there's no
-    per-level cost to weigh against. No-op unless exactly one Split By
-    feature is currently chosen (nothing to pair up with 0 -- and
-    MAX_SPLIT_BY_FEATURES already caps a pair at 2, so there's no "third").
+    other buttons here, never one that's constant across this node's own
+    claimed default_df, respecting whatever local filters got it there)
+    maximizes the *marginal* gain in "Decision variance explained by Split
+    By features on claimed samples" once paired with it (see
+    _decision_variance_by_key), per cell the resulting 2-feature table
+    would add to memorize (see _split_by_cell_count) -- mirroring
+    _add_max_interaction_split's own marginal-gain-over-baseline,
+    per-cell-of-what-this-pick-would-add normalization exactly (see its own
+    docstring for why the baseline needs subtracting first: the joint score
+    always also includes whatever the first feature already explains
+    alone, a constant across every candidate that dividing by a candidate's
+    own -- varying -- cell count doesn't treat as constant), just measured
+    in cells of the full resulting pair rather than levels of one new
+    feature (see _split_by_cell_count) -- a second feature that doubles the
+    table size for a small gain now loses to one that triples the gain for
+    the same doubling, not just whichever raw gain is bigger. No-op unless
+    exactly one Split By feature is currently chosen (nothing to pair up
+    with 0 -- and MAX_SPLIT_BY_FEATURES already caps a pair at 2, so
+    there's no "third").
 
     Exact Hole Hand is deliberately excluded from `candidates` here (unlike
     _add_optimise_split_by, which does include it) -- it always fills
@@ -1497,7 +1531,14 @@ def _add_best_second_split_by(
     scores = dict(_decision_variance_by_key(
         root_df, default_df, parent_node_df, parent_group_by_keys, candidates, tuple(resolved_split_by), collapsed,
     ))
-    best_key = max(candidates, key=lambda k: scores[k])
+    baseline_pct = _decision_variance_explained(
+        root_df, default_df, parent_node_df, _rows_digest(default_df), _rows_digest(parent_node_df),
+        parent_group_by_keys, list(resolved_split_by), collapsed,
+    ) or 0.0
+    best_key = max(
+        candidates,
+        key=lambda k: max(0.0, scores[k] - baseline_pct) / _split_by_cell_count(root_df, default_df, [first, k]),
+    )
     st.session_state[f"{key_prefix}split_by"] = [first, best_key]
     _set_split_by(key_prefix, [first, best_key])
 
@@ -1511,12 +1552,23 @@ def _add_optimise_split_by(
     unordered pair of _splittable_candidates from scratch (evaluated
     against no existing pairing -- an empty `resolved_split_by`, so a
     feature constant across this node's own claimed default_df is still
-    excluded, but nothing else is), setting Split By to whichever pair
+    excluded, but nothing else is), setting Split By to whichever grouping
     maximizes "Decision variance explained by Split By features on claimed
-    samples" (see _decision_variance_explained) directly -- the single best
-    *pair* this node's own claimed rows support, not just the best partner
-    for whatever's already chosen. No-op if fewer than 2 eligible
-    candidates remain (nothing to pair).
+    samples" (see _decision_variance_explained) *per cell* the resulting
+    table would need (see _split_by_cell_count) -- the single best
+    per-memorization-cost *pair* (or, if it wins outright, single feature --
+    see Exact Hole Hand below) this node's own claimed rows support, not
+    just whichever raw score is highest regardless of how large a table it
+    needs. Unlike _add_max_interaction_split/_add_max_importance_split's
+    own per-level normalization or _add_best_second_split_by's own
+    per-cell-of-the-marginal-gain one, there's no already-explained-by-
+    something-else baseline to subtract out of the numerator here first --
+    every candidate grouping is compared against the same "nothing chosen
+    yet" starting point, so each one's own raw pct already *is* its full
+    marginal gain (matching _add_max_importance_split's own reasoning for
+    why its numerator needs no baseline subtraction either). No-op if fewer
+    than 2 eligible candidates remain (nothing to pair) and Exact Hole Hand
+    isn't independently available.
 
     Exact Hole Hand is included as a candidate (when 100% preflop -- see
     _hole_hand_grid_split_by_available), but only ever evaluated *alone*,
@@ -1527,7 +1579,8 @@ def _add_optimise_split_by(
     fills both of Split By's own slots by itself -- see
     _resolve_split_by), so a joint score would misrepresent what this
     button's own pick would actually resolve to. It competes against every
-    genuine 2-feature pair as a single-feature alternative instead."""
+    genuine 2-feature pair as a single-feature alternative instead, its own
+    (typically large) cell count weighed the same way as any other pick's."""
     candidates = _splittable_candidates(
         default_df, split_by_options, (), include_hole_hand_grid=True,
     )
@@ -1536,16 +1589,19 @@ def _add_optimise_split_by(
         return
     default_digest = _rows_digest(default_df)
     parent_digest = _rows_digest(parent_node_df)
-    best_pair, best_pct = None, -1.0
+    best_pair, best_score = None, -1.0
 
     def _try(grouping: list[str]) -> None:
-        nonlocal best_pair, best_pct
+        nonlocal best_pair, best_score
         pct = _decision_variance_explained(
             root_df, default_df, parent_node_df, default_digest, parent_digest,
             parent_group_by_keys, grouping, collapsed,
         )
-        if pct is not None and pct > best_pct:
-            best_pair, best_pct = grouping, pct
+        if pct is None:
+            return
+        score = pct / _split_by_cell_count(root_df, default_df, grouping)
+        if score > best_score:
+            best_pair, best_score = grouping, score
 
     if _HOLE_HAND_GRID_KEY in candidates:
         _try([_HOLE_HAND_GRID_KEY])
@@ -1822,7 +1878,8 @@ def _render_substrategy(
             "Add best second Split By feature", key=f"{key_prefix}add_best_second_split_by",
             disabled=len(resolved_split_by) != 1,
             help="Adds whichever second feature, paired with this node's current lone Split By pick, maximizes "
-            "Decision variance explained.",
+            "the gain in Decision variance explained per cell the resulting 2-feature table would need to "
+            "memorize -- a bigger table needs a proportionally bigger payoff to still win.",
             on_click=_add_best_second_split_by,
             args=(
                 key_prefix, root_df, default_df, parent_node_df, parent_group_by_keys, collapsed,
@@ -1832,8 +1889,10 @@ def _render_substrategy(
     with suggest_cols[3]:
         st.button(
             "Optimise split by features", key=f"{key_prefix}optimise_split_by",
-            help="Ignores whatever Split By is currently chosen and sets it to whichever pair of features "
-            "maximizes Decision variance explained on this sub-strategy's own claimed samples.",
+            help="Ignores whatever Split By is currently chosen and sets it to whichever feature (or pair) "
+            "maximizes Decision variance explained per cell the resulting table would need to memorize, on "
+            "this sub-strategy's own claimed samples -- a bigger table needs a proportionally bigger payoff "
+            "to still win.",
             on_click=_add_optimise_split_by,
             args=(key_prefix, root_df, default_df, parent_node_df, parent_group_by_keys, collapsed, split_by_options),
         )
