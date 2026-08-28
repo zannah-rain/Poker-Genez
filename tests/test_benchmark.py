@@ -219,10 +219,11 @@ class TestRunBenchmarkUntilResolved:
 
 class TestRotatingCheckpointPools:
     """checkpoint_pools holds one or more independent player pools -- each
-    table draws its checkpoint side from ONE of them, chosen uniformly at
-    random (see _play_one_bb100_sample), so the aggregate verdict reflects
-    a mix across whichever pools are given rather than being decided
-    entirely by a single one."""
+    table draws its checkpoint side from ONE of them, chosen with
+    probability checkpoint_pool_weights (uniform if omitted -- see
+    _play_one_bb100_sample), so the aggregate verdict reflects a mix across
+    whichever pools are given rather than being decided entirely by a
+    single one."""
 
     def test_aggregate_edge_lands_between_the_two_pools_own_pure_edges(self):
         # folding_pool donates every hand to current's check-calls (a huge
@@ -251,8 +252,9 @@ class TestRotatingCheckpointPools:
         # A 1-element checkpoint_pools list should resolve identically to
         # the pre-rotating-pool API (every table drawing that one pool,
         # every time) -- a regression here would mean the rotating-pool
-        # change altered behavior for the (still-supported, and still the
-        # default via --benchmark-pool-size 1) single-anchor case.
+        # change altered behavior for the (still-supported) single-anchor
+        # case, e.g. early in a run before any pool member has been
+        # retired.
         current = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=0)
         checkpoint = make_fixed_players(SEATS_PER_SIDE, FOLD, id_offset=100)
         config = GameConfig(max_hands_per_session=20, starting_stack=200.0)
@@ -267,6 +269,52 @@ class TestRotatingCheckpointPools:
         current = make_random_players(SEATS_PER_SIDE)
         with pytest.raises(ValueError):
             run_benchmark_until_resolved(current, [], GameConfig(), np.random.default_rng(0))
+
+    def test_heavily_weighting_one_pool_pulls_the_aggregate_edge_toward_its_own_pure_edge(self):
+        # Same two structurally-opposite pools as the mixing test above,
+        # but weighted 999:1 toward folding_pool -- the aggregate edge
+        # should land close to fold_only's own pure edge, not roughly
+        # midway the way an unweighted (uniform) mix would.
+        current = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=0)
+        folding_pool = make_fixed_players(SEATS_PER_SIDE, FOLD, id_offset=100)
+        calling_pool = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=200)
+        config = GameConfig(max_hands_per_session=20, starting_stack=200.0)
+
+        fold_only = run_benchmark_until_resolved(
+            current, [folding_pool], config, np.random.default_rng(0),
+            min_tables=200, max_tables=200, table_batch=200, show_progress=False,
+        )
+        heavily_weighted = run_benchmark_until_resolved(
+            current, [folding_pool, calling_pool], config, np.random.default_rng(0),
+            min_tables=200, max_tables=200, table_batch=200, show_progress=False,
+            checkpoint_pool_weights=np.array([999.0, 1.0]),
+        )
+        uniform = run_benchmark_until_resolved(
+            current, [folding_pool, calling_pool], config, np.random.default_rng(0),
+            min_tables=200, max_tables=200, table_batch=200, show_progress=False,
+        )
+
+        assert abs(heavily_weighted.mean_bb_per_100 - fold_only.mean_bb_per_100) < abs(
+            uniform.mean_bb_per_100 - fold_only.mean_bb_per_100
+        )
+
+    def test_rejects_wrong_length_weights(self):
+        current = make_random_players(SEATS_PER_SIDE)
+        checkpoint = make_random_players(SEATS_PER_SIDE, seed=1)
+        with pytest.raises(ValueError):
+            run_benchmark_until_resolved(
+                current, [checkpoint], GameConfig(), np.random.default_rng(0),
+                checkpoint_pool_weights=np.array([0.5, 0.5]),
+            )
+
+    def test_rejects_all_zero_weights(self):
+        current = make_random_players(SEATS_PER_SIDE)
+        checkpoint = make_random_players(SEATS_PER_SIDE, seed=1)
+        with pytest.raises(ValueError):
+            run_benchmark_until_resolved(
+                current, [checkpoint], GameConfig(), np.random.default_rng(0),
+                checkpoint_pool_weights=np.array([0.0]),
+            )
 
 
 class TestRunBenchmarkParallel:

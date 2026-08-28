@@ -150,8 +150,8 @@ class _TraversalContext:
 
     `net` must expose `.predict(features: np.ndarray) -> np.ndarray` (shape
     (NUM_ACTIONS,), raw regret estimates) -- see cfr_networks.AdvantageNet.
-    `reservoir` must expose `.add(features, regrets, legal_mask, t)` -- see
-    cfr_reservoir.ReservoirBuffer.
+    `reservoir` must expose `.add(features, regrets, legal_mask, t, iteration=...)` --
+    see cfr_reservoir.ReservoirBuffer.
 
     `gto_spots`: a catalog of gto.GTOSpot entries (see that module) whose
     matching decisions are played exactly as their chart says instead of
@@ -443,7 +443,9 @@ def _decision_node(
         v_node = float(np.dot(sigma[legal_idx], values[legal_idx]))
         regret_vec = np.zeros(NUM_ACTIONS, dtype=np.float64)
         regret_vec[legal_idx] = values[legal_idx] - v_node
-        ctx.reservoir.add(feats, regret_vec.astype(np.float32), legal_mask, float(ctx.t * path_weight))
+        ctx.reservoir.add(
+            feats, regret_vec.astype(np.float32), legal_mask, float(ctx.t * path_weight), iteration=ctx.t,
+        )
         return v_node
 
     p = sigma[legal_idx]

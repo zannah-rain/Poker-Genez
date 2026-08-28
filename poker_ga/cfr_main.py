@@ -1,24 +1,45 @@
 """CLI: train a Single Deep CFR advantage network over 6-max NLHE.
 
 Every --benchmark-interval iterations, plays the current net head-to-head
-against a rotating pool of up to --benchmark-pool-size past snapshots
-(cfr_networks.clone) in a statistically-resolved 3-vs-3 match (benchmark.py)
--- a direct "did the last --benchmark-interval iterations actually help"
-check. Each table draws its opponent from ONE randomly chosen pool member
-(never mixed within a table -- see benchmark.run_benchmark_until_resolved's
-own docstring), so the aggregate verdict reflects performance against a
-representative sample of the net's own recent history rather than being
-decided entirely by whichever idiosyncrasies one specific past snapshot
-happens to have: training is genuinely self-play (see cfr_tree.py's own
-docstring), so its convergence guarantee is about the *average* strategy
+against a pool of past snapshots (cfr_networks.clone) in a
+statistically-resolved 3-vs-3 match (benchmark.py) -- a direct "did the
+last --benchmark-interval iterations actually help" check. The pool is
+built to look as much like the *training* data itself as this can manage,
+on both axes that matter:
+
+  - Membership: a pool member is kept for as long as the trainer's own
+    reservoir still holds rows collected while it was the active net --
+    tracked via each member's own start_iteration and the reservoir's own
+    per-row `iteration` field (see cfr_reservoir.py's own docstring for why
+    that's a *separate* field from `weights`/t, which cfr_tree.py's own
+    path_weight can shrink well below a row's true iteration). Once a
+    member's own attributable share of the reservoir's current total
+    training weight fades below --benchmark-pool-min-weight-fraction, it's
+    retired -- there's no fixed pool-size cap, because there's no reason to
+    keep (or discard) a snapshot on a schedule when the reservoir itself
+    already says how much it still actually matters to what's being
+    trained right now.
+  - Selection: each benchmark table draws its opponent from ONE pool
+    member (never mixed within a table -- see
+    benchmark.run_benchmark_until_resolved's own docstring), with
+    probability proportional to that same attributable weight -- so a
+    snapshot whose own era still dominates the reservoir gets tested
+    against proportionally more, and one that's nearly aged out barely
+    gets tested at all, mirroring how much the *net itself* has actually
+    been shaped by each era rather than testing every surviving era
+    equally.
+
+This all exists because training is genuinely self-play (see cfr_tree.py's
+own docstring): its convergence guarantee is about the *average* strategy
 approaching equilibrium, not about monotonically beating any one earlier
 version of itself head-to-head -- a run that's still improving can still
-lose to a recent snapshot of itself purely by chance. The pool only grows
-(dropping its oldest member once full) when a check shows improvement, so a
-run of non-improving checks keeps comparing against the same pool rather
-than one that's silently gone stale. If a check doesn't show a resolved
-improvement, the update is undone (Trainer.revert_to the pool's most
-recently confirmed-good member) and it counts toward early stopping.
+lose to a recent snapshot of itself purely by chance. A verdict pooled
+across several past snapshots, weighted by how much each one still shapes
+current training, is far less likely to flip on that kind of noise alone,
+and stays honest about *which* past self is actually the relevant one to
+beat. If a check doesn't show a resolved improvement, the update is undone
+(Trainer.revert_to the pool's most recently confirmed-good member) and it
+counts toward early stopping.
 
 Example:
     python -m poker_ga.cfr_main --iterations 200 --traversals-per-iteration 200 --table-size 6
@@ -27,6 +48,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 from concurrent.futures import Executor, ProcessPoolExecutor
@@ -130,29 +152,32 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--benchmark-interval", type=int, default=10,
         help="The progress check: every this many iterations, play the current net "
-        "head-to-head (3-vs-3 tables, benchmark.py) against a rotating pool of past snapshots "
-        "(see --benchmark-pool-size), starting with just the net as it stood when this run started "
-        "(iteration 0 for a fresh run, or wherever a reloaded checkpoint's own iteration count left "
-        "off -- see --reload-previous) -- until the result is statistically resolved (see "
-        "--benchmark-min/max-tables, --benchmark-p-value). The pool only grows (dropping its oldest "
-        "member once full) when a check shows improvement, so it stays anchored on nets actually "
-        "beaten across any non-improving checks in between. A direct, apples-to-apples 'did "
-        "training actually help' check, unlike the training loss (see cfr_train.py's _train_step "
-        "for why that's not comparable run over run). Set to 0 to disable.",
+        "head-to-head (3-vs-3 tables, benchmark.py) against a pool of past snapshots (see "
+        "--benchmark-pool-min-weight-fraction), starting with just the net as it stood when this "
+        "run started (iteration 0 for a fresh run, or wherever a reloaded checkpoint's own "
+        "iteration count left off -- see --reload-previous) -- until the result is statistically "
+        "resolved (see --benchmark-min/max-tables, --benchmark-p-value). A direct, apples-to-apples "
+        "'did training actually help' check, unlike the training loss (see cfr_train.py's "
+        "_train_step for why that's not comparable run over run). Set to 0 to disable.",
     )
     p.add_argument(
-        "--benchmark-pool-size", type=int, default=10,
-        help="How many past confirmed-good snapshots to keep in the rotating benchmark pool (see "
-        "--benchmark-interval). Each table draws its opponent from ONE randomly chosen pool member, "
-        "never mixed within a table (see benchmark.run_benchmark_until_resolved) -- so the aggregate "
-        "verdict reflects performance against a representative sample of the net's own recent "
-        "history, not just whichever idiosyncrasies the single most recent snapshot happens to have. "
-        "Training is genuine self-play (see cfr_tree.py's own docstring): its convergence guarantee "
-        "is about the *average* strategy approaching equilibrium, not about monotonically beating "
-        "any one earlier version of itself head-to-head, so a run that's still improving can still "
-        "lose to a recent snapshot of itself by chance -- pooling several past snapshots makes the "
-        "verdict far less likely to flip on that kind of noise alone. 1 recovers the original "
-        "single-anchor behavior.",
+        "--benchmark-pool-min-weight-fraction", type=float, default=0.01,
+        help="How the benchmark pool of past confirmed-good snapshots is maintained (see "
+        "--benchmark-interval): each member's own share of the trainer's own reservoir's current "
+        "total training weight is tracked (see cfr_reservoir.py's own `iterations` field and this "
+        "module's own docstring) -- once a member's own share fades below this fraction, it's "
+        "retired. No fixed pool-size cap -- a snapshot stays as long as the reservoir itself still "
+        "holds a meaningful amount of the data it produced, however long or short that turns out to "
+        "be, and is dropped once that's no longer true. The most recent member is always kept "
+        "regardless of its own share (both the revert target for the next non-improving check and "
+        "too newly promoted to have accumulated much reservoir weight yet). Each benchmark table "
+        "then draws its opponent from ONE pool member (never mixed within a table -- see "
+        "benchmark.run_benchmark_until_resolved), with probability proportional to that same share "
+        "-- so testing mirrors, as closely as this can manage, how much each past era of training "
+        "still actually shapes the current net, not just which eras happen to have survived at all. "
+        "Falls back to a uniform draw across the pool whenever every member's own share is 0 (e.g. "
+        "right after a fresh start, or immediately after reloading a reservoir saved before "
+        "`iterations` existed -- see cfr_reservoir.UNKNOWN_ITERATION).",
     )
     p.add_argument(
         "--benchmark-min-tables", type=int, default=500,
@@ -215,25 +240,40 @@ def _benchmark_players(
     ]
 
 
+# One (start_iteration, net) pair per pool member, oldest first --
+# start_iteration is the outer training iteration at which that member was
+# promoted (cloned from trainer.net right after a confirmed-improved
+# benchmark check), so it also marks the end of the *previous* member's own
+# span and the start of this one's -- see _benchmark_pool_weights.
+BenchmarkPool = list[tuple[int, cfr_networks.AdvantageNet]]
+
+
 def _benchmark_pool_member_path(checkpoint_path: str, i: int) -> str:
     return f"{checkpoint_path}_benchmark_pool_{i}"
 
 
+def _benchmark_pool_starts_path(checkpoint_path: str) -> str:
+    return f"{checkpoint_path}_benchmark_pool_starts.json"
+
+
 def _save_benchmark_pool(
-    benchmark_pool: list[cfr_networks.AdvantageNet], net_config: cfr_networks.AdvantageNetConfig, checkpoint_path: str,
+    benchmark_pool: BenchmarkPool, net_config: cfr_networks.AdvantageNetConfig, checkpoint_path: str,
 ) -> None:
-    """Writes each benchmark_pool member's own weights (oldest first,
-    matching the pool's own FIFO order -- see --benchmark-pool-size) to
-    <checkpoint_path>_benchmark_pool_<i>.pt/.json, alongside every
-    trainer.save(checkpoint_path) call, so a resumed run's rotating pool
-    picks up exactly where this one left off instead of silently
-    restarting at a single-entry pool -- a resumed run must not differ
-    from one that simply kept running in the same process (see
-    _load_benchmark_pool). Removes any stale member left over from a
-    previous, larger pool (e.g. --benchmark-pool-size was reduced between
-    runs)."""
-    for i, net in enumerate(benchmark_pool):
+    """Writes each benchmark_pool member's own weights (oldest first) to
+    <checkpoint_path>_benchmark_pool_<i>.pt/.json, plus their own
+    start_iterations together as one small JSON list
+    (<checkpoint_path>_benchmark_pool_starts.json, index-aligned with the
+    numbered members), alongside every trainer.save(checkpoint_path) call,
+    so a resumed run's pool picks up exactly where this one left off
+    instead of silently losing its own start_iteration attribution -- a
+    resumed run must not differ from one that simply kept running in the
+    same process (see _load_benchmark_pool). Removes any stale member left
+    over from a previous, larger pool (e.g. more members have since been
+    retired -- see _retire_stale_pool_members)."""
+    for i, (_start, net) in enumerate(benchmark_pool):
         cfr_networks.save(net, net_config, _benchmark_pool_member_path(checkpoint_path, i))
+    with open(_benchmark_pool_starts_path(checkpoint_path), "w", encoding="utf-8") as f:
+        json.dump([start for start, _net in benchmark_pool], f)
     i = len(benchmark_pool)
     while os.path.exists(f"{_benchmark_pool_member_path(checkpoint_path, i)}.pt"):
         os.remove(f"{_benchmark_pool_member_path(checkpoint_path, i)}.pt")
@@ -241,20 +281,116 @@ def _save_benchmark_pool(
         i += 1
 
 
-def _load_benchmark_pool(checkpoint_path: str) -> list[cfr_networks.AdvantageNet]:
-    """Reloads whatever rotating benchmark pool _save_benchmark_pool last
-    wrote for this checkpoint (oldest first), or [] if none exists -- a
-    fresh run, --no-reload-previous, or a checkpoint saved before this
-    existed all fall back to [] the same way (see _run_training, which
-    then seeds a fresh single-entry pool exactly as it would for a brand
-    new run)."""
-    pool = []
+def _load_benchmark_pool(checkpoint_path: str) -> BenchmarkPool:
+    """Reloads whatever benchmark pool _save_benchmark_pool last wrote for
+    this checkpoint (oldest first), or [] if none exists -- a fresh run,
+    --no-reload-previous, or a checkpoint saved before this existed all
+    fall back to [] the same way (see _run_training, which then seeds a
+    fresh single-entry pool exactly as it would for a brand new run). A
+    pool saved before start_iteration tracking existed (nets on disk, but
+    no `_benchmark_pool_starts.json`) falls back to treating every member
+    as if it started at iteration 0 -- attribution against the reservoir
+    will be wrong until the pool naturally reshapes itself around
+    freshly-tracked rows (see cfr_reservoir.UNKNOWN_ITERATION for the same
+    graceful-degradation spirit applied to individual reservoir rows)."""
+    pool_nets = []
     i = 0
     while os.path.exists(f"{_benchmark_pool_member_path(checkpoint_path, i)}.pt"):
         net, _config = cfr_networks.load(_benchmark_pool_member_path(checkpoint_path, i))
-        pool.append(net)
+        pool_nets.append(net)
         i += 1
-    return pool
+    if not pool_nets:
+        return []
+    starts_path = _benchmark_pool_starts_path(checkpoint_path)
+    if os.path.exists(starts_path):
+        with open(starts_path, encoding="utf-8") as f:
+            starts = json.load(f)
+    else:
+        starts = [0] * len(pool_nets)
+    return list(zip(starts, pool_nets))
+
+
+def _benchmark_pool_weights(
+    benchmark_pool: BenchmarkPool, reservoir: cfr_reservoir.ReservoirBuffer, current_iteration: int,
+) -> np.ndarray:
+    """One weight per benchmark_pool member (same order), proportional to
+    how much of the reservoir's own currently-held rows can be attributed
+    to the span of iterations that member was the active net for -- see
+    this module's own docstring. Member i "owns" every currently-held row
+    whose own raw collection iteration (reservoir.iterations -- *not*
+    reservoir.weights/t, which cfr_tree.py's own path_weight can shrink
+    well below a row's true iteration -- see cfr_reservoir.py's own
+    docstring) falls in [start_i, start_{i+1}) (or [start_last, +inf) for
+    the most recent member); each such row's own contribution is exactly
+    the Linear-CFR loss weight cfr_train._train_step would give it right
+    now (row's own raw t / current_iteration, matching _train_step's own
+    normalization exactly), summed. A row whose own iteration is
+    cfr_reservoir.UNKNOWN_ITERATION (reservoir saved before that field
+    existed) contributes to no member -- there's nothing honest to
+    attribute it to -- so right after upgrading an existing run, every
+    weight reads low (possibly all 0) until enough freshly-tracked rows
+    accumulate to dominate; callers should treat an all-zero result as "not
+    enough information yet" (see _resolve_benchmark_pool_weights), not
+    "every member is equally stale"."""
+    out = np.zeros(len(benchmark_pool))
+    if not benchmark_pool or reservoir.size == 0:
+        return out
+    iterations = reservoir.iterations[: reservoir.size]
+    row_weight = reservoir.weights[: reservoir.size] / max(current_iteration, 1)
+    known = iterations != cfr_reservoir.UNKNOWN_ITERATION
+    starts = [start for start, _net in benchmark_pool]
+    for i, start in enumerate(starts):
+        hi = starts[i + 1] if i + 1 < len(starts) else np.inf
+        mask = known & (iterations >= start) & (iterations < hi)
+        out[i] = float(row_weight[mask].sum())
+    return out
+
+
+def _retire_stale_pool_members(
+    benchmark_pool: BenchmarkPool, pool_weights: np.ndarray, min_weight_fraction: float,
+) -> BenchmarkPool:
+    """Drops every benchmark_pool member -- except the most recent, always
+    kept regardless of its own current weight (both because it's the
+    revert target for the very next non-improving check, and because a
+    just-promoted anchor may genuinely not have accumulated much reservoir
+    weight yet even if it's about to) -- whose own current attributable
+    weight share (`pool_weights`, see _benchmark_pool_weights) has faded
+    below `min_weight_fraction` of the pool's own total: "close to 0
+    attributable training weight" replaces a fixed pool-size cap as the
+    retirement criterion (see this module's own docstring). A no-op (keeps
+    everything) if the pool's own total weight is 0 -- nothing to compare
+    shares against yet (e.g. right after a fresh start, or a resume with an
+    all-unknown-provenance reloaded reservoir -- see
+    _benchmark_pool_weights)."""
+    if len(benchmark_pool) <= 1:
+        return benchmark_pool
+    total = float(pool_weights.sum())
+    if total <= 0.0:
+        return benchmark_pool
+    shares = pool_weights / total
+    last = len(benchmark_pool) - 1
+    return [member for i, member in enumerate(benchmark_pool) if i == last or shares[i] >= min_weight_fraction]
+
+
+def _resolve_benchmark_pool(
+    benchmark_pool: BenchmarkPool, reservoir: cfr_reservoir.ReservoirBuffer, current_iteration: int,
+    min_weight_fraction: float,
+) -> tuple[BenchmarkPool, np.ndarray]:
+    """Retires every stale member from `benchmark_pool` (see
+    _retire_stale_pool_members) based on its own current attributable
+    weight (see _benchmark_pool_weights), then returns (retained_pool,
+    normalized_sampling_weights) for whatever's left -- normalized_
+    sampling_weights sums to 1, falling back to a uniform draw across the
+    retained pool if every member's own attributable weight is still 0
+    (nothing to distinguish them by yet -- see _benchmark_pool_weights's
+    own docstring for when that happens)."""
+    weights = _benchmark_pool_weights(benchmark_pool, reservoir, current_iteration)
+    retained = _retire_stale_pool_members(benchmark_pool, weights, min_weight_fraction)
+    if len(retained) != len(benchmark_pool):
+        weights = _benchmark_pool_weights(retained, reservoir, current_iteration)
+    total = float(weights.sum())
+    normalized = weights / total if total > 0.0 else np.full(len(retained), 1.0 / len(retained))
+    return retained, normalized
 
 
 def _reload_checkpoint(
@@ -409,30 +545,31 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
         initial_optimizer_state=initial_optimizer_state, completed_iterations=completed_iterations,
     )
 
-    # The --benchmark-interval rotating pool: reloaded from wherever a
-    # previous run of this same checkpoint last left it (_load_benchmark_pool
-    # -- gated on --reload-previous the same way _reload_checkpoint's own net/
-    # reservoir/optimizer-state reload is, so --no-reload-previous starts
-    # completely fresh across the board), so a resumed run's pool picks up
-    # exactly where it left off rather than silently collapsing back to a
-    # single entry -- a resumed run must not differ from one that simply
-    # kept running in the same process. Falls back to a single-entry pool
+    # The --benchmark-interval pool: reloaded from wherever a previous run
+    # of this same checkpoint last left it (_load_benchmark_pool -- gated on
+    # --reload-previous the same way _reload_checkpoint's own net/reservoir/
+    # optimizer-state reload is, so --no-reload-previous starts completely
+    # fresh across the board), so a resumed run's pool picks up exactly
+    # where it left off rather than silently collapsing back to a single
+    # entry -- a resumed run must not differ from one that simply kept
+    # running in the same process. Falls back to a single-entry pool
     # holding whatever net this run's iteration loop below is about to start
     # from (freshly random, or reloaded -- including trainer.completed_iterations
     # iterations of prior training, since that's carried forward too -- see
     # _reload_checkpoint) whenever nothing was reloaded (a fresh run,
     # --no-reload-previous, or a checkpoint saved before this pool existed).
-    # Gains one more entry (oldest dropped once past --benchmark-pool-size)
-    # each time a check shows improvement -- see --benchmark-interval/
-    # --benchmark-pool-size's help text.
-    benchmark_pool: list[cfr_networks.AdvantageNet] = []
+    # Gains one more entry each time a check shows improvement, and loses
+    # whichever ones have faded below --benchmark-pool-min-weight-fraction
+    # of the reservoir's own current attributable weight (see this module's
+    # own docstring and _resolve_benchmark_pool) -- no fixed size cap.
+    benchmark_pool: BenchmarkPool = []
     if args.benchmark_interval > 0:
         if args.reload_previous:
             benchmark_pool = _load_benchmark_pool(checkpoint_path)
             if benchmark_pool:
                 print(f"Reloaded a {len(benchmark_pool)}-entry benchmark pool from {checkpoint_path}.")
         if not benchmark_pool:
-            benchmark_pool = [cfr_networks.clone(trainer.net)]
+            benchmark_pool = [(trainer.completed_iterations, cfr_networks.clone(trainer.net))]
 
     consecutive_non_improvements = 0
 
@@ -457,13 +594,16 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
                 _save_benchmark_pool(benchmark_pool, trainer.net_config(), checkpoint_path)
 
         if args.benchmark_interval > 0 and iteration % args.benchmark_interval == 0:
+            benchmark_pool, pool_sampling_weights = _resolve_benchmark_pool(
+                benchmark_pool, trainer.reservoir, iteration, args.benchmark_pool_min_weight_fraction,
+            )
             current_players = _benchmark_players(trainer.net, config.feature_keys, "current", id_offset=0, gto_spots=config.gto_spots)
             checkpoint_pools = [
                 _benchmark_players(
                     anchor, config.feature_keys, f"checkpoint_{i}",
                     id_offset=-100 * (i + 1), gto_spots=config.gto_spots,
                 )
-                for i, anchor in enumerate(benchmark_pool)
+                for i, (_start, anchor) in enumerate(benchmark_pool)
             ]
             outcome = run_benchmark_until_resolved(
                 current_players, checkpoint_pools, game_config, rng,
@@ -472,22 +612,23 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
                 show_progress=True, num_workers=num_workers, executor=executor,
                 min_starting_stack_bb=config.min_starting_stack_bb,
                 max_starting_stack_bb=config.max_starting_stack_bb,
+                checkpoint_pool_weights=pool_sampling_weights,
             )
             if outcome.resolved:
                 verdict = "IMPROVED" if outcome.improved else "REGRESSED"
             else:
                 verdict = "INCONCLUSIVE (table cap hit; treated as not improved)"
             confidence_pct = (1.0 - args.benchmark_p_value) * 100.0
+            weights_label = ", ".join(f"{w:.0%}" for w in pool_sampling_weights)
             print(
-                f"         | benchmark vs pool of {len(benchmark_pool)} past snapshot(s) | "
-                f"{outcome.tables_played} tables | current edge {outcome.mean_bb_per_100:+7.2f} bb/100 "
+                f"         | benchmark vs pool of {len(benchmark_pool)} past snapshot(s) "
+                f"(sampled {weights_label}) | {outcome.tables_played} tables | "
+                f"current edge {outcome.mean_bb_per_100:+7.2f} bb/100 "
                 f"({confidence_pct:.0f}% CI [{outcome.ci_low:+7.2f}, {outcome.ci_high:+7.2f}]) | {verdict}"
             )
             if outcome.improved:
                 consecutive_non_improvements = 0
-                benchmark_pool.append(cfr_networks.clone(trainer.net))
-                if len(benchmark_pool) > args.benchmark_pool_size:
-                    benchmark_pool.pop(0)
+                benchmark_pool.append((iteration, cfr_networks.clone(trainer.net)))
             else:
                 consecutive_non_improvements += 1
                 patience_label = args.early_stop_patience if args.early_stop_patience > 0 else "unlimited"
@@ -496,7 +637,7 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
                     f"confirmed-good snapshot ({consecutive_non_improvements}/{patience_label} "
                     "consecutive non-improvements)"
                 )
-                trainer.revert_to(benchmark_pool[-1])
+                trainer.revert_to(benchmark_pool[-1][1])
                 trainer.save(checkpoint_path)
                 _save_benchmark_pool(benchmark_pool, trainer.net_config(), checkpoint_path)
                 if args.early_stop_patience > 0 and consecutive_non_improvements >= args.early_stop_patience:

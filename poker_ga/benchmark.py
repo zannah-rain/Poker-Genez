@@ -136,20 +136,21 @@ def _play_side_match(
 def _play_one_bb100_sample(
     current_players: list[Player],
     checkpoint_pools: list[list[Player]],
+    checkpoint_pool_weights: np.ndarray,
     game_config: GameConfig,
     rng: np.random.Generator,
     min_starting_stack_bb: float = DEFAULT_MIN_STARTING_STACK_BB,
     max_starting_stack_bb: float = DEFAULT_MAX_STARTING_STACK_BB,
 ) -> float:
-    """Plays one 3-vs-3 table -- its checkpoint side drawn from ONE randomly
-    chosen pool in `checkpoint_pools` (not mixed within a table -- see
-    run_benchmark_until_resolved's own docstring for why a rotating pool of
-    several past anchors, rather than a single one, is worth having at
-    all) -- and reduces it to the current side's bb/100, the one
-    independent sample run_benchmark_until_resolved accumulates.
-    Deliberately a plain module-level function (not a closure/lambda) so it
-    can be pickled and sent to a worker process."""
-    checkpoint_players = checkpoint_pools[int(rng.integers(0, len(checkpoint_pools)))]
+    """Plays one 3-vs-3 table -- its checkpoint side drawn from ONE pool in
+    `checkpoint_pools`, chosen with probability `checkpoint_pool_weights`
+    (not mixed within a table -- see run_benchmark_until_resolved's own
+    docstring for why a weighted pool of several past anchors, rather than
+    a single one, is worth having at all) -- and reduces it to the current
+    side's bb/100, the one independent sample run_benchmark_until_resolved
+    accumulates. Deliberately a plain module-level function (not a
+    closure/lambda) so it can be pickled and sent to a worker process."""
+    checkpoint_players = checkpoint_pools[int(rng.choice(len(checkpoint_pools), p=checkpoint_pool_weights))]
     cur_net, _chk_net, cur_hands, _chk_hands = _play_side_match(
         current_players, checkpoint_players, game_config, rng,
         min_starting_stack_bb, max_starting_stack_bb,
@@ -241,23 +242,28 @@ def run_benchmark_until_resolved(
     executor: Executor | None = None,
     min_starting_stack_bb: float = DEFAULT_MIN_STARTING_STACK_BB,
     max_starting_stack_bb: float = DEFAULT_MAX_STARTING_STACK_BB,
+    checkpoint_pool_weights: np.ndarray | None = None,
 ) -> BenchmarkOutcome:
     """Plays 3-vs-3 tables one at a time, treating each table's
     current-side bb/100 as one independent sample. `checkpoint_pools` is a
     list of one or more independent player pools (see cfr_main.py's own
-    rotating-anchor pool) -- each table draws its checkpoint side from ONE
-    of them, chosen uniformly at random (see _play_one_bb100_sample), never
-    mixed within a table. With a single pool this is exactly "current vs
-    one fixed checkpoint"; with several, the aggregate verdict reflects how
-    the current net does against a representative sample of its own recent
-    history, rather than being decided entirely by whichever idiosyncrasies
-    one specific past snapshot happens to have -- self-play training's own
-    convergence guarantee is about the *average* strategy approaching
-    equilibrium, not about monotonically beating any one earlier version of
-    itself head-to-head, so a training run that's still genuinely
-    improving can still lose to a recent snapshot of itself by chance; a
-    verdict pooled across several past snapshots is far less likely to
-    flip on that kind of noise alone.
+    reservoir-weighted anchor pool) -- each table draws its checkpoint side
+    from ONE of them, chosen with probability `checkpoint_pool_weights`
+    (uniform if omitted -- must otherwise be the same length as
+    `checkpoint_pools` and sum to a positive number; see
+    _play_one_bb100_sample), never mixed within a table. With a single pool
+    this is exactly "current vs one fixed checkpoint"; with several, the
+    aggregate verdict reflects how the current net does against a
+    representative sample of its own recent history, rather than being
+    decided entirely by whichever idiosyncrasies one specific past snapshot
+    happens to have -- self-play training's own convergence guarantee is
+    about the *average* strategy approaching equilibrium, not about
+    monotonically beating any one earlier version of itself head-to-head,
+    so a training run that's still genuinely improving can still lose to a
+    recent snapshot of itself by chance; a verdict pooled across several
+    past snapshots (ideally weighted by how much each one actually still
+    influences training -- see cfr_main.py's own module docstring) is far
+    less likely to flip on that kind of noise alone.
 
     After the first `min_tables`, and again every `table_batch` tables
     after that, checks whether the `1 - p_value` confidence interval around
@@ -293,6 +299,19 @@ def run_benchmark_until_resolved(
         raise ValueError("min_tables must be at least 2 to compute a confidence interval.")
     if table_batch < 1:
         raise ValueError("table_batch must be at least 1.")
+    if checkpoint_pool_weights is None:
+        checkpoint_pool_weights = np.full(len(checkpoint_pools), 1.0 / len(checkpoint_pools))
+    else:
+        checkpoint_pool_weights = np.asarray(checkpoint_pool_weights, dtype=np.float64)
+        if checkpoint_pool_weights.shape != (len(checkpoint_pools),):
+            raise ValueError(
+                f"checkpoint_pool_weights must have exactly one entry per pool "
+                f"({len(checkpoint_pools)}), got shape {checkpoint_pool_weights.shape}."
+            )
+        total = checkpoint_pool_weights.sum()
+        if not (total > 0.0) or np.any(checkpoint_pool_weights < 0.0):
+            raise ValueError("checkpoint_pool_weights must be non-negative and sum to a positive number.")
+        checkpoint_pool_weights = checkpoint_pool_weights / total
 
     samples: list[float] = []
     target = min_tables
@@ -306,7 +325,7 @@ def run_benchmark_until_resolved(
                 while len(samples) < target:
                     samples.append(
                         _play_one_bb100_sample(
-                            current_players, checkpoint_pools, game_config, rng,
+                            current_players, checkpoint_pools, checkpoint_pool_weights, game_config, rng,
                             min_starting_stack_bb, max_starting_stack_bb,
                         )
                     )
@@ -316,8 +335,8 @@ def run_benchmark_until_resolved(
                 with _executor_scope(executor, num_workers) as pool:
                     futures = [
                         pool.submit(
-                            _play_one_bb100_sample, current_players, checkpoint_pools, game_config, table_rng,
-                            min_starting_stack_bb, max_starting_stack_bb,
+                            _play_one_bb100_sample, current_players, checkpoint_pools, checkpoint_pool_weights,
+                            game_config, table_rng, min_starting_stack_bb, max_starting_stack_bb,
                         )
                         for table_rng in batch_rngs
                     ]

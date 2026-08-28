@@ -4,7 +4,7 @@ import tempfile
 import numpy as np
 import torch
 
-from cfr_reservoir import ReservoirBuffer
+from cfr_reservoir import UNKNOWN_ITERATION, ReservoirBuffer
 
 
 def _make_buffer(capacity, rng_seed=0):
@@ -183,3 +183,76 @@ class TestSaveLoadRoundTrip:
         _add(loaded, 99)
         assert len(loaded) == 4
         assert loaded.features[3, 0] == 99.0
+
+
+class TestIterationTracking:
+    """`iterations` -- the raw outer training iteration a row was collected
+    at, distinct from `weights` (t, which cfr_tree.py's own path_weight can
+    shrink well below the true iteration for a deep-in-a-branch sample --
+    see this module's own docstring) -- feeds cfr_main.py's benchmark-pool
+    weighting, which needs to know *which* iteration a still-held row
+    actually came from, not just its loss weight."""
+
+    def test_defaults_to_t_when_not_given(self):
+        buf = _make_buffer(capacity=4)
+        _add(buf, 1, t=7.0)  # _add's own default: no iteration= override
+        assert buf.iterations[0] == 7.0
+
+    def test_explicit_iteration_can_differ_from_t(self):
+        # The real cfr_tree.py case: t is iteration * path_weight (< the
+        # true iteration whenever path_weight < 1), iteration is the raw,
+        # unscaled outer iteration number.
+        buf = _make_buffer(capacity=4)
+        features = np.full(3, 1.0, dtype=np.float32)
+        regrets = np.full(2, 1.0, dtype=np.float32)
+        legal_mask = np.array([True, True])
+        buf.add(features, regrets, legal_mask, t=3.5, iteration=14.0)
+        assert buf.weights[0] == 3.5
+        assert buf.iterations[0] == 14.0
+
+    def test_round_trips_through_save_load(self):
+        buf = _make_buffer(capacity=10)
+        for i in range(4):
+            features = np.full(3, i, dtype=np.float32)
+            regrets = np.full(2, i, dtype=np.float32)
+            buf.add(features, regrets, np.array([True, True]), t=float(i), iteration=float(i) * 10)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = os.path.join(tmp_dir, "checkpoint")
+            buf.save(path)
+            loaded = ReservoirBuffer.load(path, rng=np.random.default_rng(1))
+        assert list(loaded.iterations[:4]) == [0.0, 10.0, 20.0, 30.0]
+
+    def test_grown_buffers_new_slots_are_unknown_not_zero(self):
+        # 0 is a real iteration number (the very first one) -- the newly
+        # grown, not-yet-filled slots must read as UNKNOWN_ITERATION, not
+        # 0, or they'd silently misattribute to "iteration 0" if ever read
+        # before being filled.
+        buf = _make_buffer(capacity=3)
+        for i in range(3):
+            _add(buf, i)
+        buf.grow(6)
+        assert list(buf.iterations[3:6]) == [UNKNOWN_ITERATION] * 3
+
+    def test_loading_a_reservoir_saved_before_iterations_existed_falls_back_to_unknown(self):
+        # Simulates a checkpoint saved by an older version of this module,
+        # with no `iterations` key in its own .npz at all -- every row's
+        # true collection iteration is genuinely unrecoverable (see
+        # UNKNOWN_ITERATION's own docstring), not something to guess at
+        # from `weights` (real but path_weight-skewed).
+        buf = _make_buffer(capacity=5)
+        for i in range(3):
+            _add(buf, i, t=float(i))
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = os.path.join(tmp_dir, "checkpoint")
+            np.savez(
+                f"{path}.npz",
+                capacity=buf.capacity, feature_dim=buf.features.shape[1], num_actions=buf.regrets.shape[1],
+                size=buf.size, n_seen=buf.n_seen, features=buf.features[: buf.size],
+                regrets=buf.regrets[: buf.size], legal_masks=buf.legal_masks[: buf.size],
+                weights=buf.weights[: buf.size],
+                # deliberately no `iterations` key
+            )
+            loaded = ReservoirBuffer.load(path, rng=np.random.default_rng(1))
+        assert list(loaded.iterations[:3]) == [UNKNOWN_ITERATION] * 3
+        # The rest of the row still loads correctly -- only iterations is affected.
+        assert np.array_equal(loaded.weights[:3], buf.weights[:3])
