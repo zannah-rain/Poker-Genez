@@ -118,6 +118,14 @@ def has_flush_draw(cards: list[Card]) -> bool:
     return flush_draw_suit(cards) is not None
 
 
+def has_backdoor_flush_draw(cards: list[Card]) -> bool:
+    """True if there are exactly 3 cards of one suit among `cards` -- a
+    "backdoor" flush draw, needing both the turn and river (in either
+    order) to complete a flush rather than just one more card."""
+    suits = Counter(c.suit for c in cards)
+    return any(count == 3 for count in suits.values())
+
+
 def count_straight_draw_outs(cards: list[Card]) -> int:
     """Number of distinct ranks that would complete a straight if added to
     these cards. Returns 0 if a straight is already made (that's not a draw).
@@ -140,6 +148,32 @@ def has_straight_draw(cards: list[Card]) -> bool:
     """True if adding one more rank could complete a straight
     (open-ended or gutshot) given the current distinct ranks."""
     return count_straight_draw_outs(cards) > 0
+
+
+def has_backdoor_straight_draw(cards: list[Card]) -> bool:
+    """True if the current ranks have no live 1-card straight draw and no
+    straight is already made (count_straight_draw_outs would read 0 either
+    way), but some pair of additional ranks -- added in either order --
+    would complete one: a "backdoor" straight draw needing two specific
+    ranks across the remaining streets, not just one. Only meaningful where
+    the caller restricts it to the flop (2 more streets actually left to
+    fill both ranks) -- by the turn there's only one card left to come, so
+    "needs 2 more ranks" no longer describes a real draw."""
+    ranks = {c.rank for c in cards}
+    if straight_high(sorted(ranks, reverse=True)) is not None:
+        return False  # already made -- not a draw at all
+    if count_straight_draw_outs(cards) > 0:
+        return False  # already a live 1-card draw -- not "backdoor"
+    for first in range(2, 15):
+        if first in ranks:
+            continue
+        expanded = ranks | {first}
+        for second in range(2, 15):
+            if second in expanded:
+                continue
+            if straight_high(sorted(expanded | {second}, reverse=True)) is not None:
+                return True
+    return False
 
 
 def best_hand_from_available(hole: list[Card], board: list[Card]) -> dict:

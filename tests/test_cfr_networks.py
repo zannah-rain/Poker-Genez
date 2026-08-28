@@ -229,13 +229,16 @@ class TestMeanShapContributionsForSamplesMaskedFeatures:
         rng = np.random.default_rng(0)
         n = 4000
         is_river = rng.random(n) < 0.25
-        # nuts_flush_draw/combo_draw: pure noise, masked together at
+        # draw_norm/suit_connection_index: pure noise, masked together at
         # "river" -- zero true relationship to the target, whether masked
-        # or not. street_norm: the *real* cause of a river-specific shift
-        # (standing in for the actual reason draw features mask together
-        # with it). hole_suited: an honest, never-masked, always-irrelevant
-        # control -- the noise floor these should NOT exceed.
-        keys = ("nuts_flush_draw", "combo_draw", "street_norm", "hole_suited")
+        # or not (any two real `maskable` features sharing that same
+        # masking condition would do equally well here; these two just
+        # happen to be the real ones that do). street_norm: the *real*
+        # cause of a river-specific shift (standing in for the actual
+        # reason draw features mask together with it). hole_suited: an
+        # honest, never-masked, always-irrelevant control -- the noise
+        # floor these should NOT exceed.
+        keys = ("draw_norm", "suit_connection_index", "street_norm", "hole_suited")
         noise1 = np.where(is_river, MASKED, rng.random(n))
         noise2 = np.where(is_river, MASKED, rng.random(n))
         real_cause = is_river.astype(np.float64)
@@ -267,8 +270,8 @@ class TestMeanShapContributionsForSamplesMaskedFeatures:
         # Generous margin above the honest control's own noise-floor score
         # -- the old (unfixed) behavior scored these an order of magnitude
         # higher than a feature that's never masked and never matters.
-        assert result["nuts_flush_draw"] <= control_floor * 3 + 0.05
-        assert result["combo_draw"] <= control_floor * 3 + 0.05
+        assert result["draw_norm"] <= control_floor * 3 + 0.05
+        assert result["suit_connection_index"] <= control_floor * 3 + 0.05
 
 
 class TestMeanShapContributionsForSamplesExplainGroupLabels:

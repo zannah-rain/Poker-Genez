@@ -24,7 +24,8 @@ import numpy as np
 from cards import RANKS, Card
 from evaluator import (
     FULL_HOUSE, FLUSH, HIGH_CARD, PAIR, QUADS, STRAIGHT, STRAIGHT_FLUSH,
-    TRIPS, TWO_PAIR, best_hand_from_available, count_straight_draw_outs, straight_high,
+    TRIPS, TWO_PAIR, best_hand_from_available, count_straight_draw_outs,
+    has_backdoor_flush_draw, has_backdoor_straight_draw, straight_high,
 )
 from seating import SEAT_ROLES, seat_role
 
@@ -336,10 +337,25 @@ _OVERCARDS_VALUES = tuple(
     )
     for n in range(6)
 )
-_STRAIGHT_DRAW_VALUES = (
-    (0.0, "No Straight Draw"),
-    (0.5, "Gutshot"),
-    (1.0, "Open Ended Straight Draw"),
+# The single "Draw" family feature (draw_norm) -- see its own FeatureSpec
+# below for why this collapses what used to be several separate draw
+# signals into one, ordered roughly by equity (index 0 lowest, matching
+# every other ordinal family in this file). Combo Draw and (Nuts) Flush
+# Draw are the same underlying signal the old combo_draw/nuts_flush_draw
+# booleans used; BDFD/BDSD are new (see has_backdoor_flush_draw/
+# has_backdoor_straight_draw in evaluator.py) -- a plain (non-backdoor)
+# flush draw was already computed (hand["flush_draw"]) but never exposed
+# as its own top-level feature before, only ever folded into
+# nuts_flush_draw/combo_draw.
+_DRAW_VALUES = (
+    (0 / 7, "No Draw"),
+    (1 / 7, "Backdoor Straight Draw (BDSD, Flop Only)"),
+    (2 / 7, "Backdoor Flush Draw (BDFD, Flop Only)"),
+    (3 / 7, "Gutshot (4 Outs)"),
+    (4 / 7, "Open Ended Straight Draw (OESD, 8 Outs)"),
+    (5 / 7, "Flush Draw (9 Outs)"),
+    (6 / 7, "Nuts Flush Draw (9 Outs)"),
+    (7 / 7, "Combo Draw (Flush + Straight)"),
 )
 _RAISES_VALUES = (
     (0.0, "No raises yet this street"),
@@ -747,29 +763,19 @@ FEATURE_SPECS: list[FeatureSpec] = [
     # live here too, but are now sub-buckets of hand_category_norm instead
     # -- see _HAND_CATEGORY_VALUES.)
     FeatureSpec(
-        "combo_draw", "Combo Draw",
-        "1 if this player has both a flush draw and a straight draw (open-ended or "
-        "gutshot) at the same time, else 0. Masked to -1.0 (features.MASKED) on the "
-        "river, once no next card is left to complete either draw.",
-        group="Draw Features", maskable=True,
-    ),
-    FeatureSpec(
-        "nuts_flush_draw", "Nuts Flush Draw",
-        "1 if this player has a flush draw and holds the Ace of the drawing suit in "
-        "their hole cards, else 0. Masked to -1.0 (features.MASKED) on the river, "
-        "once no next card is left to complete the draw.",
-        group="Draw Features", maskable=True,
-    ),
-
-    FeatureSpec(
-        "straight_draw_norm", "Straight Draw",
-        "Straight-draw strength: 0 if no single rank would complete a straight, 0.5 "
-        "for a Gutshot (exactly 1 distinct rank would), 1.0 for an Open Ended draw "
-        "(2 or more distinct ranks would -- approximates a true open-ended draw; also "
-        "covers double-gutshots, which have similar equity). Always 0 preflop; masked "
-        "to -1.0 (features.MASKED) on the river, once no next card is left to "
-        "complete a straight.",
-        kind="categorical", value_table=_STRAIGHT_DRAW_VALUES, group="Draw Features",
+        "draw_norm", "Draw",
+        "This player's single strongest live draw, ordered roughly by equity: Combo "
+        "Draw (a flush draw and a straight draw at once) > Nuts Flush Draw > Flush "
+        "Draw (9 outs either way) > Open Ended Straight Draw (8 outs) > Gutshot (4 "
+        "outs) > Backdoor Flush Draw > Backdoor Straight Draw (BDFD/BDSD: flop-only, "
+        "needing both the turn and river) > No Draw. Where a hand qualifies for more "
+        "than one of these at once, the highest-equity one wins -- see _DRAW_VALUES "
+        "for the exact order -- collapsing what used to be several separate draw "
+        "signals into one feature without losing the information a player actually "
+        "cares about (the strongest draw in play). Always No Draw preflop; masked to "
+        "-1.0 (features.MASKED) on the river, once no next card is left to complete "
+        "or miss any draw.",
+        kind="categorical", value_table=_DRAW_VALUES, group="Draw Features",
         maskable=True,
     ),
 
@@ -899,29 +905,49 @@ def _clip01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
 
-def _hand_vs_board_heuristics(hole: list[Card], hand: dict, street: int) -> dict:
-    """Draw-shape heuristics relative to the board that don't fit
+def _hand_vs_board_heuristics(hole: list[Card], board: list[Card], hand: dict, street: int) -> dict:
+    """draw_norm: this player's single strongest live draw (see its own
+    FeatureSpec for the full precedence order and why it collapses what
+    used to be several separate draw signals into one). Doesn't fit
     hand_category_norm's ordinal scale (pair/set/straight/flush strength
     relative to the board, and now also no-made-hand high-card strength,
-    are folded in there instead -- see _hand_category_bucket). Not mutually
-    exclusive as a group, so these are standalone booleans rather than a
-    one-hot family. Masked to MASKED on the river (street == 3): a draw is
-    by definition unresolved (neither made nor whiffed yet), which is no
-    longer a meaningful state once there's no next card left to complete it."""
+    are folded in there instead -- see _hand_category_bucket). Masked to
+    MASKED on the river (street == 3): a draw is by definition unresolved
+    (neither made nor whiffed yet), which is no longer a meaningful state
+    once there's no next card left to complete it."""
     if street == 3:
-        return {"nuts_flush_draw": MASKED, "combo_draw": MASKED}
+        return {"draw_norm": MASKED}
 
     flush_draw = hand["flush_draw"]
     draw_suit = hand["flush_draw_suit"]
     nuts_flush_draw = flush_draw and any(c.suit == draw_suit and c.rank == 14 for c in hole)
-
     outs = hand["straight_draw_outs"]
     combo_draw = flush_draw and outs >= 1
 
-    return {
-        "nuts_flush_draw": float(nuts_flush_draw),
-        "combo_draw": float(combo_draw),
-    }
+    # Highest-equity match wins -- see _DRAW_VALUES for the exact order.
+    # Backdoor draws (BDFD/BDSD) only mean anything on the flop specifically
+    # (street == 1): by the turn there's only one card left to come, so
+    # "needs 2 more running cards" no longer describes a real 2-streets-left
+    # draw, even though has_backdoor_flush_draw/has_backdoor_straight_draw's
+    # own checks could occasionally still coincidentally hold later.
+    if combo_draw:
+        bucket = 7
+    elif nuts_flush_draw:
+        bucket = 6
+    elif flush_draw:
+        bucket = 5
+    elif outs >= 2:
+        bucket = 4
+    elif outs == 1:
+        bucket = 3
+    elif street == 1 and has_backdoor_flush_draw(hole + board):
+        bucket = 2
+    elif street == 1 and has_backdoor_straight_draw(hole + board):
+        bucket = 1
+    else:
+        bucket = 0
+
+    return {"draw_norm": bucket / 7.0}
 
 
 # Base index (within hand_category_norm's 27-value table -- see
@@ -1206,8 +1232,6 @@ def extract_features(sit: Situation) -> np.ndarray:
     hand = best_hand_from_available(sit.hole, sit.board)
     cat = hand["category"]
     hand_category_bucket = _hand_category_bucket(sit.hole, sit.board, cat, hand)
-    # 0 = no draw, 1 = Gutshot (exactly 1 out), 2 = Open Ended (2+ outs).
-    straight_draw_bucket = min(hand["straight_draw_outs"], 2)
 
     hole_suited = float(sit.hole[0].suit == sit.hole[1].suit)
     gap = _rank_gap(sit.hole[0].rank, sit.hole[1].rank)
@@ -1238,7 +1262,6 @@ def extract_features(sit: Situation) -> np.ndarray:
         "hole_high_card_norm": (hole_high_card_rank - 2) / 12.0,
         "shared_high_card_norm": ((shared_high_card_rank - 2) / 12.0) if shared_high_card_rank else 0.0,
         "num_overcards_norm": num_overcards / 5.0,
-        "straight_draw_norm": MASKED if sit.street == 3 else straight_draw_bucket / 2.0,
         "hole_suited": hole_suited,
         "hole_connectivity": hole_connectivity,
         "hole_hand_category_norm": hole_category / 11.0,
@@ -1259,7 +1282,7 @@ def extract_features(sit: Situation) -> np.ndarray:
         "opp_aggression_freq_norm": _clip01(sit.opp_aggression_freq),
         "opp_fold_vs_bet_norm": _clip01(sit.opp_fold_vs_bet),
     }
-    values.update(_hand_vs_board_heuristics(sit.hole, hand, sit.street))
+    values.update(_hand_vs_board_heuristics(sit.hole, sit.board, hand, sit.street))
     values.update(_hole_hand_grid_features(sit.hole, sit.street))
     values.update(_flop_texture(sit.board, sit.hole))
     values.update(_suit_connection_features(sit.hole, sit.board, sit.street))

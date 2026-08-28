@@ -432,7 +432,7 @@ class TestFlopTexture:
         board = [Card.from_str("5c"), Card.from_str("7d"), Card.from_str("9h")]
         values = values_by_key(make_situation(hole=[Card.from_str("6s"), Card.from_str("2d")], board=board))
         assert values["flop_connectivity_norm"] == 1.0
-        assert values["straight_draw_norm"] > 0.0
+        assert values["draw_norm"] > 0.0
 
     def test_dry_static_flop(self):
         board = [Card.from_str("2c"), Card.from_str("7d"), Card.from_str("Kh")]  # rainbow, disconnected
@@ -645,59 +645,91 @@ class TestHandCategoryPairBuckets:
 
 
 class TestHandVsBoardHeuristics:
+    """draw_norm collapses what used to be several separate draw signals
+    (combo_draw/nuts_flush_draw/straight_draw_norm) plus 2 backdoor-draw
+    signals into one ordinal feature -- see its own FeatureSpec for the
+    full precedence order (highest-equity match wins) and evaluator.py's
+    has_backdoor_flush_draw/has_backdoor_straight_draw for the 2 new
+    detectors. Bucket values are index/7 -- see features._DRAW_VALUES."""
+
     def test_nuts_flush_draw(self):
         hole = [Card.from_str("Ah"), Card.from_str("9h")]
         board = [Card.from_str("7h"), Card.from_str("4h"), Card.from_str("2c")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
         assert values["suit_connection_index"] == pytest.approx(4 / 5)  # flush draw: 4 cards of one suit
-        assert values["nuts_flush_draw"] == 1.0
+        assert values["draw_norm"] == pytest.approx(6 / 7)  # Nuts Flush Draw
 
     def test_flush_draw_without_the_nut_card(self):
         hole = [Card.from_str("Qh"), Card.from_str("9h")]
         board = [Card.from_str("7h"), Card.from_str("4h"), Card.from_str("2c")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
         assert values["suit_connection_index"] == pytest.approx(4 / 5)  # flush draw: 4 cards of one suit
-        assert values["nuts_flush_draw"] == 0.0
+        assert values["draw_norm"] == pytest.approx(5 / 7)  # Flush Draw (9 outs, no nut card)
 
-    def test_open_ended_straight_draw_is_the_top_bucket(self):
+    def test_open_ended_straight_draw(self):
         hole = [Card.from_str("6h"), Card.from_str("7d")]
         board = [Card.from_str("8c"), Card.from_str("9s"), Card.from_str("2h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["straight_draw_norm"] == pytest.approx(1.0)
+        assert values["draw_norm"] == pytest.approx(4 / 7)
 
-    def test_gutshot_is_the_middle_bucket(self):
+    def test_gutshot(self):
         hole = [Card.from_str("6h"), Card.from_str("7d")]
         board = [Card.from_str("8c"), Card.from_str("Ts"), Card.from_str("2h")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["straight_draw_norm"] == pytest.approx(0.5)
+        assert values["draw_norm"] == pytest.approx(3 / 7)
 
-    def test_no_straight_draw_is_the_bottom_bucket(self):
+    def test_backdoor_flush_draw(self):
+        # Exactly 3 cards of one suit (hole + one board card) on the flop,
+        # no other draw live at all.
+        hole = [Card.from_str("Ah"), Card.from_str("2h")]
+        board = [Card.from_str("7h"), Card.from_str("9c"), Card.from_str("Ks")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=1))
+        assert values["draw_norm"] == pytest.approx(2 / 7)
+
+    def test_backdoor_flush_draw_does_not_apply_past_the_flop(self):
+        # Same 3-of-a-suit shape as test_backdoor_flush_draw, but on the
+        # turn -- only one card left to come, so "needs both the turn and
+        # river" no longer describes a real draw; reads No Draw instead.
+        hole = [Card.from_str("Ah"), Card.from_str("2h")]
+        board = [Card.from_str("7h"), Card.from_str("9c"), Card.from_str("Ks"), Card.from_str("3d")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=2))
+        assert values["draw_norm"] == 0.0
+
+    def test_backdoor_straight_draw(self):
+        # No live 1-card straight draw and nothing made, but two specific
+        # ranks (7 and 8, in either order) would complete 6-7-8-9-10.
+        hole = [Card.from_str("2c"), Card.from_str("5d")]
+        board = [Card.from_str("9h"), Card.from_str("Tc"), Card.from_str("6s")]
+        values = values_by_key(make_situation(hole=hole, board=board, street=1))
+        assert values["draw_norm"] == pytest.approx(1 / 7)
+
+    def test_no_draw_is_the_bottom_bucket(self):
         hole = [Card.from_str("2h"), Card.from_str("2d")]
         board = [Card.from_str("9c"), Card.from_str("5s"), Card.from_str("Kh")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["straight_draw_norm"] == 0.0
+        assert values["draw_norm"] == 0.0
 
-    def test_combo_draw(self):
+    def test_combo_draw_outranks_flush_and_straight_draws_alone(self):
         hole = [Card.from_str("6h"), Card.from_str("7h")]
         board = [Card.from_str("8h"), Card.from_str("9h"), Card.from_str("2c")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
         assert values["suit_connection_index"] == pytest.approx(4 / 5)  # flush draw: 4 cards of one suit
-        assert values["straight_draw_norm"] > 0.0
-        assert values["combo_draw"] == 1.0
+        assert values["draw_norm"] == 1.0  # Combo Draw -- top of the precedence order
 
 
 class TestDrawFeaturesMaskedAtRiver:
-    """nuts_flush_draw/combo_draw/suit_connection_index/straight_draw_norm
-    are all draw-shape reads -- meaningless once the river's dealt and no
-    next card is left to complete or miss a draw -- so extract_features
-    masks all four to MASKED there, the same convention as
-    hole_hand_grid_x_norm/y_norm outside preflop."""
+    """draw_norm/suit_connection_index are both draw-shape reads --
+    meaningless once the river's dealt and no next card is left to
+    complete or miss a draw -- so extract_features masks both to MASKED
+    there, the same convention as hole_hand_grid_x_norm/y_norm outside
+    preflop."""
 
     def _river_situation(self):
         # A flop/turn flush-and-straight-draw-heavy hand, still holding a
-        # live draw (per test_combo_draw above) right up until the river
-        # card either completes it or doesn't -- exactly the case where
-        # unmasked values would otherwise read as real (nonzero) draws.
+        # live draw (per test_combo_draw_outranks_flush_and_straight_draws_alone
+        # above) right up until the river card either completes it or
+        # doesn't -- exactly the case where an unmasked value would
+        # otherwise read as a real (nonzero) draw.
         hole = [Card.from_str("6h"), Card.from_str("7h")]
         board = [
             Card.from_str("8h"), Card.from_str("9h"), Card.from_str("2c"),
@@ -705,26 +737,18 @@ class TestDrawFeaturesMaskedAtRiver:
         ]
         return make_situation(hole=hole, board=board, street=3)
 
-    def test_nuts_flush_draw_masked_at_river(self):
-        assert values_by_key(self._river_situation())["nuts_flush_draw"] == MASKED
-
-    def test_combo_draw_masked_at_river(self):
-        assert values_by_key(self._river_situation())["combo_draw"] == MASKED
+    def test_draw_norm_masked_at_river(self):
+        assert values_by_key(self._river_situation())["draw_norm"] == MASKED
 
     def test_suit_connection_index_masked_at_river(self):
         assert values_by_key(self._river_situation())["suit_connection_index"] == MASKED
-
-    def test_straight_draw_norm_masked_at_river(self):
-        assert values_by_key(self._river_situation())["straight_draw_norm"] == MASKED
 
     def test_not_masked_on_the_turn(self):
         hole = [Card.from_str("6h"), Card.from_str("7h")]
         board = [Card.from_str("8h"), Card.from_str("9h"), Card.from_str("2c"), Card.from_str("3d")]
         values = values_by_key(make_situation(hole=hole, board=board, street=2))
-        assert values["nuts_flush_draw"] != MASKED
-        assert values["combo_draw"] != MASKED
+        assert values["draw_norm"] != MASKED
         assert values["suit_connection_index"] != MASKED
-        assert values["straight_draw_norm"] != MASKED
 
 
 class TestOvercardsFeature:
