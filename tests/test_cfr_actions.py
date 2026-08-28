@@ -25,8 +25,14 @@ def _make_situation(**overrides):
         num_seats_total=3,
         num_active=3,
         num_raises_this_street=1,
-        num_preflop_raises=1,
-        is_aggressor=False,
+        num_raises_previous_street=0,
+        num_raises_preflop=1,
+        num_raises_flop=0,
+        num_raises_turn=0,
+        is_aggressor_previous_street=False,
+        is_aggressor_preflop=False,
+        is_aggressor_flop=False,
+        is_aggressor_turn=False,
         starting_stack=200.0,
     )
     defaults.update(overrides)

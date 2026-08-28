@@ -9,7 +9,7 @@ import cfr_reservoir
 from cfr_train import DeepCFRConfig, Trainer, run_iteration
 from game import GameConfig
 
-_FEATURE_KEYS = ("hand_category_norm", "street_norm", "call_amount_norm", "pot_type_norm")
+_FEATURE_KEYS = ("hand_category_norm", "street_norm", "call_amount_norm", "raises_preflop_norm")
 
 
 def _tiny_config(**overrides) -> DeepCFRConfig:

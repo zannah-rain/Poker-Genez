@@ -120,15 +120,22 @@ class SpotMatcher:
     GTOSpot applies. Every field is optional (None = "don't care"); a
     situation matches only if every specified field agrees.
 
-    Note: `is_aggressor` only distinguishes "I made the last raise" from "I
-    didn't" -- Situation doesn't track *which* seat made a raise, so a
-    matcher can express "BTN facing a 3-bet" but not "BTN facing a 3-bet
-    specifically from the BB"."""
+    Note: `is_aggressor_previous_street` only distinguishes "I made the
+    last raise" from "I didn't" -- Situation doesn't track *which* seat
+    made a raise, so a matcher can express "BTN facing a 3-bet" but not
+    "BTN facing a 3-bet specifically from the BB"."""
 
     street: int | None = None  # 0=preflop, 1=flop, 2=turn, 3=river
-    pot_type: int | None = None  # 0=unraised, 1=single raised, 2=3-bet, 3=4-bet+ (num_preflop_raises, capped at 3)
+    # 0=unraised, 1=single raised, 2=3-bet, 3=4-bet+ -- checked against
+    # situation.num_raises_this_street (capped at 3), the *current*
+    # street's own live raise count, not one of the frozen
+    # num_raises_preflop/flop/turn family: every GTOSpot in this catalog
+    # pairs `street` with `pot_type` (see matches() below), so "how many
+    # raises has *street* seen so far" is always exactly the concept
+    # wanted here, whichever street that happens to be.
+    pot_type: int | None = None
     position: str | None = None  # one of seating.SEAT_ROLES, or None for "any position"
-    is_aggressor: bool | None = None  # did I make the last bet/raise on the *previous* street?
+    is_aggressor_previous_street: bool | None = None  # did I make the last bet/raise on the *previous* street?
     facing_bet: bool | None = None  # is there a nonzero amount required to call?
     min_effective_bb: float | None = None  # inclusive, in actual big blinds
     max_effective_bb: float | None = None  # inclusive
@@ -136,13 +143,16 @@ class SpotMatcher:
     def matches(self, situation: Situation) -> bool:
         if self.street is not None and situation.street != self.street:
             return False
-        if self.pot_type is not None and min(situation.num_preflop_raises, 3) != self.pot_type:
+        if self.pot_type is not None and min(situation.num_raises_this_street, 3) != self.pot_type:
             return False
         if self.position is not None:
             role = seat_role(situation.seat_index, situation.button_idx, situation.num_seats_total)
             if role != self.position:
                 return False
-        if self.is_aggressor is not None and situation.is_aggressor != self.is_aggressor:
+        if (
+            self.is_aggressor_previous_street is not None
+            and situation.is_aggressor_previous_street != self.is_aggressor_previous_street
+        ):
             return False
         if self.facing_bet is not None and (situation.call_amount > 1e-9) != self.facing_bet:
             return False
@@ -166,9 +176,9 @@ class SpotMatcher:
             parts.append("facing a bet")
         elif self.facing_bet is False:
             parts.append("not facing a bet")
-        if self.is_aggressor is True:
+        if self.is_aggressor_previous_street is True:
             parts.append("I'm the last aggressor")
-        elif self.is_aggressor is False:
+        elif self.is_aggressor_previous_street is False:
             parts.append("I'm not the last aggressor")
         if self.min_effective_bb is not None and self.max_effective_bb is not None:
             parts.append(f"{self.min_effective_bb:.0f}-{self.max_effective_bb:.0f}BB effective")
@@ -277,7 +287,7 @@ GTO_SPOTS: tuple[GTOSpot, ...] = (
     # GTOSpot(
     #     key="bb_vs_single_raise_100bb",
     #     label="BB Facing A Single Raise -- 100BB stack",
-    #     matcher=SpotMatcher(street=0, pot_type=1, position="BB", facing_bet=True, is_aggressor=False, min_effective_bb=80, max_effective_bb=120),
+    #     matcher=SpotMatcher(street=0, pot_type=1, position="BB", facing_bet=True, is_aggressor_previous_street=False, min_effective_bb=80, max_effective_bb=120),
     #     action_ranges=(
     #         ("raise_150", "TT+, AQs+, AKo"),
     #         ("call", "22-99, A2s+, K9s+, Q9s+, J9s+, T8s+, 97s+, 86s+, 75s+, ATo+, KJo+"),
@@ -287,7 +297,7 @@ GTO_SPOTS: tuple[GTOSpot, ...] = (
     # GTOSpot(
     #     key="btn_vs_3bet_20bb",
     #     label="BTN Facing A 3-Bet -- 20BB stack",
-    #     matcher=SpotMatcher(street=0, pot_type=2, position="BTN", facing_bet=True, is_aggressor=False, min_effective_bb=15, max_effective_bb=25),
+    #     matcher=SpotMatcher(street=0, pot_type=2, position="BTN", facing_bet=True, is_aggressor_previous_street=False, min_effective_bb=15, max_effective_bb=25),
     #     action_ranges=(
     #         ("allin", "88+, AJs+, KQs, AQo+"),
     #     ),

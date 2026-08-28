@@ -140,14 +140,14 @@ class TestRunBenchmarkUntilResolved:
     def test_rejects_too_small_min_tables(self):
         with pytest.raises(ValueError):
             run_benchmark_until_resolved(
-                make_random_players(3), make_random_players(3), GameConfig(), np.random.default_rng(0),
+                make_random_players(3), [make_random_players(3)], GameConfig(), np.random.default_rng(0),
                 min_tables=1,
             )
 
     def test_rejects_nonpositive_table_batch(self):
         with pytest.raises(ValueError):
             run_benchmark_until_resolved(
-                make_random_players(3), make_random_players(3), GameConfig(), np.random.default_rng(0),
+                make_random_players(3), [make_random_players(3)], GameConfig(), np.random.default_rng(0),
                 table_batch=0,
             )
 
@@ -159,7 +159,7 @@ class TestRunBenchmarkUntilResolved:
         checkpoint = make_fixed_players(SEATS_PER_SIDE, FOLD, id_offset=100)
         config = GameConfig(max_hands_per_session=20, starting_stack=200.0)
         outcome = run_benchmark_until_resolved(
-            current, checkpoint, config, np.random.default_rng(0),
+            current, [checkpoint], config, np.random.default_rng(0),
             min_tables=20, max_tables=200, table_batch=20, p_value=0.05,
         )
         assert isinstance(outcome, BenchmarkOutcome)
@@ -173,7 +173,7 @@ class TestRunBenchmarkUntilResolved:
         checkpoint = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=100)
         config = GameConfig(max_hands_per_session=20, starting_stack=200.0)
         outcome = run_benchmark_until_resolved(
-            current, checkpoint, config, np.random.default_rng(1),
+            current, [checkpoint], config, np.random.default_rng(1),
             min_tables=20, max_tables=200, table_batch=20, p_value=0.05,
         )
         assert outcome.resolved is True
@@ -188,7 +188,7 @@ class TestRunBenchmarkUntilResolved:
         checkpoint = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=100)
         config = GameConfig(max_hands_per_session=5, starting_stack=200.0)
         outcome = run_benchmark_until_resolved(
-            current, checkpoint, config, np.random.default_rng(1),
+            current, [checkpoint], config, np.random.default_rng(1),
             min_tables=5, max_tables=15, table_batch=5, p_value=0.05,
         )
         assert outcome.tables_played == 15
@@ -201,7 +201,7 @@ class TestRunBenchmarkUntilResolved:
         checkpoint = make_random_players(SEATS_PER_SIDE, seed=1)
         config = GameConfig(max_hands_per_session=3)
         outcome = run_benchmark_until_resolved(
-            current, checkpoint, config, np.random.default_rng(3),
+            current, [checkpoint], config, np.random.default_rng(3),
             min_tables=30, max_tables=30, table_batch=10,
         )
         assert outcome.tables_played >= 30
@@ -211,10 +211,62 @@ class TestRunBenchmarkUntilResolved:
         checkpoint = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=100)
         config = GameConfig(max_hands_per_session=5)
         outcome = run_benchmark_until_resolved(
-            current, checkpoint, config, np.random.default_rng(4),
+            current, [checkpoint], config, np.random.default_rng(4),
             min_tables=10, max_tables=10, table_batch=5,
         )
         assert outcome.tables_played == 10
+
+
+class TestRotatingCheckpointPools:
+    """checkpoint_pools holds one or more independent player pools -- each
+    table draws its checkpoint side from ONE of them, chosen uniformly at
+    random (see _play_one_bb100_sample), so the aggregate verdict reflects
+    a mix across whichever pools are given rather than being decided
+    entirely by a single one."""
+
+    def test_aggregate_edge_lands_between_the_two_pools_own_pure_edges(self):
+        # folding_pool donates every hand to current's check-calls (a huge
+        # edge); calling_pool mirrors current exactly (~0 edge). If every
+        # table only ever drew from checkpoint_pools[0], the mixed run's
+        # edge would equal one of the pure runs exactly instead of sitting
+        # strictly between them.
+        current = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=0)
+        folding_pool = make_fixed_players(SEATS_PER_SIDE, FOLD, id_offset=100)
+        calling_pool = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=200)
+        config = GameConfig(max_hands_per_session=20, starting_stack=200.0)
+
+        def _fixed_run(pools):
+            return run_benchmark_until_resolved(
+                current, pools, config, np.random.default_rng(0),
+                min_tables=200, max_tables=200, table_batch=200, show_progress=False,
+            )
+
+        fold_only = _fixed_run([folding_pool])
+        call_only = _fixed_run([calling_pool])
+        mixed = _fixed_run([folding_pool, calling_pool])
+
+        assert call_only.mean_bb_per_100 < mixed.mean_bb_per_100 < fold_only.mean_bb_per_100
+
+    def test_single_pool_list_matches_original_single_anchor_behavior(self):
+        # A 1-element checkpoint_pools list should resolve identically to
+        # the pre-rotating-pool API (every table drawing that one pool,
+        # every time) -- a regression here would mean the rotating-pool
+        # change altered behavior for the (still-supported, and still the
+        # default via --benchmark-pool-size 1) single-anchor case.
+        current = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=0)
+        checkpoint = make_fixed_players(SEATS_PER_SIDE, FOLD, id_offset=100)
+        config = GameConfig(max_hands_per_session=20, starting_stack=200.0)
+        outcome = run_benchmark_until_resolved(
+            current, [checkpoint], config, np.random.default_rng(0),
+            min_tables=20, max_tables=200, table_batch=20, p_value=0.05,
+        )
+        assert outcome.resolved is True
+        assert outcome.improved is True
+
+    def test_rejects_empty_pool_list(self):
+        current = make_random_players(SEATS_PER_SIDE)
+        with pytest.raises(ValueError):
+            run_benchmark_until_resolved(current, [], GameConfig(), np.random.default_rng(0))
 
 
 class TestRunBenchmarkParallel:
@@ -226,7 +278,7 @@ class TestRunBenchmarkParallel:
         checkpoint = make_random_players(SEATS_PER_SIDE, seed=1)
         config = GameConfig(max_hands_per_session=5)
         outcome = run_benchmark_until_resolved(
-            current, checkpoint, config, np.random.default_rng(0),
+            current, [checkpoint], config, np.random.default_rng(0),
             min_tables=10, max_tables=10, table_batch=10,
             num_workers=2, show_progress=False,
         )
@@ -238,7 +290,7 @@ class TestRunBenchmarkParallel:
         checkpoint = make_random_players(SEATS_PER_SIDE, seed=1)
         config = GameConfig(max_hands_per_session=3)
         outcome = run_benchmark_until_resolved(
-            current, checkpoint, config, np.random.default_rng(4),
+            current, [checkpoint], config, np.random.default_rng(4),
             min_tables=6, max_tables=6, table_batch=3,
             num_workers=2, show_progress=False,
         )
@@ -251,13 +303,13 @@ class TestRunBenchmarkParallel:
         config = GameConfig(max_hands_per_session=3)
         with ProcessPoolExecutor(max_workers=2) as pool:
             outcome = run_benchmark_until_resolved(
-                current, checkpoint, config, np.random.default_rng(0),
+                current, [checkpoint], config, np.random.default_rng(0),
                 min_tables=4, max_tables=4, table_batch=4,
                 num_workers=2, executor=pool, show_progress=False,
             )
             assert outcome.tables_played == 4
             outcome2 = run_benchmark_until_resolved(
-                current, checkpoint, config, np.random.default_rng(1),
+                current, [checkpoint], config, np.random.default_rng(1),
                 min_tables=4, max_tables=4, table_batch=4,
                 num_workers=2, executor=pool, show_progress=False,
             )
@@ -270,7 +322,7 @@ class TestBenchmarkProgressReporting:
         checkpoint = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=100)
         config = GameConfig(max_hands_per_session=3)
         run_benchmark_until_resolved(
-            current, checkpoint, config, np.random.default_rng(0),
+            current, [checkpoint], config, np.random.default_rng(0),
             min_tables=5, max_tables=5, table_batch=5,
         )
         assert "benchmark (" in capsys.readouterr().err
@@ -283,7 +335,7 @@ class TestBenchmarkProgressReporting:
         checkpoint = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=100)
         config = GameConfig(max_hands_per_session=3)
         outcome = run_benchmark_until_resolved(
-            current, checkpoint, config, np.random.default_rng(0),
+            current, [checkpoint], config, np.random.default_rng(0),
             min_tables=5, max_tables=10, table_batch=5,
         )
         out = capsys.readouterr().out
@@ -299,7 +351,7 @@ class TestBenchmarkProgressReporting:
         checkpoint = make_fixed_players(SEATS_PER_SIDE, CHECK_CALL, id_offset=100)
         config = GameConfig(max_hands_per_session=3)
         run_benchmark_until_resolved(
-            current, checkpoint, config, np.random.default_rng(0),
+            current, [checkpoint], config, np.random.default_rng(0),
             min_tables=5, max_tables=10, table_batch=5, show_progress=False,
         )
         captured = capsys.readouterr()
@@ -311,7 +363,7 @@ class TestBenchmarkProgressReporting:
         checkpoint = make_fixed_players(SEATS_PER_SIDE, FOLD, id_offset=100)
         config = GameConfig(max_hands_per_session=20, starting_stack=200.0)
         outcome = run_benchmark_until_resolved(
-            current, checkpoint, config, np.random.default_rng(0),
+            current, [checkpoint], config, np.random.default_rng(0),
             min_tables=20, max_tables=200, table_batch=20,
         )
         assert outcome.resolved is True

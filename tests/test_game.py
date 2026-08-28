@@ -4,7 +4,7 @@ import pytest
 from cards import Card
 from evaluator import evaluate_best
 from game import (
-    FLOP, PREFLOP, GameConfig, HandStats, SeatState, _effective_stack,
+    FLOP, PREFLOP, TURN, GameConfig, HandStats, SeatState, _effective_stack,
     _street_order, betting_round, compute_payouts, play_hand,
 )
 from genome import BET_RAISE, CHECK_CALL, FOLD
@@ -109,7 +109,7 @@ class TestBettingRoundBasic:
         pot, num_raises, _ = betting_round(
             seats, order=[0, 1, 2], pot=6.0, min_bet=2.0, starting_bet=0.0,
             board=[], street=FLOP, starting_stack=200.0, button_idx=0,
-            preflop_raise_count=0, max_raises_per_street=4,
+            completed_street_raises=(), completed_street_aggressors=(), max_raises_per_street=4,
             min_raise_fraction_of_pot=0.25, rng=np.random.default_rng(0),
         )
         assert pot == 6.0
@@ -123,7 +123,7 @@ class TestBettingRoundBasic:
         pot, num_raises, _ = betting_round(
             seats, order=[0, 1, 2], pot=6.0, min_bet=2.0, starting_bet=0.0,
             board=[], street=FLOP, starting_stack=200.0, button_idx=0,
-            preflop_raise_count=0, max_raises_per_street=4,
+            completed_street_raises=(), completed_street_aggressors=(), max_raises_per_street=4,
             min_raise_fraction_of_pot=0.25, rng=np.random.default_rng(0),
         )
         assert num_raises == 1
@@ -137,7 +137,7 @@ class TestBettingRoundBasic:
         betting_round(
             seats, order=[0, 1], pot=6.0, min_bet=2.0, starting_bet=10.0,
             board=[], street=FLOP, starting_stack=200.0, button_idx=0,
-            preflop_raise_count=0, max_raises_per_street=4,
+            completed_street_raises=(), completed_street_aggressors=(), max_raises_per_street=4,
             min_raise_fraction_of_pot=0.25, rng=np.random.default_rng(0),
         )
         assert seats[0].folded is True
@@ -147,7 +147,7 @@ class TestBettingRoundBasic:
         betting_round(
             seats, order=[0, 1, 2], pot=6.0, min_bet=2.0, starting_bet=10.0,
             board=[], street=FLOP, starting_stack=200.0, button_idx=0,
-            preflop_raise_count=0, max_raises_per_street=4,
+            completed_street_raises=(), completed_street_aggressors=(), max_raises_per_street=4,
             min_raise_fraction_of_pot=0.25, rng=np.random.default_rng(0),
         )
         # Seat 2 should never have been asked to act (its stack untouched).
@@ -161,7 +161,7 @@ class TestBettingRoundBasic:
         pot, _, _ = betting_round(
             seats, order=[0, 1], pot=6.0, min_bet=2.0, starting_bet=0.0,
             board=[], street=FLOP, starting_stack=200.0, button_idx=0,
-            preflop_raise_count=0, max_raises_per_street=4,
+            completed_street_raises=(), completed_street_aggressors=(), max_raises_per_street=4,
             min_raise_fraction_of_pot=0.25, rng=np.random.default_rng(0),
         )
         assert seats[0].stack == 0.0
@@ -176,7 +176,7 @@ class TestBettingRoundBasic:
         pot, _, _ = betting_round(
             seats, order=[0, 1], pot=100.0, min_bet=2.0, starting_bet=0.0,
             board=[], street=FLOP, starting_stack=200.0, button_idx=0,
-            preflop_raise_count=0, max_raises_per_street=4,
+            completed_street_raises=(), completed_street_aggressors=(), max_raises_per_street=4,
             min_raise_fraction_of_pot=0.25, rng=np.random.default_rng(0),
         )
         # min raise increment = max(2, 2, 0.25*100) = 25 -> raiser commits 25.
@@ -189,7 +189,7 @@ class TestBettingRoundBasic:
         pot, num_raises, _ = betting_round(
             seats, order=[0, 1], pot=6.0, min_bet=2.0, starting_bet=0.0,
             board=[], street=FLOP, starting_stack=200.0, button_idx=0,
-            preflop_raise_count=0, max_raises_per_street=1,
+            completed_street_raises=(), completed_street_aggressors=(), max_raises_per_street=1,
             min_raise_fraction_of_pot=0.25, rng=np.random.default_rng(0),
         )
         # Seat 1 wanted to re-raise but BET_RAISE was no longer legal
@@ -202,7 +202,7 @@ class TestBettingRoundBasic:
         betting_round(
             seats, order=[0, 1], pot=6.0, min_bet=2.0, starting_bet=0.0,
             board=[], street=FLOP, starting_stack=200.0, button_idx=0,
-            preflop_raise_count=0, max_raises_per_street=4,
+            completed_street_raises=(), completed_street_aggressors=(), max_raises_per_street=4,
             min_raise_fraction_of_pot=0.25, rng=np.random.default_rng(0),
             stats=stats,
         )
@@ -218,7 +218,7 @@ class TestBettingRoundBasic:
         betting_round(
             seats, order=[0, 1], pot=6.0, min_bet=2.0, starting_bet=0.0,
             board=[], street=FLOP, starting_stack=200.0, button_idx=0,
-            preflop_raise_count=0, max_raises_per_street=4,
+            completed_street_raises=(), completed_street_aggressors=(), max_raises_per_street=4,
             min_raise_fraction_of_pot=0.25, rng=np.random.default_rng(0),
             opp_model=model,
         )
@@ -230,7 +230,7 @@ class TestBettingRoundBasic:
         betting_round(
             seats, order=[0, 1], pot=6.0, min_bet=2.0, starting_bet=0.0,
             board=[], street=FLOP, starting_stack=200.0, button_idx=0,
-            preflop_raise_count=0, max_raises_per_street=4,
+            completed_street_raises=(), completed_street_aggressors=(), max_raises_per_street=4,
             min_raise_fraction_of_pot=0.25, rng=np.random.default_rng(0),
         )
         situation, legal_actions = seats[0].player.genome.calls[0]
@@ -277,8 +277,8 @@ class TestIsAggressorReflectsThePreviousStreet:
         caller_flop_situations = [s for s, _ in caller.calls if s.street == FLOP]
         assert raiser_flop_situations
         assert caller_flop_situations
-        assert all(s.is_aggressor for s in raiser_flop_situations)
-        assert all(not s.is_aggressor for s in caller_flop_situations)
+        assert all(s.is_aggressor_previous_street for s in raiser_flop_situations)
+        assert all(not s.is_aggressor_previous_street for s in caller_flop_situations)
 
     def test_nobody_is_ever_the_aggressor_at_their_own_decision_this_street(self):
         # The player who just raised is skipped in the to-act order until
@@ -298,7 +298,7 @@ class TestIsAggressorReflectsThePreviousStreet:
         preflop_situations = [s for s, _ in raiser.calls if s.street == PREFLOP]
         preflop_situations += [s for s, _ in caller.calls if s.street == PREFLOP]
         assert preflop_situations
-        assert all(not s.is_aggressor for s in preflop_situations)
+        assert all(not s.is_aggressor_previous_street for s in preflop_situations)
 
     def test_no_aggressor_carried_forward_when_previous_street_checked_through(self):
         seats = [
@@ -311,7 +311,85 @@ class TestIsAggressorReflectsThePreviousStreet:
             s for seat in seats for s, _ in seat.player.genome.calls if s.street == FLOP
         ]
         assert flop_situations
-        assert all(not s.is_aggressor for s in flop_situations)
+        assert all(not s.is_aggressor_previous_street for s in flop_situations)
+
+
+class _CallPreflopThenRaiseFlopGenome:
+    """Calls preflop, raises the flop whenever legal, checks/calls every
+    other decision -- the flop counterpart to
+    _RaisePreflopThenCheckCallGenome, for a scenario where the preflop and
+    flop aggressors are two different players."""
+
+    def __init__(self):
+        self.calls = []
+
+    def decide(self, situation, legal_actions, rng=None):
+        self.calls.append((situation, legal_actions))
+        if situation.street == FLOP and BET_RAISE in legal_actions:
+            return BET_RAISE, 10.0
+        return CHECK_CALL, 0.0
+
+
+class TestFrozenPerStreetRaisesAndAggressorFamily:
+    """num_raises_preflop/flop/turn and is_aggressor_preflop/flop/turn are
+    each pinned to one specific calendar street (unlike num_raises_previous_
+    street/is_aggressor_previous_street, which are always relative to
+    whatever street is current) -- 0/False until that specific street has
+    actually finished, then frozen at its final reading for the rest of the
+    hand, however many streets later a decision happens to be."""
+
+    def test_preflop_and_flop_aggressor_readings_stay_independent_on_the_turn(self):
+        # Seat 0 opens preflop (its only raise); seat 1 calls preflop, then
+        # raises the flop (its only raise) -- so by the turn, the preflop
+        # and flop "who raised last" readings genuinely disagree, unlike
+        # is_aggressor_previous_street, which can only ever point at one of
+        # them (whichever street is immediately before the current one).
+        preflop_raiser = _RaisePreflopThenCheckCallGenome()
+        flop_raiser = _CallPreflopThenRaiseFlopGenome()
+        seats = [
+            SeatState(player=Player(player_id=0, genome=preflop_raiser), stack=200.0),
+            SeatState(player=Player(player_id=1, genome=flop_raiser), stack=200.0),
+        ]
+        play_hand(seats, button_idx=0, config=GameConfig(), rng=np.random.default_rng(0))
+
+        preflop_raiser_turn = [s for s, _ in preflop_raiser.calls if s.street == TURN]
+        flop_raiser_turn = [s for s, _ in flop_raiser.calls if s.street == TURN]
+        assert preflop_raiser_turn
+        assert flop_raiser_turn
+
+        for s in preflop_raiser_turn:
+            assert s.is_aggressor_preflop is True
+            assert s.is_aggressor_flop is False
+            assert s.is_aggressor_previous_street is False  # previous (flop) was seat 1, not seat 0
+            assert s.num_raises_preflop == 1
+            assert s.num_raises_flop == 1
+        for s in flop_raiser_turn:
+            assert s.is_aggressor_preflop is False
+            assert s.is_aggressor_flop is True
+            assert s.is_aggressor_previous_street is True
+            assert s.num_raises_preflop == 1
+            assert s.num_raises_flop == 1
+
+    def test_readings_are_zero_before_their_own_street_has_finished(self):
+        preflop_raiser = _RaisePreflopThenCheckCallGenome()
+        flop_raiser = _CallPreflopThenRaiseFlopGenome()
+        seats = [
+            SeatState(player=Player(player_id=0, genome=preflop_raiser), stack=200.0),
+            SeatState(player=Player(player_id=1, genome=flop_raiser), stack=200.0),
+        ]
+        play_hand(seats, button_idx=0, config=GameConfig(), rng=np.random.default_rng(0))
+
+        preflop_situations = [s for s, _ in preflop_raiser.calls if s.street == PREFLOP]
+        preflop_situations += [s for s, _ in flop_raiser.calls if s.street == PREFLOP]
+        assert preflop_situations
+        assert all(s.num_raises_preflop == 0 for s in preflop_situations)
+        assert all(s.is_aggressor_preflop is False for s in preflop_situations)
+
+        flop_situations = [s for s, _ in preflop_raiser.calls if s.street == FLOP]
+        flop_situations += [s for s, _ in flop_raiser.calls if s.street == FLOP]
+        assert flop_situations
+        assert all(s.num_raises_flop == 0 for s in flop_situations)
+        assert all(s.is_aggressor_flop is False for s in flop_situations)
 
 
 class TestComputePayouts:

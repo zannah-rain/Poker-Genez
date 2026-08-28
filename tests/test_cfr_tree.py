@@ -126,7 +126,7 @@ def _run_cfr(stacks, button_idx, config, seed, target_category, traverser, num_e
         traverser=traverser, net=_DominantRegretNet(target_category), reservoir=_DiscardingReservoir(),
         rng=rng, t=1.0, feature_indices=_FEATURE_INDICES, num_equity_rollouts=num_equity_rollouts,
     )
-    return cfr_tree._start_street(state, PREFLOP, pot, 0, None, ctx, 1.0)
+    return cfr_tree._start_street(state, PREFLOP, pot, (), (), ctx, 1.0)
 
 
 def _assert_matches_reference(stacks, button_idx, config, seed, target_category):
@@ -202,27 +202,29 @@ class TestIsAggressorReflectsThePreviousStreet:
         state = self._make_state()
         aggressors_situation = cfr_tree._build_situation(
             state, street=1, order=[0, 1], i=0, pot=10.0, call_amount=0.0,
-            num_raises=0, preflop_raise_count=1, previous_street_aggressor=0, raiser_seats=frozenset(),
+            num_raises=0, completed_street_raises=(1,), completed_street_aggressors=(0,), raiser_seats=frozenset(),
         )
         other_seats_situation = cfr_tree._build_situation(
             state, street=1, order=[0, 1], i=1, pot=10.0, call_amount=0.0,
-            num_raises=0, preflop_raise_count=1, previous_street_aggressor=0, raiser_seats=frozenset(),
+            num_raises=0, completed_street_raises=(1,), completed_street_aggressors=(0,), raiser_seats=frozenset(),
         )
-        assert aggressors_situation.is_aggressor is True
-        assert other_seats_situation.is_aggressor is False
+        assert aggressors_situation.is_aggressor_previous_street is True
+        assert other_seats_situation.is_aggressor_previous_street is False
 
     def test_decision_node_hands_off_its_own_street_aggressor_as_the_next_streets_previous(self, monkeypatch):
         # Seat 1 raised at some point this (fictional) street and nobody
         # re-raised since (street_aggressor=1) -- once to_act empties out,
-        # _decision_node should hand that off as the *next* street's
-        # previous_street_aggressor, not whatever was true before this one
-        # started (previous_street_aggressor=None here, deliberately
-        # different from street_aggressor, so the test would fail if the
-        # two ever got mixed up).
+        # _decision_node should append that (alongside num_raises) onto
+        # completed_street_aggressors/completed_street_raises for the
+        # *next* street, not whatever was true before this one started
+        # (completed_street_aggressors=() here, deliberately different from
+        # street_aggressor, so the test would fail if the two ever got
+        # mixed up).
         captured = {}
 
-        def fake_start_street(state, street, pot, preflop_raise_count, previous_street_aggressor, ctx, path_weight):
-            captured["previous_street_aggressor"] = previous_street_aggressor
+        def fake_start_street(state, street, pot, completed_street_raises, completed_street_aggressors, ctx, path_weight):
+            captured["completed_street_raises"] = completed_street_raises
+            captured["completed_street_aggressors"] = completed_street_aggressors
             captured["street"] = street
             return 0.0
 
@@ -235,11 +237,12 @@ class TestIsAggressorReflectsThePreviousStreet:
 
         cfr_tree._decision_node(
             state, street=0, to_act=[], order=[0, 1], pot=10.0, current_bet=0.0, last_raise_increment=2.0,
-            num_raises=1, street_aggressor=1, previous_street_aggressor=None, raiser_seats=frozenset({1}),
-            preflop_raise_count=0, ctx=ctx, path_weight=1.0,
+            num_raises=1, street_aggressor=1, completed_street_raises=(), completed_street_aggressors=(),
+            raiser_seats=frozenset({1}), ctx=ctx, path_weight=1.0,
         )
 
-        assert captured["previous_street_aggressor"] == 1
+        assert captured["completed_street_raises"] == (1,)
+        assert captured["completed_street_aggressors"] == (1,)
         assert captured["street"] == 1
 
 
@@ -271,11 +274,11 @@ class TestPositionRelativeToNonFoldedPlayers:
 
         seat1_situation = cfr_tree._build_situation(
             state, street=1, order=[0, 1, 2, 3], i=1, pot=10.0, call_amount=0.0,
-            num_raises=0, preflop_raise_count=0, previous_street_aggressor=None, raiser_seats=frozenset(),
+            num_raises=0, completed_street_raises=(0,), completed_street_aggressors=(None,), raiser_seats=frozenset(),
         )
         seat3_situation = cfr_tree._build_situation(
             state, street=1, order=[0, 1, 2, 3], i=3, pot=10.0, call_amount=0.0,
-            num_raises=0, preflop_raise_count=0, previous_street_aggressor=None, raiser_seats=frozenset(),
+            num_raises=0, completed_street_raises=(0,), completed_street_aggressors=(None,), raiser_seats=frozenset(),
         )
 
         assert seat1_situation.num_seats_this_street == 2
@@ -287,7 +290,7 @@ class TestPositionRelativeToNonFoldedPlayers:
         state = self._make_state(num_seats=4)
         situation = cfr_tree._build_situation(
             state, street=1, order=[0, 1, 2, 3], i=2, pot=10.0, call_amount=0.0,
-            num_raises=0, preflop_raise_count=0, previous_street_aggressor=None, raiser_seats=frozenset(),
+            num_raises=0, completed_street_raises=(0,), completed_street_aggressors=(None,), raiser_seats=frozenset(),
         )
         assert situation.num_seats_this_street == 4
         assert situation.position == 2
@@ -346,8 +349,8 @@ class TestGtoSpotsOverrideDecisions:
         # net.predict()/reservoir.add() (both of which would raise).
         value = cfr_tree._decision_node(
             state, street=0, to_act=[0], order=[0, 1], pot=10.0, current_bet=6.0, last_raise_increment=2.0,
-            num_raises=1, street_aggressor=1, previous_street_aggressor=None, raiser_seats=frozenset({1}),
-            preflop_raise_count=1, ctx=ctx, path_weight=1.0,
+            num_raises=1, street_aggressor=1, completed_street_raises=(), completed_street_aggressors=(),
+            raiser_seats=frozenset({1}), ctx=ctx, path_weight=1.0,
         )
         # Traverser (seat 1) already put in `pot`'s worth this street; once
         # seat 0 folds uncontested, the traverser wins pot minus their own
@@ -365,8 +368,8 @@ class TestGtoSpotsOverrideDecisions:
         # instead of raising, i.e. this must not itself raise.
         cfr_tree._decision_node(
             state, street=0, to_act=[0], order=[0, 1], pot=10.0, current_bet=6.0, last_raise_increment=2.0,
-            num_raises=1, street_aggressor=1, previous_street_aggressor=None, raiser_seats=frozenset({1}),
-            preflop_raise_count=1, ctx=ctx, path_weight=1.0,
+            num_raises=1, street_aggressor=1, completed_street_raises=(), completed_street_aggressors=(),
+            raiser_seats=frozenset({1}), ctx=ctx, path_weight=1.0,
         )
 
     def test_non_matching_spot_falls_through_to_the_net(self):
@@ -384,8 +387,8 @@ class TestGtoSpotsOverrideDecisions:
         # so this must fall through to the net rather than force a fold.
         cfr_tree._decision_node(
             state, street=0, to_act=[0], order=[0, 1], pot=10.0, current_bet=6.0, last_raise_increment=2.0,
-            num_raises=1, street_aggressor=1, previous_street_aggressor=None, raiser_seats=frozenset({1}),
-            preflop_raise_count=1, ctx=ctx, path_weight=1.0,
+            num_raises=1, street_aggressor=1, completed_street_raises=(), completed_street_aggressors=(),
+            raiser_seats=frozenset({1}), ctx=ctx, path_weight=1.0,
         )
 
     def test_fixed_bb_raise_spot_sizes_by_big_blind_not_pot(self, monkeypatch):
@@ -428,8 +431,8 @@ class TestGtoSpotsOverrideDecisions:
         )
         real_decision_node(
             state, street=0, to_act=[0], order=[0, 1], pot=6.0, current_bet=6.0, last_raise_increment=2.0,
-            num_raises=1, street_aggressor=1, previous_street_aggressor=None, raiser_seats=frozenset({1}),
-            preflop_raise_count=1, ctx=ctx, path_weight=1.0,
+            num_raises=1, street_aggressor=1, completed_street_raises=(), completed_street_aggressors=(),
+            raiser_seats=frozenset({1}), ctx=ctx, path_weight=1.0,
         )
         # Was facing a call of 2.0 (current_bet 6.0 - already committed 4.0)
         # -- the fixed spot's raise adds 1.5 * big_blind (3.0) on top of
@@ -492,8 +495,8 @@ class TestPathWeightCorrectsOverRepresentation:
         monkeypatch.setattr(cfr_tree, "_decision_node", fake_decision_node)
         real_decision_node(
             state, street=0, to_act=[0], order=[0, 1], pot=10.0, current_bet=0.0, last_raise_increment=2.0,
-            num_raises=0, street_aggressor=None, previous_street_aggressor=None, raiser_seats=frozenset(),
-            preflop_raise_count=0, ctx=ctx, path_weight=1.0,
+            num_raises=0, street_aggressor=None, completed_street_raises=(), completed_street_aggressors=(),
+            raiser_seats=frozenset(), ctx=ctx, path_weight=1.0,
         )
         assert captured_weights == pytest.approx([0.125] * 8)
 

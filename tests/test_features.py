@@ -26,8 +26,14 @@ def make_situation(**overrides) -> Situation:
         num_seats_total=6,
         num_active=6,
         num_raises_this_street=0,
-        num_preflop_raises=0,
-        is_aggressor=False,
+        num_raises_previous_street=0,
+        num_raises_preflop=0,
+        num_raises_flop=0,
+        num_raises_turn=0,
+        is_aggressor_previous_street=False,
+        is_aggressor_preflop=False,
+        is_aggressor_flop=False,
+        is_aggressor_turn=False,
         starting_stack=200.0,
         big_blind=2.0,
     )
@@ -304,17 +310,47 @@ class TestBettingAndPotFeatures:
         values = values_by_key(make_situation(num_raises_this_street=10))
         assert values["num_raises_norm"] == 1.0
 
-    def test_pot_type_norm_freezes_preflop_raise_count(self):
-        values = values_by_key(make_situation(num_preflop_raises=2, num_raises_this_street=0, street=1))
-        assert values["pot_type_norm"] == pytest.approx(2 / 3)
+    def test_raises_last_street_norm_reflects_the_previous_streets_final_count(self):
+        values = values_by_key(make_situation(num_raises_previous_street=2, num_raises_this_street=0, street=1))
+        assert values["raises_last_street_norm"] == pytest.approx(2 / 3)
 
-    def test_pot_type_norm_clips_at_3_raises(self):
-        values = values_by_key(make_situation(num_preflop_raises=10))
-        assert values["pot_type_norm"] == 1.0
+    def test_raises_last_street_norm_clips_at_3(self):
+        values = values_by_key(make_situation(num_raises_previous_street=10))
+        assert values["raises_last_street_norm"] == 1.0
 
-    def test_is_aggressor_flag(self):
-        assert values_by_key(make_situation(is_aggressor=True))["is_aggressor"] == 1.0
-        assert values_by_key(make_situation(is_aggressor=False))["is_aggressor"] == 0.0
+    def test_raises_preflop_norm_freezes_preflop_raise_count(self):
+        # Frozen at whatever preflop's own final count was, regardless of
+        # what's happening on the *current* street (num_raises_this_street).
+        values = values_by_key(make_situation(num_raises_preflop=2, num_raises_this_street=0, street=1))
+        assert values["raises_preflop_norm"] == pytest.approx(2 / 3)
+
+    def test_raises_preflop_norm_clips_at_3_raises(self):
+        values = values_by_key(make_situation(num_raises_preflop=10))
+        assert values["raises_preflop_norm"] == 1.0
+
+    def test_raises_flop_norm_freezes_flops_final_raise_count(self):
+        values = values_by_key(make_situation(num_raises_flop=1, street=2))
+        assert values["raises_flop_norm"] == pytest.approx(1 / 3)
+
+    def test_raises_turn_norm_freezes_turns_final_raise_count(self):
+        values = values_by_key(make_situation(num_raises_turn=3, street=3))
+        assert values["raises_turn_norm"] == 1.0
+
+    def test_is_aggressor_previous_street_flag(self):
+        assert values_by_key(make_situation(is_aggressor_previous_street=True))["is_aggressor_previous_street"] == 1.0
+        assert values_by_key(make_situation(is_aggressor_previous_street=False))["is_aggressor_previous_street"] == 0.0
+
+    def test_is_aggressor_preflop_flag_stays_readable_past_the_flop(self):
+        values = values_by_key(make_situation(is_aggressor_preflop=True, street=2))
+        assert values["is_aggressor_preflop"] == 1.0
+
+    def test_is_aggressor_flop_flag(self):
+        values = values_by_key(make_situation(is_aggressor_flop=True, street=2))
+        assert values["is_aggressor_flop"] == 1.0
+
+    def test_is_aggressor_turn_flag(self):
+        values = values_by_key(make_situation(is_aggressor_turn=True, street=3))
+        assert values["is_aggressor_turn"] == 1.0
 
 
 class TestStackAndSeatFeatures:

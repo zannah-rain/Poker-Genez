@@ -1,15 +1,24 @@
 """CLI: train a Single Deep CFR advantage network over 6-max NLHE.
 
 Every --benchmark-interval iterations, plays the current net head-to-head
-against a snapshot (cfr_networks.clone) taken --benchmark-interval
-iterations ago in a statistically-resolved 3-vs-3 match (benchmark.py) -- a
-direct "did the last --benchmark-interval iterations actually help" check.
-That snapshot is an anchor, not a rolling one iteration behind: it only
-advances to the current net when a check shows improvement, so a run of
-non-improving checks keeps comparing against the last net that was
-actually beaten. If a check doesn't show a resolved improvement, the
-update is undone (Trainer.revert_to the anchor snapshot) and it counts
-toward early stopping.
+against a rotating pool of up to --benchmark-pool-size past snapshots
+(cfr_networks.clone) in a statistically-resolved 3-vs-3 match (benchmark.py)
+-- a direct "did the last --benchmark-interval iterations actually help"
+check. Each table draws its opponent from ONE randomly chosen pool member
+(never mixed within a table -- see benchmark.run_benchmark_until_resolved's
+own docstring), so the aggregate verdict reflects performance against a
+representative sample of the net's own recent history rather than being
+decided entirely by whichever idiosyncrasies one specific past snapshot
+happens to have: training is genuinely self-play (see cfr_tree.py's own
+docstring), so its convergence guarantee is about the *average* strategy
+approaching equilibrium, not about monotonically beating any one earlier
+version of itself head-to-head -- a run that's still improving can still
+lose to a recent snapshot of itself purely by chance. The pool only grows
+(dropping its oldest member once full) when a check shows improvement, so a
+run of non-improving checks keeps comparing against the same pool rather
+than one that's silently gone stale. If a check doesn't show a resolved
+improvement, the update is undone (Trainer.revert_to the pool's most
+recently confirmed-good member) and it counts toward early stopping.
 
 Example:
     python -m poker_ga.cfr_main --iterations 200 --traversals-per-iteration 200 --table-size 6
@@ -119,22 +128,35 @@ def parse_args() -> argparse.Namespace:
         "always start from a fresh random net).",
     )
     p.add_argument(
-        "--benchmark-interval", type=int, default=30,
+        "--benchmark-interval", type=int, default=10,
         help="The progress check: every this many iterations, play the current net "
-        "head-to-head (3-vs-3 tables, benchmark.py) against a snapshot taken this many iterations "
-        "ago -- e.g. at 100, the first check is iteration 100 vs the net as it stood when this run "
-        "started (iteration 0 for a fresh run, or wherever a reloaded checkpoint's own iteration "
-        "count left off -- see --reload-previous) -- until the result is statistically resolved "
-        "(see --benchmark-min/max-tables, "
-        "--benchmark-p-value). That snapshot only advances to the current net when a check shows "
-        "improvement, so it stays anchored on the last net actually beaten across any non-improving "
-        "checks in between. A direct, apples-to-apples 'did training actually help' check, unlike "
-        "the training loss (see cfr_train.py's _train_step for why that's not comparable run over "
-        "run). Set to 0 to disable.",
+        "head-to-head (3-vs-3 tables, benchmark.py) against a rotating pool of past snapshots "
+        "(see --benchmark-pool-size), starting with just the net as it stood when this run started "
+        "(iteration 0 for a fresh run, or wherever a reloaded checkpoint's own iteration count left "
+        "off -- see --reload-previous) -- until the result is statistically resolved (see "
+        "--benchmark-min/max-tables, --benchmark-p-value). The pool only grows (dropping its oldest "
+        "member once full) when a check shows improvement, so it stays anchored on nets actually "
+        "beaten across any non-improving checks in between. A direct, apples-to-apples 'did "
+        "training actually help' check, unlike the training loss (see cfr_train.py's _train_step "
+        "for why that's not comparable run over run). Set to 0 to disable.",
+    )
+    p.add_argument(
+        "--benchmark-pool-size", type=int, default=10,
+        help="How many past confirmed-good snapshots to keep in the rotating benchmark pool (see "
+        "--benchmark-interval). Each table draws its opponent from ONE randomly chosen pool member, "
+        "never mixed within a table (see benchmark.run_benchmark_until_resolved) -- so the aggregate "
+        "verdict reflects performance against a representative sample of the net's own recent "
+        "history, not just whichever idiosyncrasies the single most recent snapshot happens to have. "
+        "Training is genuine self-play (see cfr_tree.py's own docstring): its convergence guarantee "
+        "is about the *average* strategy approaching equilibrium, not about monotonically beating "
+        "any one earlier version of itself head-to-head, so a run that's still improving can still "
+        "lose to a recent snapshot of itself by chance -- pooling several past snapshots makes the "
+        "verdict far less likely to flip on that kind of noise alone. 1 recovers the original "
+        "single-anchor behavior.",
     )
     p.add_argument(
         "--benchmark-min-tables", type=int, default=500,
-        help="Minimum number of 3-vs-3 tables played against the checkpoint before checking "
+        help="Minimum number of 3-vs-3 tables played against the checkpoint pool before checking "
         "whether the result is statistically resolved.",
     )
     p.add_argument(
@@ -191,6 +213,48 @@ def _benchmark_players(
         Player(player_id=id_offset + i, genome=cfr_policy.DeepCFRPolicy(net, feature_keys, gto_spots=gto_spots), label=label)
         for i in range(BENCHMARK_SEATS_PER_SIDE)
     ]
+
+
+def _benchmark_pool_member_path(checkpoint_path: str, i: int) -> str:
+    return f"{checkpoint_path}_benchmark_pool_{i}"
+
+
+def _save_benchmark_pool(
+    benchmark_pool: list[cfr_networks.AdvantageNet], net_config: cfr_networks.AdvantageNetConfig, checkpoint_path: str,
+) -> None:
+    """Writes each benchmark_pool member's own weights (oldest first,
+    matching the pool's own FIFO order -- see --benchmark-pool-size) to
+    <checkpoint_path>_benchmark_pool_<i>.pt/.json, alongside every
+    trainer.save(checkpoint_path) call, so a resumed run's rotating pool
+    picks up exactly where this one left off instead of silently
+    restarting at a single-entry pool -- a resumed run must not differ
+    from one that simply kept running in the same process (see
+    _load_benchmark_pool). Removes any stale member left over from a
+    previous, larger pool (e.g. --benchmark-pool-size was reduced between
+    runs)."""
+    for i, net in enumerate(benchmark_pool):
+        cfr_networks.save(net, net_config, _benchmark_pool_member_path(checkpoint_path, i))
+    i = len(benchmark_pool)
+    while os.path.exists(f"{_benchmark_pool_member_path(checkpoint_path, i)}.pt"):
+        os.remove(f"{_benchmark_pool_member_path(checkpoint_path, i)}.pt")
+        os.remove(f"{_benchmark_pool_member_path(checkpoint_path, i)}.json")
+        i += 1
+
+
+def _load_benchmark_pool(checkpoint_path: str) -> list[cfr_networks.AdvantageNet]:
+    """Reloads whatever rotating benchmark pool _save_benchmark_pool last
+    wrote for this checkpoint (oldest first), or [] if none exists -- a
+    fresh run, --no-reload-previous, or a checkpoint saved before this
+    existed all fall back to [] the same way (see _run_training, which
+    then seeds a fresh single-entry pool exactly as it would for a brand
+    new run)."""
+    pool = []
+    i = 0
+    while os.path.exists(f"{_benchmark_pool_member_path(checkpoint_path, i)}.pt"):
+        net, _config = cfr_networks.load(_benchmark_pool_member_path(checkpoint_path, i))
+        pool.append(net)
+        i += 1
+    return pool
 
 
 def _reload_checkpoint(
@@ -345,13 +409,30 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
         initial_optimizer_state=initial_optimizer_state, completed_iterations=completed_iterations,
     )
 
-    # The --benchmark-interval anchor: starts at whatever net this run's
-    # iteration loop below is about to start from (freshly random, or
-    # reloaded -- including trainer.completed_iterations iterations of
-    # prior training, since that's carried forward too -- see
-    # _reload_checkpoint) and only advances to the current net when a check
-    # shows improvement -- see --benchmark-interval's help text.
-    benchmark_net = cfr_networks.clone(trainer.net) if args.benchmark_interval > 0 else None
+    # The --benchmark-interval rotating pool: reloaded from wherever a
+    # previous run of this same checkpoint last left it (_load_benchmark_pool
+    # -- gated on --reload-previous the same way _reload_checkpoint's own net/
+    # reservoir/optimizer-state reload is, so --no-reload-previous starts
+    # completely fresh across the board), so a resumed run's pool picks up
+    # exactly where it left off rather than silently collapsing back to a
+    # single entry -- a resumed run must not differ from one that simply
+    # kept running in the same process. Falls back to a single-entry pool
+    # holding whatever net this run's iteration loop below is about to start
+    # from (freshly random, or reloaded -- including trainer.completed_iterations
+    # iterations of prior training, since that's carried forward too -- see
+    # _reload_checkpoint) whenever nothing was reloaded (a fresh run,
+    # --no-reload-previous, or a checkpoint saved before this pool existed).
+    # Gains one more entry (oldest dropped once past --benchmark-pool-size)
+    # each time a check shows improvement -- see --benchmark-interval/
+    # --benchmark-pool-size's help text.
+    benchmark_pool: list[cfr_networks.AdvantageNet] = []
+    if args.benchmark_interval > 0:
+        if args.reload_previous:
+            benchmark_pool = _load_benchmark_pool(checkpoint_path)
+            if benchmark_pool:
+                print(f"Reloaded a {len(benchmark_pool)}-entry benchmark pool from {checkpoint_path}.")
+        if not benchmark_pool:
+            benchmark_pool = [cfr_networks.clone(trainer.net)]
 
     consecutive_non_improvements = 0
 
@@ -372,12 +453,20 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
 
         if args.checkpoint_interval > 0 and iteration % args.checkpoint_interval == 0:
             trainer.save(checkpoint_path)
+            if benchmark_pool:
+                _save_benchmark_pool(benchmark_pool, trainer.net_config(), checkpoint_path)
 
         if args.benchmark_interval > 0 and iteration % args.benchmark_interval == 0:
             current_players = _benchmark_players(trainer.net, config.feature_keys, "current", id_offset=0, gto_spots=config.gto_spots)
-            checkpoint_players = _benchmark_players(benchmark_net, config.feature_keys, "checkpoint", id_offset=-100, gto_spots=config.gto_spots)
+            checkpoint_pools = [
+                _benchmark_players(
+                    anchor, config.feature_keys, f"checkpoint_{i}",
+                    id_offset=-100 * (i + 1), gto_spots=config.gto_spots,
+                )
+                for i, anchor in enumerate(benchmark_pool)
+            ]
             outcome = run_benchmark_until_resolved(
-                current_players, checkpoint_players, game_config, rng,
+                current_players, checkpoint_pools, game_config, rng,
                 min_tables=args.benchmark_min_tables, max_tables=args.benchmark_max_tables,
                 table_batch=args.benchmark_table_batch, p_value=args.benchmark_p_value,
                 show_progress=True, num_workers=num_workers, executor=executor,
@@ -390,22 +479,26 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
                 verdict = "INCONCLUSIVE (table cap hit; treated as not improved)"
             confidence_pct = (1.0 - args.benchmark_p_value) * 100.0
             print(
-                f"         | benchmark vs checkpoint ({args.benchmark_interval} iters ago) | "
+                f"         | benchmark vs pool of {len(benchmark_pool)} past snapshot(s) | "
                 f"{outcome.tables_played} tables | current edge {outcome.mean_bb_per_100:+7.2f} bb/100 "
                 f"({confidence_pct:.0f}% CI [{outcome.ci_low:+7.2f}, {outcome.ci_high:+7.2f}]) | {verdict}"
             )
             if outcome.improved:
                 consecutive_non_improvements = 0
-                benchmark_net = cfr_networks.clone(trainer.net)
+                benchmark_pool.append(cfr_networks.clone(trainer.net))
+                if len(benchmark_pool) > args.benchmark_pool_size:
+                    benchmark_pool.pop(0)
             else:
                 consecutive_non_improvements += 1
                 patience_label = args.early_stop_patience if args.early_stop_patience > 0 else "unlimited"
                 print(
-                    f"         | this update didn't help -- reverting net to its benchmark checkpoint "
-                    f"({consecutive_non_improvements}/{patience_label} consecutive non-improvements)"
+                    f"         | this update didn't help -- reverting net to the pool's most recently "
+                    f"confirmed-good snapshot ({consecutive_non_improvements}/{patience_label} "
+                    "consecutive non-improvements)"
                 )
-                trainer.revert_to(benchmark_net)
+                trainer.revert_to(benchmark_pool[-1])
                 trainer.save(checkpoint_path)
+                _save_benchmark_pool(benchmark_pool, trainer.net_config(), checkpoint_path)
                 if args.early_stop_patience > 0 and consecutive_non_improvements >= args.early_stop_patience:
                     print(
                         f"Early stopping: no improvement for {args.early_stop_patience} "
@@ -414,6 +507,8 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
                     break
 
     trainer.save(checkpoint_path)
+    if benchmark_pool:
+        _save_benchmark_pool(benchmark_pool, trainer.net_config(), checkpoint_path)
     print(f"Done. Checkpoint saved to {checkpoint_path}.{{pt,json,npz}}")
 
 

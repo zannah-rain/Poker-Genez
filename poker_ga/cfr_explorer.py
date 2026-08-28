@@ -1765,29 +1765,34 @@ def _render_substrategy(
     # dropping Exact Hole Hand and re-appending it separately, keeps it in
     # its own correctly-ranked spot instead of always trailing last
     # regardless of its actual importance.
-    table_keys = [
-        k for k, _ in default_importance
-        if k != _HOLE_HAND_GRID_KEY or _hole_hand_grid_split_by_available(default_df)
-    ]
-    show_interaction = bool(resolved_split_by)
-    table_interaction_by_key = dict(_decision_variance_by_key(
-        root_df, default_df, parent_node_df, parent_group_by_keys, table_keys, tuple(resolved_split_by), collapsed,
-    )) if show_interaction else {}
-    st.caption("Feature importance and interaction with the current Split By pick:")
-    st.dataframe(
-        pd.DataFrame([
-            {
-                "Feature": cfr_features.feature_label(key),
-                "Importance": f"{importance_by_key[key]:.0f}%",
-                "Interaction with current Split By": (
-                    "—" if not show_interaction or key in resolved_split_by
-                    else f"{table_interaction_by_key[key]:.0f}%"
-                ),
-            }
-            for key in table_keys
-        ]),
-        hide_index=True, use_container_width=True,
+    show_importance_table = st.checkbox(
+        "Show feature importance and interaction table (computationally expensive)",
+        value=False, key=f"{key_prefix}show_importance_table",
     )
+    if show_importance_table:
+        table_keys = [
+            k for k, _ in default_importance
+            if k != _HOLE_HAND_GRID_KEY or _hole_hand_grid_split_by_available(default_df)
+        ]
+        show_interaction = bool(resolved_split_by)
+        table_interaction_by_key = dict(_decision_variance_by_key(
+            root_df, default_df, parent_node_df, parent_group_by_keys, table_keys, tuple(resolved_split_by), collapsed,
+        )) if show_interaction else {}
+        st.caption("Feature importance and interaction with the current Split By pick:")
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "Feature": cfr_features.feature_label(key),
+                    "Importance": f"{importance_by_key[key]:.0f}%",
+                    "Interaction with current Split By": (
+                        "—" if not show_interaction or key in resolved_split_by
+                        else f"{table_interaction_by_key[key]:.0f}%"
+                    ),
+                }
+                for key in table_keys
+            ]),
+            hide_index=True, use_container_width=True,
+        )
 
     st.caption("Suggested sub-strategies:")
     suggest_cols = st.columns(4)
