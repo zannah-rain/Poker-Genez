@@ -266,16 +266,36 @@ class TestHoleHandGridLabel:
 
 class TestPositionAndStreet:
     def test_position_norm_zero_when_only_one_seat(self):
-        values = values_by_key(make_situation(num_seats_this_street=1, position=0))
+        values = values_by_key(make_situation(street=1, num_seats_this_street=1, position=0))
         assert values["position_norm"] == 0.0
 
     def test_position_norm_scales_between_0_and_1(self):
-        first = values_by_key(make_situation(num_seats_this_street=4, position=0))
-        last = values_by_key(make_situation(num_seats_this_street=4, position=3))
-        mid = values_by_key(make_situation(num_seats_this_street=4, position=1))
+        first = values_by_key(make_situation(street=1, num_seats_this_street=4, position=0))
+        last = values_by_key(make_situation(street=1, num_seats_this_street=4, position=3))
+        mid = values_by_key(make_situation(street=1, num_seats_this_street=4, position=1))
         assert first["position_norm"] == 0.0
         assert last["position_norm"] == 1.0
         assert mid["position_norm"] == pytest.approx(1 / 3)
+
+    def test_position_norm_masked_preflop(self):
+        # Preflop, action order is just this player's fixed starting seat --
+        # starting_position_norm already covers that exactly, so
+        # position_norm is masked rather than repeating it.
+        values = values_by_key(make_situation(street=0, num_seats_this_street=4, position=1))
+        assert values["position_norm"] == MASKED
+
+    def test_position_norm_not_masked_postflop(self):
+        for street in (1, 2, 3):
+            values = values_by_key(make_situation(street=street, num_seats_this_street=4, position=1))
+            assert values["position_norm"] != MASKED
+
+    def test_starting_position_norm_masked_postflop(self):
+        # Past preflop, position_norm already captures this player's actual
+        # (folds-adjusted) acting order -- starting_position_norm, a fixed
+        # whole-hand seat label, is masked rather than left redundant.
+        for street in (1, 2, 3):
+            values = values_by_key(make_situation(seat_index=2, button_idx=0, num_seats_total=6, street=street))
+            assert values["starting_position_norm"] == MASKED
 
     def test_street_norm_by_street(self):
         for street, expected in enumerate([0.0, 1 / 3, 2 / 3, 1.0]):

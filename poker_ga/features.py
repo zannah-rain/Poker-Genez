@@ -578,8 +578,14 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "Starting Seat Position for that): a player who was dealt into a late "
         "seat but finds everyone ahead of them has folded reads as acting "
         "early here, since that's what actually determines their own "
-        "information/leverage at the moment of this decision.",
+        "information/leverage at the moment of this decision. Masked to -1.0 "
+        "(features.MASKED) preflop, where the action order is just this "
+        "player's fixed starting seat -- Starting Seat Position already "
+        "covers that exactly, without this feature's own live, "
+        "folds-adjust-it reshuffling (which preflop, before anyone's acted, "
+        "would just repeat the same seat-based ordering anyway).",
         kind="continuous", value_table=_POSITION_VALUES, group="Table & Game State Features",
+        maskable=True,
     ),
 
     FeatureSpec(
@@ -588,8 +594,12 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "ordered from first-to-act preflop through the blinds -- UTG, HJ, CO, BTN, SB, BB "
         "-- normalized as role_index / 5. At smaller table sizes the earliest non-blind "
         "roles collapse (e.g. 4-handed there's only UTG and BTN; heads-up the button and "
-        "small blind are the same seat, labeled SB).",
+        "small blind are the same seat, labeled SB). Masked to -1.0 (features.MASKED) "
+        "past preflop -- In/Out of Position (position_norm) already captures this "
+        "player's actual acting order on later streets, adjusted for whoever's since "
+        "folded, which this fixed, whole-hand seat label can't reflect.",
         kind="categorical", value_table=_SEAT_ROLE_VALUES, group="Table & Game State Features",
+        maskable=True,
     ),
 
     FeatureSpec(
@@ -1293,9 +1303,12 @@ def extract_features(sit: Situation) -> np.ndarray:
     call_amount_norm = _clip01(sit.call_amount / max(sit.pot, 1.0) / _CALL_SIZE_CEILING)
     spr = sit.effective_stack / max(sit.pot, 1.0)
     spr_norm = _clip01(spr / 20.0)
-    position_norm = 0.0
-    if sit.num_seats_this_street > 1:
-        position_norm = sit.position / (sit.num_seats_this_street - 1)
+    if sit.street == 0:
+        position_norm = MASKED
+    else:
+        position_norm = 0.0
+        if sit.num_seats_this_street > 1:
+            position_norm = sit.position / (sit.num_seats_this_street - 1)
     num_active_norm = min(sit.num_active, 4) / 4.0
     num_raises_norm = _clip01(sit.num_raises_this_street / 3.0)
     raises_last_street_norm = _clip01(sit.num_raises_previous_street / 3.0)
@@ -1328,7 +1341,7 @@ def extract_features(sit: Situation) -> np.ndarray:
         "call_amount_norm": call_amount_norm,
         "spr_norm": spr_norm,
         "position_norm": position_norm,
-        "starting_position_norm": role_index / (len(SEAT_ROLES) - 1),
+        "starting_position_norm": (role_index / (len(SEAT_ROLES) - 1)) if sit.street == 0 else MASKED,
         "num_active_norm": num_active_norm,
         "num_raises_norm": num_raises_norm,
         "raises_last_street_norm": raises_last_street_norm,
