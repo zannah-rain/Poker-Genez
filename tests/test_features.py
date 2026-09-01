@@ -166,9 +166,51 @@ class TestHoleCardFeatures:
         connectors = values_by_key(make_situation(hole=[Card.from_str("9h"), Card.from_str("8d")]))
         assert ak["hole_connectivity"] == a2["hole_connectivity"] == connectors["hole_connectivity"]
 
-    def test_hole_high_card_indicator(self):
+    def test_hole_high_card_ace(self):
         values = values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("2d")]))
-        assert values["hole_high_card_norm"] == pytest.approx((14 - 2) / 12.0)
+        assert values["hole_high_card_norm"] == 1.0
+
+    def test_hole_high_card_king(self):
+        values = values_by_key(make_situation(hole=[Card.from_str("Kh"), Card.from_str("2d")]))
+        assert values["hole_high_card_norm"] == pytest.approx(3 / 4)
+
+    def test_hole_high_card_queen(self):
+        values = values_by_key(make_situation(hole=[Card.from_str("Qh"), Card.from_str("2d")]))
+        assert values["hole_high_card_norm"] == pytest.approx(2 / 4)
+
+    def test_hole_high_card_jack(self):
+        values = values_by_key(make_situation(hole=[Card.from_str("Jh"), Card.from_str("2d")]))
+        assert values["hole_high_card_norm"] == pytest.approx(1 / 4)
+
+    def test_hole_high_card_ten_or_below_reads_as_other(self):
+        values = values_by_key(make_situation(hole=[Card.from_str("Th"), Card.from_str("2d")]))
+        assert values["hole_high_card_norm"] == 0.0
+
+
+class TestSharedHighCardFeature:
+    def test_defaults_to_other_before_the_flop(self):
+        values = values_by_key(make_situation(board=[], street=0))
+        assert values["shared_high_card_norm"] == 0.0
+
+    def test_jack_or_below_reads_as_other(self):
+        board = [Card.from_str("Jc"), Card.from_str("7d"), Card.from_str("2h")]
+        values = values_by_key(make_situation(board=board, street=1))
+        assert values["shared_high_card_norm"] == 0.0
+
+    def test_queen_high_board(self):
+        board = [Card.from_str("Qc"), Card.from_str("7d"), Card.from_str("2h")]
+        values = values_by_key(make_situation(board=board, street=1))
+        assert values["shared_high_card_norm"] == pytest.approx(1 / 3)
+
+    def test_king_high_board(self):
+        board = [Card.from_str("Kc"), Card.from_str("7d"), Card.from_str("2h")]
+        values = values_by_key(make_situation(board=board, street=1))
+        assert values["shared_high_card_norm"] == pytest.approx(2 / 3)
+
+    def test_ace_high_board(self):
+        board = [Card.from_str("Ac"), Card.from_str("7d"), Card.from_str("2h")]
+        values = values_by_key(make_situation(board=board, street=1))
+        assert values["shared_high_card_norm"] == 1.0
 
 
 class TestHoleHandCategoryFeature:

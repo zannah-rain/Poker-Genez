@@ -97,12 +97,20 @@ FEATURE_GROUPS = [
 ]
 
 
-def _rank_label(rank: int) -> str:
-    return {11: "Jack", 12: "Queen", 13: "King", 14: "Ace"}.get(rank, str(rank))
-
-
 def _rank_key(rank: int) -> str:
     return {11: "jack", 12: "queen", 13: "king", 14: "ace"}.get(rank, str(rank))
+
+
+def _shared_high_card_bucket(rank: int | None) -> int:
+    """0 = Other (no board yet, or a Jack-or-below high card -- see
+    shared_high_card_norm's own FeatureSpec for why those two collapse
+    together) < 1 = Queen High < 2 = King High < 3 = Ace High."""
+    return {14: 3, 13: 2, 12: 1}.get(rank, 0)
+
+
+def _hole_high_card_bucket(rank: int) -> int:
+    """0 = Other (Ten or below) < 1 = Jack < 2 = Queen < 3 = King < 4 = Ace."""
+    return {14: 4, 13: 3, 12: 2, 11: 1}.get(rank, 0)
 
 
 # Gaps of 6+ are all equally "not going to make a straight together" (the
@@ -294,8 +302,10 @@ _HOLE_CATEGORY_VALUES = tuple((i / 11, label) for i, label in enumerate(_HOLE_CA
 _HOLE_HAND_GRID_VALUES = tuple(
     (i / (HOLE_HAND_GRID_SIZE - 1), HOLE_HAND_GRID_RANK_LABELS[i]) for i in range(HOLE_HAND_GRID_SIZE)
 )
-_HOLE_HIGH_CARD_VALUES = tuple(((r - 2) / 12, _rank_label(r)) for r in range(2, 15))
-_SHARED_HIGH_CARD_VALUES = tuple(((r - 2) / 12, _rank_label(r)) for r in range(2, 15))
+_HOLE_HIGH_CARD_VALUES = (
+    (0 / 4, "Other"), (1 / 4, "Jack"), (2 / 4, "Queen"), (3 / 4, "King"), (4 / 4, "Ace"),
+)
+_SHARED_HIGH_CARD_VALUES = ((0 / 3, "Other"), (1 / 3, "Queen High"), (2 / 3, "King High"), (3 / 3, "Ace High"))
 _CONNECTIVITY_VALUES = tuple(
     (1.0 - gap / CONNECTIVITY_GAP_CAP, _connectivity_label(gap)) for gap in range(0, CONNECTIVITY_GAP_CAP + 1)
 )
@@ -478,17 +488,23 @@ FEATURE_SPECS: list[FeatureSpec] = [
 
     FeatureSpec(
         "hole_high_card_norm", "Hole High Card Rank",
-        "Rank of the higher of this player's two hole cards, normalized to 0-1 via "
-        "(rank - 2) / 12, so 0.0 = deuce and 1.0 = ace. Always defined, from preflop on.",
+        "How high the higher of this player's two hole cards is, collapsed to the 5 "
+        "buckets that actually matter for starting-hand strength: Ace > King > Queen > "
+        "Jack > Other (Ten or below, where exactly which rank it is matters far less "
+        "than whether it's a genuine broadway card). Normalized as bucket_index / 4. "
+        "Always defined, from preflop on.",
         kind="categorical", value_table=_HOLE_HIGH_CARD_VALUES, group="Hole Card Characteristics",
     ),
 
     FeatureSpec(
         "shared_high_card_norm", "Shared Cards High Card Rank",
-        "Rank of the highest board (shared/community) card, normalized to 0-1 via "
-        "(rank - 2) / 12. Defaults to 0.0 (the deuce value) preflop, before any shared "
-        "cards are dealt -- pair with the street/is_preflop features to tell 'no board "
-        "yet' apart from 'the board's high card really is a deuce'.",
+        "How high the highest board (shared/community) card is, collapsed to the 4 "
+        "buckets that actually change preflop-range interactions: Ace High > King High "
+        "> Queen High > Other (Jack or below -- below Queen, exactly which rank it is "
+        "matters far less than whether it's a genuine broadway card). Normalized as "
+        "bucket_index / 3. Also reads as Other (0.0) preflop, before any shared cards "
+        "are dealt -- pair with the street feature to tell 'no board yet' apart from "
+        "'the board's own high card really is Jack or below'.",
         kind="categorical", value_table=_SHARED_HIGH_CARD_VALUES, group="Board / Flop Characteristics",
     ),
 
@@ -1336,8 +1352,8 @@ def extract_features(sit: Situation) -> np.ndarray:
 
     values = {
         "hand_category_norm": hand_category_bucket / (len(_HAND_CATEGORY_VALUES) - 1),
-        "hole_high_card_norm": (hole_high_card_rank - 2) / 12.0,
-        "shared_high_card_norm": ((shared_high_card_rank - 2) / 12.0) if shared_high_card_rank else 0.0,
+        "hole_high_card_norm": _hole_high_card_bucket(hole_high_card_rank) / 4.0,
+        "shared_high_card_norm": _shared_high_card_bucket(shared_high_card_rank) / 3.0,
         "num_overcards_norm": num_overcards / 5.0,
         "hole_suited": hole_suited,
         "hole_connectivity": hole_connectivity,
