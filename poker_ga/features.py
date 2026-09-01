@@ -328,7 +328,9 @@ _POSITION_VALUES = (
     (0.75, "Acts late"),
     (1.0, "Acts last this street (in position / on the button)"),
 )
-_ACTIVE_PLAYERS_VALUES = tuple((n / 6.0, f"{n} players still in the hand") for n in range(2, 7))
+_ACTIVE_PLAYERS_VALUES = tuple((n / 4.0, f"{n} players still in the hand") for n in range(2, 4)) + (
+    (1.0, "4+ players still in the hand"),
+)
 _OVERCARDS_VALUES = tuple(
     (
         n / 5.0,
@@ -592,7 +594,9 @@ FEATURE_SPECS: list[FeatureSpec] = [
 
     FeatureSpec(
         "num_active_norm", "Players Still In Hand",
-        "Number of players who have not folded yet this hand, divided by 6.",
+        "Number of players who have not folded yet this hand, capped at 4 and divided by "
+        "4 -- capped rather than higher since, similar to num_raises_norm, the exact "
+        "count stops mattering much for strategy once a pot is already 4+ ways.",
         kind="categorical", value_table=_ACTIVE_PLAYERS_VALUES, group="Table & Game State Features",
     ),
 
@@ -1292,7 +1296,7 @@ def extract_features(sit: Situation) -> np.ndarray:
     position_norm = 0.0
     if sit.num_seats_this_street > 1:
         position_norm = sit.position / (sit.num_seats_this_street - 1)
-    num_active_norm = _clip01(sit.num_active / 6.0)
+    num_active_norm = min(sit.num_active, 4) / 4.0
     num_raises_norm = _clip01(sit.num_raises_this_street / 3.0)
     raises_last_street_norm = _clip01(sit.num_raises_previous_street / 3.0)
     raises_preflop_norm = min(sit.num_raises_preflop, 3) / 3.0

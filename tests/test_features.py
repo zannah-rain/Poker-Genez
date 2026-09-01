@@ -376,7 +376,12 @@ class TestStackAndSeatFeatures:
 
     def test_num_active_norm(self):
         values = values_by_key(make_situation(num_active=3))
-        assert values["num_active_norm"] == pytest.approx(0.5)
+        assert values["num_active_norm"] == pytest.approx(3 / 4)
+
+    def test_num_active_norm_caps_at_4(self):
+        five_active = values_by_key(make_situation(num_active=5))
+        six_active = values_by_key(make_situation(num_active=6))
+        assert five_active["num_active_norm"] == six_active["num_active_norm"] == 1.0
 
     def test_starting_position_norm_matches_seat_role(self):
         # button_idx=0, n=6: seat 2 is BB (see seating.blind_indices) --
