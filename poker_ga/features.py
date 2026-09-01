@@ -498,8 +498,12 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "1 - gap / 6, where gap is the rank distance (Ace counted as high or low, "
         "whichever gives the smaller gap -- so A-K and A-2 are both gap 1) capped at 6, "
         "since anything 6+ apart is equally unable to share a straight. 1.0 means "
-        "consecutive ranks (e.g. 9-T); 0.0 means 6 or more apart.",
+        "consecutive ranks (e.g. 9-T); 0.0 means 6 or more apart. Masked to -1.0 "
+        "(features.MASKED) past preflop -- once the board's out, draw_norm already "
+        "reflects whatever straight potential this connectivity turned into, so this "
+        "raw preflop fact stops adding anything on its own.",
         kind="categorical", value_table=_CONNECTIVITY_VALUES, group="Hole Card Characteristics",
+        maskable=True,
     ),
 
     FeatureSpec(
@@ -513,8 +517,12 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "Suited Connectors (1 apart) > Suited 1 Gappers (2 apart) > Suited 2 Gappers "
         "(3 apart) > Unsuited Connectors (1 apart) > Junk (everything else). Normalized "
         "as bucket_index / 11, where bucket_index counts up from 0 = Junk to 11 = "
-        "Premium Pairs, so higher is a stronger starting hand.",
+        "Premium Pairs, so higher is a stronger starting hand. Masked to -1.0 "
+        "(features.MASKED) past preflop -- once the board's out, hand_category_norm "
+        "already reflects this player's actual made-hand strength, so this raw preflop "
+        "starting-hand read stops adding anything on its own.",
         kind="categorical", value_table=_HOLE_CATEGORY_VALUES, group="Hole Card Characteristics",
+        maskable=True,
     ),
 
     FeatureSpec(
@@ -667,8 +675,12 @@ FEATURE_SPECS: list[FeatureSpec] = [
 
     # Standalone booleans: not tied to a specific value of any other feature.
     FeatureSpec(
-        "hole_suited", "Suited Hole Cards", "1 if both hole cards share a suit, else 0.",
-        group="Hole Card Characteristics",
+        "hole_suited", "Suited Hole Cards",
+        "1 if both hole cards share a suit, else 0. Masked to -1.0 (features.MASKED) past "
+        "preflop -- once the board's out, draw_norm/hand_category_norm already reflect "
+        "whatever this player's suitedness has turned into (a flush draw, a made flush, or "
+        "neither), so this raw preflop fact stops adding anything on its own.",
+        group="Hole Card Characteristics", maskable=True,
     ),
     FeatureSpec(
         "is_aggressor_previous_street", "Last Aggressor - Previous Street",
@@ -1295,9 +1307,9 @@ def extract_features(sit: Situation) -> np.ndarray:
     cat = hand["category"]
     hand_category_bucket = _hand_category_bucket(sit.hole, sit.board, cat, hand)
 
-    hole_suited = float(sit.hole[0].suit == sit.hole[1].suit)
+    hole_suited = MASKED if sit.street != 0 else float(sit.hole[0].suit == sit.hole[1].suit)
     gap = _rank_gap(sit.hole[0].rank, sit.hole[1].rank)
-    hole_connectivity = _clip01(1.0 - gap / CONNECTIVITY_GAP_CAP)
+    hole_connectivity = MASKED if sit.street != 0 else _clip01(1.0 - gap / CONNECTIVITY_GAP_CAP)
     hole_category = _hole_hand_category(sit.hole)
 
     call_amount_norm = _clip01(sit.call_amount / max(sit.pot, 1.0) / _CALL_SIZE_CEILING)
@@ -1332,7 +1344,7 @@ def extract_features(sit: Situation) -> np.ndarray:
         "num_overcards_norm": num_overcards / 5.0,
         "hole_suited": hole_suited,
         "hole_connectivity": hole_connectivity,
-        "hole_hand_category_norm": hole_category / 11.0,
+        "hole_hand_category_norm": (hole_category / 11.0) if sit.street == 0 else MASKED,
         "street_norm": sit.street / 3.0,
         "is_aggressor_previous_street": float(sit.is_aggressor_previous_street),
         "is_aggressor_preflop": float(sit.is_aggressor_preflop),
