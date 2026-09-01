@@ -118,12 +118,7 @@ def parse_action_token(token: str) -> _ActionSpec:
 class SpotMatcher:
     """Declarative criteria checked against a Situation to decide whether a
     GTOSpot applies. Every field is optional (None = "don't care"); a
-    situation matches only if every specified field agrees.
-
-    Note: `is_aggressor_previous_street` only distinguishes "I made the
-    last raise" from "I didn't" -- Situation doesn't track *which* seat
-    made a raise, so a matcher can express "BTN facing a 3-bet" but not
-    "BTN facing a 3-bet specifically from the BB"."""
+    situation matches only if every specified field agrees."""
 
     street: int | None = None  # 0=preflop, 1=flop, 2=turn, 3=river
     # 0=unraised, 1=single raised, 2=3-bet, 3=4-bet+ -- checked against
@@ -139,6 +134,20 @@ class SpotMatcher:
     facing_bet: bool | None = None  # is there a nonzero amount required to call?
     min_effective_bb: float | None = None  # inclusive, in actual big blinds
     max_effective_bb: float | None = None  # inclusive
+    min_call_bb: float | None = None  # inclusive, size of the bet being faced, in actual big blinds
+    max_call_bb: float | None = None  # inclusive
+    # Which specific seat made the most recent bet/raise this street, one of
+    # seating.SEAT_ROLES -- e.g. "3-bet from the BB" vs "3-bet from the SB",
+    # a refinement is_aggressor_previous_street alone can't express (that
+    # only distinguishes "I made the last raise" from "I didn't", not which
+    # *other* seat did -- see Situation.last_raiser_position).
+    last_raiser_position: str | None = None
+    # Positions (seating.SEAT_ROLES) that must *all* still be active (not
+    # folded) this street for the spot to apply, e.g.
+    # frozenset({"SB", "BB"}) for "both blinds still behind me" -- checked
+    # against Situation.active_positions. None = "don't care who else is
+    # still in".
+    required_active_positions: frozenset[str] | None = None
 
     def matches(self, situation: Situation) -> bool:
         if self.street is not None and situation.street != self.street:
@@ -162,6 +171,16 @@ class SpotMatcher:
                 return False
             if self.max_effective_bb is not None and effective_bb > self.max_effective_bb:
                 return False
+        if self.min_call_bb is not None or self.max_call_bb is not None:
+            call_bb = situation.call_amount / max(situation.big_blind, 1e-9)
+            if self.min_call_bb is not None and call_bb < self.min_call_bb:
+                return False
+            if self.max_call_bb is not None and call_bb > self.max_call_bb:
+                return False
+        if self.last_raiser_position is not None and situation.last_raiser_position != self.last_raiser_position:
+            return False
+        if self.required_active_positions is not None and not self.required_active_positions <= situation.active_positions:
+            return False
         return True
 
     def describe(self) -> str:
@@ -186,6 +205,16 @@ class SpotMatcher:
             parts.append(f">={self.min_effective_bb:.0f}BB effective")
         elif self.max_effective_bb is not None:
             parts.append(f"<={self.max_effective_bb:.0f}BB effective")
+        if self.min_call_bb is not None and self.max_call_bb is not None:
+            parts.append(f"facing {self.min_call_bb:.1f}-{self.max_call_bb:.1f}BB")
+        elif self.min_call_bb is not None:
+            parts.append(f"facing >={self.min_call_bb:.1f}BB")
+        elif self.max_call_bb is not None:
+            parts.append(f"facing <={self.max_call_bb:.1f}BB")
+        if self.last_raiser_position is not None:
+            parts.append(f"vs {self.last_raiser_position}")
+        if self.required_active_positions is not None:
+            parts.append(f"{'/'.join(sorted(self.required_active_positions))} still in")
         return ", ".join(parts) if parts else "any situation"
 
 
@@ -241,25 +270,34 @@ GTO_SPOTS: tuple[GTOSpot, ...] = (
     GTOSpot(
         key="utg_open_100bb",
         label="UTG Open -- 100BB stack",
-        matcher=SpotMatcher(street=0, pot_type=0, position="UTG", facing_bet=False, min_effective_bb=80, max_effective_bb=120),
+        matcher=SpotMatcher(street=0, pot_type=0, position="UTG", facing_bet=False, min_effective_bb=0, max_effective_bb=200),
         action_ranges=(
             ("raise_2BB", "ATo+, KJo+, 55+, T9s+, J9s+, Q9s+, K5s+, A2s+"),
         ),
         default_action="fold",
     ),
     GTOSpot(
-        key="hj_open_100bb",
-        label="HJ Open -- 100BB stack",
-        matcher=SpotMatcher(street=0, pot_type=0, position="HJ", facing_bet=False, min_effective_bb=80, max_effective_bb=120),
-        action_ranges=(
-            ("raise_2BB", "ATo+, KTo+, QJo+, 44+, 65s, 87s+, 97s+, T8s+, J8s+, Q8s+, K4s+, A2s+"),
+            key="hj_open_100bb",
+            label="HJ Open -- 100BB stack",
+            matcher=SpotMatcher(street=0, pot_type=0, position="HJ", facing_bet=False, min_effective_bb=0, max_effective_bb=200),
+            action_ranges=(
+                ("raise_2BB", "ATo+, KTo+, QJo+, 44+, 65s, 87s+, 97s+, T8s+, J8s+, Q8s+, K4s+, A2s+"),
+            ),
+            default_action="fold",
         ),
-        default_action="fold",
-    ),
+    GTOSpot(
+            key="hj_vs_utg_open",
+            label="HJ vs UTG Open -- 100BB stack",
+            matcher=SpotMatcher(street=0, pot_type=0, position="HJ", facing_bet=True, min_effective_bb=0, max_effective_bb=200),
+            action_ranges=(
+                ("raise_2BB", "ATo+, KTo+, QJo+, 44+, 65s, 87s+, 97s+, T8s+, J8s+, Q8s+, K4s+, A2s+"),
+            ),
+            default_action="fold",
+        ),
     GTOSpot(
         key="co_open_100bb",
         label="CO Open -- 100BB stack",
-        matcher=SpotMatcher(street=0, pot_type=0, position="CO", facing_bet=False, min_effective_bb=80, max_effective_bb=120),
+        matcher=SpotMatcher(street=0, pot_type=0, position="CO", facing_bet=False, min_effective_bb=0, max_effective_bb=200),
         action_ranges=(
             ("raise_2.3BB", "A5o, A8o+, KTo+, QTo+, JTo+, 44+, 65s+, 97s+, T7s+, J7s+, Q5s+, K2s+, A2s+"),
         ),
@@ -268,7 +306,7 @@ GTO_SPOTS: tuple[GTOSpot, ...] = (
     GTOSpot(
             key="btn_open_100bb",
             label="BTN Open -- 100BB stack",
-            matcher=SpotMatcher(street=0, pot_type=0, position="BTN", facing_bet=False, min_effective_bb=80, max_effective_bb=120),
+            matcher=SpotMatcher(street=0, pot_type=0, position="BTN", facing_bet=False, min_effective_bb=0, max_effective_bb=200),
             action_ranges=(
                 ("raise_2.5BB", "A3o+, K8o+, Q9o+, J9o+, T9o+, 22+, 54s+, 75s+, 96s+, T5s+, J4s+, Q2s+, K2s+, A2s+"),
             ),
@@ -277,7 +315,7 @@ GTO_SPOTS: tuple[GTOSpot, ...] = (
     GTOSpot(
         key="sb_open_100bb",
         label="SB Open -- 100BB stack",
-        matcher=SpotMatcher(street=0, pot_type=0, position="SB", facing_bet=False, min_effective_bb=80, max_effective_bb=120),
+        matcher=SpotMatcher(street=0, pot_type=0, position="SB", facing_bet=False, min_effective_bb=0, max_effective_bb=200),
         action_ranges=(
             ("call", "74s, 95s, T5s, T4s, J3s, J2s, A3s, Qts, Q9s"),
             ("raise_3BB", "A3o+, K8o+, Q9o+, J9o+, T8o+, 98o+, 22+, 54s+, 53s+, 85s+, 96s+, T6s+, J4s+, Q2s+, K2s+, A4s+, A2s"),

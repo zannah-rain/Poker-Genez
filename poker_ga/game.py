@@ -206,6 +206,10 @@ def betting_round(
             raised_positions=frozenset(
                 seat_role(j, button_idx, len(seats)) for j in raiser_seats if j != i
             ),
+            last_raiser_position=(
+                seat_role(last_aggressor, button_idx, len(seats)) if last_aggressor is not None else None
+            ),
+            active_positions=frozenset(seat_role(j, button_idx, len(seats)) for j in non_folded if j != i),
             opp_vpip=opp_features.opp_vpip,
             opp_pfr=opp_features.opp_pfr,
             opp_three_bet=opp_features.opp_three_bet,

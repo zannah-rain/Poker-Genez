@@ -150,7 +150,7 @@ def parse_args() -> argparse.Namespace:
         "always start from a fresh random net).",
     )
     p.add_argument(
-        "--benchmark-interval", type=int, default=10,
+        "--benchmark-interval", type=int, default=0,
         help="The progress check: every this many iterations, play the current net "
         "head-to-head (3-vs-3 tables, benchmark.py) against a pool of past snapshots (see "
         "--benchmark-pool-min-weight-fraction), starting with just the net as it stood when this "

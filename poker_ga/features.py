@@ -967,6 +967,23 @@ class Situation:
     # bet/raised this street so far, e.g. frozenset({"UTG"}) for "folds to me
     # in the BB after UTG opens".
     raised_positions: frozenset[str] = field(default_factory=frozenset)
+    # Starting position (seating.SEAT_ROLES) of whoever made the single most
+    # recent bet/raise this street, or None if nobody has bet/raised this
+    # street yet -- a strict refinement of raised_positions (which just says
+    # *who's* raised so far, unordered) for spots that care specifically
+    # which seat this player is actually responding to, e.g. distinguishing
+    # a 3-bet from the BB from a 3-bet from the SB. Always some *other*
+    # seat's position: whoever raised most recently this street is skipped
+    # over in the to-act order until either the street ends or someone else
+    # re-raises (immediately replacing them here), so a player can never be
+    # making a decision while also being this street's own last raiser --
+    # see is_aggressor_previous_street above for the same structural point.
+    last_raiser_position: str | None = None
+    # Starting positions (seating.SEAT_ROLES) of every *other* seat still in
+    # the hand (not folded) as of this decision -- e.g. frozenset({"SB",
+    # "BB"}) for "both blinds are still in behind me". Mirrors
+    # raised_positions' own "every other seat" convention.
+    active_positions: frozenset[str] = field(default_factory=frozenset)
 
     # Opponent-tendency reads (see opponent_model.py), already 0-1 rates --
     # all default to a neutral 0.5 so any caller that doesn't opt into

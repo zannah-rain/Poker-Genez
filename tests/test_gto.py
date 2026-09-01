@@ -110,6 +110,36 @@ def test_spot_matcher_rejects_out_of_range_stack_depth():
     assert not matcher.matches(situation)
 
 
+def test_spot_matcher_matches_call_size_range():
+    matcher = gto.SpotMatcher(min_call_bb=2.0, max_call_bb=3.0)
+    situation = _situation(call_amount=5.0, big_blind=2.0)  # 2.5BB to call
+    assert matcher.matches(situation)
+
+
+def test_spot_matcher_rejects_call_size_outside_range():
+    matcher = gto.SpotMatcher(min_call_bb=2.0, max_call_bb=3.0)
+    situation = _situation(call_amount=1.0, big_blind=2.0)  # 0.5BB to call -- below range
+    assert not matcher.matches(situation)
+
+
+def test_spot_matcher_matches_last_raiser_position():
+    matcher = gto.SpotMatcher(last_raiser_position="BB")
+    situation = _situation(last_raiser_position="BB")
+    assert matcher.matches(situation)
+    situation = _situation(last_raiser_position="SB")
+    assert not matcher.matches(situation)
+
+
+def test_spot_matcher_matches_required_active_positions():
+    matcher = gto.SpotMatcher(required_active_positions=frozenset({"SB", "BB"}))
+    # A superset (some other seat also still in) still matches -- only the
+    # required positions themselves need to still be active.
+    situation = _situation(active_positions=frozenset({"SB", "BB", "CO"}))
+    assert matcher.matches(situation)
+    situation = _situation(active_positions=frozenset({"SB"}))  # BB has since folded
+    assert not matcher.matches(situation)
+
+
 def test_resolve_spot_action_uses_range_then_default():
     spot = gto.GTOSpot(
         key="test_spot", label="Test", matcher=gto.SpotMatcher(street=0),

@@ -203,10 +203,12 @@ class TestIsAggressorReflectsThePreviousStreet:
         aggressors_situation = cfr_tree._build_situation(
             state, street=1, order=[0, 1], i=0, pot=10.0, call_amount=0.0,
             num_raises=0, completed_street_raises=(1,), completed_street_aggressors=(0,), raiser_seats=frozenset(),
+            street_aggressor=None,
         )
         other_seats_situation = cfr_tree._build_situation(
             state, street=1, order=[0, 1], i=1, pot=10.0, call_amount=0.0,
             num_raises=0, completed_street_raises=(1,), completed_street_aggressors=(0,), raiser_seats=frozenset(),
+            street_aggressor=None,
         )
         assert aggressors_situation.is_aggressor_previous_street is True
         assert other_seats_situation.is_aggressor_previous_street is False
@@ -275,10 +277,12 @@ class TestPositionRelativeToNonFoldedPlayers:
         seat1_situation = cfr_tree._build_situation(
             state, street=1, order=[0, 1, 2, 3], i=1, pot=10.0, call_amount=0.0,
             num_raises=0, completed_street_raises=(0,), completed_street_aggressors=(None,), raiser_seats=frozenset(),
+            street_aggressor=None,
         )
         seat3_situation = cfr_tree._build_situation(
             state, street=1, order=[0, 1, 2, 3], i=3, pot=10.0, call_amount=0.0,
             num_raises=0, completed_street_raises=(0,), completed_street_aggressors=(None,), raiser_seats=frozenset(),
+            street_aggressor=None,
         )
 
         assert seat1_situation.num_seats_this_street == 2
@@ -291,6 +295,7 @@ class TestPositionRelativeToNonFoldedPlayers:
         situation = cfr_tree._build_situation(
             state, street=1, order=[0, 1, 2, 3], i=2, pot=10.0, call_amount=0.0,
             num_raises=0, completed_street_raises=(0,), completed_street_aggressors=(None,), raiser_seats=frozenset(),
+            street_aggressor=None,
         )
         assert situation.num_seats_this_street == 4
         assert situation.position == 2

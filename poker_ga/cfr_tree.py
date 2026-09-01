@@ -283,12 +283,14 @@ def _terminal_showdown(state: _HandState, ctx: _TraversalContext) -> float:
 def _build_situation(
     state: _HandState, street: int, order: list[int], i: int, pot: float, call_amount: float,
     num_raises: int, completed_street_raises: tuple[int, ...], completed_street_aggressors: tuple[int | None, ...],
-    raiser_seats: frozenset,
+    raiser_seats: frozenset, street_aggressor: int | None,
 ) -> Situation:
     """`completed_street_raises`/`completed_street_aggressors` hold one
     entry per street already completed before this one (index 0 = preflop,
     1 = flop, 2 = turn) -- see game.betting_round's own docstring for the
-    exact semantics this mirrors."""
+    exact semantics this mirrors. `street_aggressor` is who (if anyone) has
+    raised so far on *this* (still in-progress) street -- see
+    _decision_node's own docstring."""
     seats = state.seats
     non_folded = [s for s in order if not seats[s].folded]
     return Situation(
@@ -317,6 +319,10 @@ def _build_situation(
         starting_stack=state.starting_stacks[i],
         big_blind=state.config.big_blind,
         raised_positions=frozenset(seat_role(j, state.button_idx, len(seats)) for j in raiser_seats if j != i),
+        last_raiser_position=(
+            seat_role(street_aggressor, state.button_idx, len(seats)) if street_aggressor is not None else None
+        ),
+        active_positions=frozenset(seat_role(j, state.button_idx, len(seats)) for j in non_folded if j != i),
     )
 
 
@@ -381,7 +387,7 @@ def _decision_node(
 
     situation = _build_situation(
         state, street, order, i, pot, call_amount, num_raises,
-        completed_street_raises, completed_street_aggressors, raiser_seats,
+        completed_street_raises, completed_street_aggressors, raiser_seats, street_aggressor,
     )
 
     def _apply_and_recurse(child_state: _HandState, game_action: int, raw_bet_size: float, weight: float) -> float:
