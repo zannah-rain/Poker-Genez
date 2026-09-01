@@ -421,10 +421,6 @@ class TestBettingAndPotFeatures:
         values = values_by_key(make_situation(is_aggressor_flop=True, street=2))
         assert values["is_aggressor_flop"] == 1.0
 
-    def test_is_aggressor_turn_flag(self):
-        values = values_by_key(make_situation(is_aggressor_turn=True, street=3))
-        assert values["is_aggressor_turn"] == 1.0
-
 
 class TestStackAndSeatFeatures:
     def test_stack_depth_norm_at_100bb_is_half(self):
@@ -471,16 +467,8 @@ class TestStackAndSeatFeatures:
 class TestFlopTexture:
     def test_preflop_defaults_are_all_zero(self):
         values = values_by_key(make_situation(board=[]))
-        for key in ["flop_suit_texture_norm", "flop_pairing_texture_norm",
-                    "flop_connectivity_norm", "connected_flop", "oesd_possible_flop",
-                    "flop_wetness_norm", "flop_dynamism_norm"]:
+        for key in ["flop_suit_texture_norm", "flop_wetness_norm", "flop_dynamism_norm"]:
             assert values[key] == 0.0
-
-    def test_rainbow_unpaired_flop(self):
-        board = [Card.from_str("2c"), Card.from_str("7d"), Card.from_str("Kh")]
-        values = values_by_key(make_situation(board=board, street=1))
-        assert values["flop_suit_texture_norm"] == 0.0
-        assert values["flop_pairing_texture_norm"] == 0.0
 
     def test_monotone_flop(self):
         board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kc")]
@@ -492,31 +480,10 @@ class TestFlopTexture:
         values = values_by_key(make_situation(board=board, street=1))
         assert values["flop_suit_texture_norm"] == pytest.approx(0.5)
 
-    def test_paired_flop(self):
-        board = [Card.from_str("2c"), Card.from_str("2d"), Card.from_str("Kh")]
+    def test_rainbow_flop(self):
+        board = [Card.from_str("2c"), Card.from_str("7d"), Card.from_str("Kh")]
         values = values_by_key(make_situation(board=board, street=1))
-        assert values["flop_pairing_texture_norm"] == pytest.approx(0.5)
-
-    def test_tripled_flop(self):
-        board = [Card.from_str("2c"), Card.from_str("2d"), Card.from_str("2h")]
-        values = values_by_key(make_situation(board=board, street=1))
-        assert values["flop_pairing_texture_norm"] == 1.0
-
-    def test_connected_flop_within_span_4(self):
-        board = [Card.from_str("5c"), Card.from_str("7d"), Card.from_str("9h")]
-        values = values_by_key(make_situation(board=board, street=1))
-        assert values["connected_flop"] == 1.0
-
-    def test_disconnected_flop_wide_span(self):
-        board = [Card.from_str("2c"), Card.from_str("8d"), Card.from_str("Kh")]
-        values = values_by_key(make_situation(board=board, street=1))
-        assert values["connected_flop"] == 0.0
-        assert values["flop_connectivity_norm"] == 0.0
-
-    def test_oesd_possible_needs_unpaired_and_tight_span(self):
-        board = [Card.from_str("5c"), Card.from_str("6d"), Card.from_str("7h")]
-        values = values_by_key(make_situation(board=board, street=1))
-        assert values["oesd_possible_flop"] == 1.0
+        assert values["flop_suit_texture_norm"] == 0.0
 
     def test_suit_family_true_regardless_of_hole_card_connection(self):
         # flop_suit_texture_norm is purely the flop's own 3-card suit shape
@@ -533,18 +500,6 @@ class TestFlopTexture:
         # Both hole cards + all 3 board cards = a made flush -- King high
         # (the board's own Kc), since that's the flush's own highest card.
         assert two["hand_category_norm"] == pytest.approx(22 / 26)  # King High Flush
-
-    def test_connected_flop_without_a_straight_draw(self):
-        board = [Card.from_str("5c"), Card.from_str("7d"), Card.from_str("9h")]
-        values = values_by_key(make_situation(hole=[Card.from_str("2s"), Card.from_str("3s")], board=board))
-        assert values["flop_connectivity_norm"] == pytest.approx(0.5)
-        assert values["connected_flop"] == 1.0  # family aggregate still true
-
-    def test_connected_flop_with_a_straight_draw(self):
-        board = [Card.from_str("5c"), Card.from_str("7d"), Card.from_str("9h")]
-        values = values_by_key(make_situation(hole=[Card.from_str("6s"), Card.from_str("2d")], board=board))
-        assert values["flop_connectivity_norm"] == 1.0
-        assert values["draw_norm"] > 0.0
 
     def test_dry_static_flop(self):
         board = [Card.from_str("2c"), Card.from_str("7d"), Card.from_str("Kh")]  # rainbow, disconnected

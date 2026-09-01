@@ -24,7 +24,7 @@ import numpy as np
 from cards import RANKS, Card
 from evaluator import (
     FULL_HOUSE, FLUSH, HIGH_CARD, PAIR, QUADS, STRAIGHT, STRAIGHT_FLUSH,
-    TRIPS, TWO_PAIR, best_hand_from_available, count_straight_draw_outs,
+    TRIPS, TWO_PAIR, best_hand_from_available,
     has_backdoor_flush_draw, has_backdoor_straight_draw, straight_high,
 )
 from seating import SEAT_ROLES, seat_role
@@ -438,33 +438,12 @@ _SEAT_ROLE_LABELS = {
 }
 _SEAT_ROLE_VALUES = tuple((i / (len(SEAT_ROLES) - 1), _SEAT_ROLE_LABELS[role]) for i, role in enumerate(SEAT_ROLES))
 
-# Flop-texture features describe the flop (board[:3]) and, for the
-# connectivity family below, how this player's hole cards personally
-# connect to it -- still frozen once the flop is dealt, since neither the
-# flop cards nor the hole cards change on the turn/river. All default to
-# their lowest-value category before the flop (0 for every child, since
-# nothing has happened yet). flop_suit_texture_norm itself is purely about
-# the flop's own 3 cards (no hole-card awareness at all, unlike the
-# connectivity family).
+# Flop-texture features describe the flop (board[:3]) -- still frozen once
+# the flop is dealt, since it doesn't change on the turn/river. Both default
+# to their lowest-value category before the flop (nothing has happened yet).
 _FLOP_SUIT_TEXTURE_VALUES = ((0.0, "Rainbow"), (0.5, "Flush Draw Flop"), (1.0, "Monotone"))
-_FLOP_PAIRING_VALUES = ((0.0, "Unpaired"), (0.5, "Paired"), (1.0, "Tripled"))
-_FLOP_CONNECTIVITY_VALUES = (
-    (0 / 2, "Disconnected"), (1 / 2, "Connected, No Straight Draw"),
-    (2 / 2, "Connected, Straight Draw (4+/8+ Outs)"),
-)
 _FLOP_WETNESS_VALUES = ((0.0, "Dry"), (1.0, "Wet"))
 _FLOP_DYNAMISM_VALUES = ((0.0, "Static"), (1.0, "Dynamic"))
-
-# "connected_flop" is a family-level aggregate (indices 1+2 of the 3-value
-# family below), so it's declared standalone rather than as a `linked_to`
-# child (which can only ever point at one single index).
-_FLOP_CONNECTED_FAMILY_SPEC = FeatureSpec(
-    "connected_flop", "Connected",
-    "1 if the flop's ranks (Ace counted as high or low, whichever is closer) span 4 "
-    "or less, regardless of whether this player actually has a straight draw there "
-    "(see flop_connectivity_norm for the hole-card-aware breakdown), else 0.",
-    group="Board / Flop Characteristics",
-)
 
 # Grouped as parent-feature-then-its-children for readability; array order is
 # otherwise arbitrary since extract_features looks values up by key, not position.
@@ -721,15 +700,13 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "is_aggressor_flop", "Last Aggressor Flop",
         "Last Aggressor Preflop's own explanation, one street later: 0 until the flop has "
         "finished, then frozen at whether this player made the flop's last raise (so only "
-        "ever meaningful from the turn onward).",
-        group="Betting Behaviour Features",
-    ),
-    FeatureSpec(
-        "is_aggressor_turn", "Last Aggressor Turn",
-        "Last Aggressor Preflop's own explanation, two streets later: 0 until the turn has "
-        "finished, then frozen at whether this player made the turn's last raise (so only "
-        "ever meaningful on the river -- there's no Last Aggressor River, since nothing left "
-        "in the hand would ever get to see it).",
+        "ever meaningful from the turn onward). There's no Last Aggressor Turn sibling: it "
+        "would only ever be meaningful on the river, where Last Aggressor - Previous Street "
+        "(is_aggressor_previous_street) -- whether this player made the turn's last raise, "
+        "at that point -- already gives exactly the same reading, so a dedicated feature "
+        "for it would be pure duplication (Last Aggressor Flop itself stays genuinely "
+        "distinct from Last Aggressor - Previous Street on the turn *and* the river, so "
+        "it's kept).",
         group="Betting Behaviour Features",
     ),
 
@@ -746,46 +723,14 @@ FEATURE_SPECS: list[FeatureSpec] = [
     ),
 
     FeatureSpec(
-        "flop_pairing_texture_norm", "Flop Pairing Texture",
-        "How rank-coordinated the flop is: Unpaired (3 different ranks) < Paired (2 "
-        "share a rank) < Tripled (all 3 share a rank), normalized as index / 2. Frozen "
-        "once the flop is dealt; defaults to 0.0 (Unpaired's value) before the flop.",
-        kind="categorical", value_table=_FLOP_PAIRING_VALUES, group="Board / Flop Characteristics",
-    ),
-
-    FeatureSpec(
-        "flop_connectivity_norm", "Flop Connectivity",
-        "Whether the flop's 3 ranks (Ace counted as high or low, whichever is closer) "
-        "are close enough together to make straights possible, and if so, whether this "
-        "player's hole cards actually give them a straight draw there: Disconnected if "
-        "the ranks span more than 4 (too spread out for any hole cards to complete a "
-        "straight); otherwise Connected, split into 'No Straight Draw' (this player's "
-        "hole+flop cards have no rank that would complete a straight) and 'Straight "
-        "Draw (4+/8+ Outs)' (a gutshot or open-ended/double-gutshot is live). "
-        "Normalized as bucket_index / 2. Frozen once the flop is dealt; defaults to "
-        "0.0 (Disconnected's value) before the flop.",
-        kind="categorical", value_table=_FLOP_CONNECTIVITY_VALUES, group="Board / Flop Characteristics",
-    ),
-    _FLOP_CONNECTED_FAMILY_SPEC,
-
-    FeatureSpec(
-        "oesd_possible_flop", "Open Ended Straight Draw Possible Flop",
-        "1 if the flop's 3 ranks are all different and span 3 or less (Ace counted as "
-        "high or low, whichever is closer) -- tight enough that an open-ended straight "
-        "draw is possible for some hole cards -- else 0. A stricter subset of Connected "
-        "Flop (not one of its Connected/Disconnected partition values), so it isn't "
-        "folded into that table. 0 before the flop.",
-        group="Board / Flop Characteristics",
-    ),
-
-    FeatureSpec(
         "flop_wetness_norm", "Flop Wet vs Dry",
         "How draw-heavy the flop is, purely from its own suit and rank coordination "
-        "(not this player's hole cards -- see draw_norm and flop_connectivity_norm "
-        "for the hole-card-aware versions), combined into one "
-        "0-4 score: suit family index (0 Rainbow / 1 Flush Draw Flop / 2 Monotone) + 1 "
-        "if the flop's ranks are Connected (span <=4) + 1 if an open-ended straight "
-        "draw is possible for some hole cards (see oesd_possible_flop) -- then "
+        "(not this player's hole cards -- see draw_norm for the hole-card-aware "
+        "version), combined into one 0-4 score: suit family index (0 Rainbow / 1 "
+        "Flush Draw Flop / 2 Monotone, see Flop Suit Texture) + 1 if the flop's 3 "
+        "ranks (Ace counted as high or low, whichever is closer) span 4 or less + 1 "
+        "if they're all different ranks and span 3 or less (tight enough that an "
+        "open-ended straight draw is possible for some hole cards) -- then "
         "thresholded at >=2: Wet (1.0) at or above the threshold, Dry (0.0) below it. "
         "A monotone flop is always Wet on suits alone; a rainbow, disconnected flop is "
         "always Dry. Frozen once the flop is dealt; defaults to 0.0 (Dry's value) "
@@ -1246,22 +1191,17 @@ def _hole_hand_grid_features(hole: list[Card], street: int) -> dict:
 
 _NO_FLOP_TEXTURE = {
     "flop_suit_texture_norm": 0.0,
-    "flop_pairing_texture_norm": 0.0,
-    "flop_connectivity_norm": 0.0, "connected_flop": 0.0,
-    "oesd_possible_flop": 0.0,
     "flop_wetness_norm": 0.0,
     "flop_dynamism_norm": 0.0,
 }
 
 
-def _flop_texture(board: list[Card], hole: list[Card]) -> dict:
-    """Board-texture facts about the flop specifically (board[:3]) -- plus,
-    for the connectivity family, how `hole` connects to it -- frozen once
-    the flop is dealt -- the turn/river don't change them, since neither
-    the flop cards nor the hole cards do. Defaults all to 0 (their
-    lowest-value category) before the flop is dealt. The suit family here
-    is purely the flop's own shape (no hole-card awareness) -- see
-    draw_norm for the hole-card-aware, non-frozen version."""
+def _flop_texture(board: list[Card]) -> dict:
+    """Board-texture facts about the flop specifically (board[:3]) -- purely
+    the flop's own shape, no hole-card awareness (see draw_norm for that) --
+    frozen once the flop is dealt, since it doesn't change on the
+    turn/river. Defaults all to 0 (their lowest-value category) before the
+    flop is dealt."""
     if len(board) < 3:
         return dict(_NO_FLOP_TEXTURE)
     flop = board[:3]
@@ -1272,24 +1212,13 @@ def _flop_texture(board: list[Card], hole: list[Card]) -> dict:
     suit_index = 2 if monotone else (1 if two_tone else 0)
 
     rank_counts = Counter(c.rank for c in flop)
-    max_rank_count = max(rank_counts.values())
-    tripled, paired, unpaired = max_rank_count == 3, max_rank_count == 2, max_rank_count == 1
-    pairing_index = 2 if tripled else (1 if paired else 0)
+    unpaired = max(rank_counts.values()) == 1
 
     span = _ace_aware_span([c.rank for c in flop])
     connected = span <= 4
     oesd_possible = unpaired and span <= 3
 
-    if not connected:
-        connectivity_index = 0
-    elif count_straight_draw_outs(hole + flop) == 0:
-        connectivity_index = 1
-    else:
-        connectivity_index = 2
-
-    # Wetness: how many draws are live, from suit + rank coordination alone
-    # (the flop's own shape, not this player's hole cards -- connectivity_index
-    # above is the hole-card-aware version of the rank side of this).
+    # Wetness: how many draws are live, from suit + rank coordination alone.
     wet_score = suit_index + int(connected) + int(oesd_possible)
     wet = wet_score >= 2
 
@@ -1307,10 +1236,6 @@ def _flop_texture(board: list[Card], hole: list[Card]) -> dict:
 
     return {
         "flop_suit_texture_norm": suit_index / 2.0,
-        "flop_pairing_texture_norm": pairing_index / 2.0,
-        "flop_connectivity_norm": connectivity_index / 2.0,
-        "connected_flop": float(connectivity_index != 0),
-        "oesd_possible_flop": float(oesd_possible),
         "flop_wetness_norm": float(wet),
         "flop_dynamism_norm": float(dynamic),
     }
@@ -1362,7 +1287,6 @@ def extract_features(sit: Situation) -> np.ndarray:
         "is_aggressor_previous_street": float(sit.is_aggressor_previous_street),
         "is_aggressor_preflop": float(sit.is_aggressor_preflop),
         "is_aggressor_flop": float(sit.is_aggressor_flop),
-        "is_aggressor_turn": float(sit.is_aggressor_turn),
         "call_amount_norm": call_amount_norm,
         "spr_norm": spr_norm,
         "position_norm": position_norm,
@@ -1382,6 +1306,6 @@ def extract_features(sit: Situation) -> np.ndarray:
     }
     values.update(_hand_vs_board_heuristics(sit.hole, sit.board, hand, sit.street))
     values.update(_hole_hand_grid_features(sit.hole, sit.street))
-    values.update(_flop_texture(sit.board, sit.hole))
+    values.update(_flop_texture(sit.board))
 
     return np.array([values[spec.key] for spec in FEATURE_SPECS], dtype=np.float64)

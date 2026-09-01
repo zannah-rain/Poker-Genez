@@ -650,7 +650,7 @@ def cell_count_checkpoint(_cell_count_checkpoint_path, monkeypatch):
     return _cell_count_checkpoint_path
 
 
-_THREE_WAY_FEATURE_KEYS = ("street_norm", "hole_suited", "connected_flop", "is_aggressor_previous_street")
+_THREE_WAY_FEATURE_KEYS = ("street_norm", "hole_suited", "is_aggressor_flop", "is_aggressor_previous_street")
 
 
 def _make_three_way_checkpoint(path: str, rng: np.random.Generator, num_samples: int = 2000) -> None:
@@ -669,7 +669,7 @@ def _make_three_way_checkpoint(path: str, rng: np.random.Generator, num_samples:
     test_interaction_column_differs_per_candidate_with_two_split_by_features).
 
     street_norm and hole_suited get real net input weight (the "already
-    chosen" Split By pair); connected_flop also gets real weight (a
+    chosen" Split By pair); is_aggressor_flop also gets real weight (a
     genuinely informative remaining candidate); is_aggressor_previous_street's own weight
     is zeroed out (an uninformative one). Both remaining candidates are
     plain booleans (2 observed levels each, like street_norm/hole_suited
@@ -681,7 +681,7 @@ def _make_three_way_checkpoint(path: str, rng: np.random.Generator, num_samples:
     feature_dim = len(cfr_features.feature_indices(_THREE_WAY_FEATURE_KEYS))
     street_idx = _THREE_WAY_FEATURE_KEYS.index("street_norm")
     hole_idx = _THREE_WAY_FEATURE_KEYS.index("hole_suited")
-    connected_idx = _THREE_WAY_FEATURE_KEYS.index("connected_flop")
+    aggressor_flop_idx = _THREE_WAY_FEATURE_KEYS.index("is_aggressor_flop")
     aggressor_idx = _THREE_WAY_FEATURE_KEYS.index("is_aggressor_previous_street")
 
     torch.manual_seed(0)  # AdvantageNet's init otherwise draws from torch's unseeded global RNG
@@ -689,7 +689,7 @@ def _make_three_way_checkpoint(path: str, rng: np.random.Generator, num_samples:
     with torch.no_grad():
         net.hidden[0].block[0].weight[:, street_idx] *= 12.0
         net.hidden[0].block[0].weight[:, hole_idx] *= 12.0
-        net.hidden[0].block[0].weight[:, connected_idx] *= 15.0
+        net.hidden[0].block[0].weight[:, aggressor_flop_idx] *= 15.0
         net.hidden[0].block[0].weight[:, aggressor_idx] = 0.0
     net_config = cfr_networks.AdvantageNetConfig(
         feature_keys=_THREE_WAY_FEATURE_KEYS, hidden_sizes=(8, 8), table_size=3,
@@ -1582,7 +1582,7 @@ class TestFeatureTable:
         # candidate's own "interaction with current Split By" collapsed to
         # re-measuring the *same* 2-key grouping regardless of which
         # candidate was actually asked about, reading identically for
-        # every row. connected_flop carries real signal here and
+        # every row. is_aggressor_flop carries real signal here and
         # is_aggressor_previous_street doesn't (see _make_three_way_checkpoint) -- their
         # own values should differ.
         at = _run_app()
@@ -1590,15 +1590,15 @@ class TestFeatureTable:
         assert not at.exception
 
         table = _feature_table(at)
-        connected_value = table[table["Feature"] == cfr_features.feature_label("connected_flop")].iloc[0][
+        aggressor_flop_value = table[table["Feature"] == cfr_features.feature_label("is_aggressor_flop")].iloc[0][
             "Interaction with current Split By"
         ]
         aggressor_value = table[table["Feature"] == cfr_features.feature_label("is_aggressor_previous_street")].iloc[0][
             "Interaction with current Split By"
         ]
-        assert connected_value != "—"
+        assert aggressor_flop_value != "—"
         assert aggressor_value != "—"
-        assert connected_value != aggressor_value
+        assert aggressor_flop_value != aggressor_value
 
     def test_includes_exact_hole_hand_when_the_substrategy_is_100_percent_preflop(
         self, all_preflop_hole_hand_grid_checkpoint,
