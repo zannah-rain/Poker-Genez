@@ -129,6 +129,11 @@ class TestHoleCardFeatures:
         assert suited["hole_suited"] == 1.0
         assert offsuit["hole_suited"] == 0.0
 
+    def test_hole_suited_masked_past_preflop(self):
+        for street in (1, 2, 3):
+            values = values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("Kh")], street=street))
+            assert values["hole_suited"] == MASKED
+
     def test_pocket_pair_has_max_connectivity(self):
         values = values_by_key(make_situation(hole=[Card.from_str("9h"), Card.from_str("9d")]))
         assert values["hole_connectivity"] == 1.0
@@ -146,6 +151,11 @@ class TestHoleCardFeatures:
     def test_wide_gap_hands_have_zero_connectivity(self):
         values = values_by_key(make_situation(hole=[Card.from_str("2h"), Card.from_str("Kd")]))
         assert values["hole_connectivity"] == 0.0
+
+    def test_hole_connectivity_masked_past_preflop(self):
+        for street in (1, 2, 3):
+            values = values_by_key(make_situation(hole=[Card.from_str("9h"), Card.from_str("9d")], street=street))
+            assert values["hole_connectivity"] == MASKED
 
     def test_ace_king_and_ace_deuce_both_treated_as_gap_one(self):
         # Ace plays both high and low for connectivity purposes, so A-K and
@@ -205,6 +215,11 @@ class TestHoleHandCategoryFeature:
     def test_junk_hand(self):
         values = values_by_key(make_situation(hole=[Card.from_str("Jh"), Card.from_str("5d")]))
         assert values["hole_hand_category_norm"] == pytest.approx(0 / 11)
+
+    def test_hole_hand_category_norm_masked_past_preflop(self):
+        for street in (1, 2, 3):
+            values = values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("Ad")], street=street))
+            assert values["hole_hand_category_norm"] == MASKED
 
 
 class TestHoleHandGridFeature:

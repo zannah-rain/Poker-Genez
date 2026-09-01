@@ -235,10 +235,10 @@ class TestMeanShapContributionsForSamplesMaskedFeatures:
         # masking condition would do equally well here; these two just
         # stand in for that). street_norm: the *real* cause of a
         # river-specific shift (standing in for the actual reason draw
-        # features mask together with it). hole_suited: an honest,
+        # features mask together with it). spr_norm: an honest,
         # never-masked, always-irrelevant control -- the noise floor these
         # should NOT exceed.
-        keys = ("draw_norm", "hole_hand_grid_x_norm", "street_norm", "hole_suited")
+        keys = ("draw_norm", "hole_hand_grid_x_norm", "street_norm", "spr_norm")
         noise1 = np.where(is_river, MASKED, rng.random(n))
         noise2 = np.where(is_river, MASKED, rng.random(n))
         real_cause = is_river.astype(np.float64)
@@ -266,7 +266,7 @@ class TestMeanShapContributionsForSamplesMaskedFeatures:
             net, X, X, keys, np.random.default_rng(1), sample_size=150, background_size=20, nsamples=15,
         ))
 
-        control_floor = result["hole_suited"]
+        control_floor = result["spr_norm"]
         # Generous margin above the honest control's own noise-floor score
         # -- the old (unfixed) behavior scored these an order of magnitude
         # higher than a feature that's never masked and never matters.
@@ -296,7 +296,10 @@ class TestMeanShapContributionsForSamplesExplainGroupLabels:
 
         X = np.stack([group, derived, control], axis=1).astype(np.float32)
         y = np.stack([target, target], axis=1).astype(np.float32)
-        keys = ("street_norm", "hole_suited", "spr_norm")  # real, non-maskable keys; standing in for group/derived/control
+        # Real feature keys standing in for group/derived/control -- none of
+        # these synthetic columns ever actually reads as features.MASKED,
+        # so it doesn't matter that hole_suited is itself `maskable`.
+        keys = ("street_norm", "hole_suited", "spr_norm")
 
         torch.manual_seed(0)
         net = AdvantageNet(input_dim=3, hidden_sizes=(32, 32), output_dim=2, dropout=0.0)

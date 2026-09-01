@@ -169,7 +169,17 @@ class TestBucketCategories:
         assert cfr_features.bucket_categories("street_norm") == ["Preflop", "Flop", "Turn", "River"]
 
     def test_boolean_order_is_false_then_true(self):
-        assert cfr_features.bucket_categories("hole_suited") == ["Not Suited Hole Cards", "Suited Hole Cards"]
+        # A plain (non-`maskable`) boolean -- unlike hole_suited, which now
+        # appends MASKED_LABEL as a third category (see
+        # test_maskable_feature_appends_masked_label_last below).
+        assert cfr_features.bucket_categories("is_aggressor_previous_street") == [
+            "Not Last Aggressor - Previous Street", "Last Aggressor - Previous Street",
+        ]
+
+    def test_maskable_boolean_appends_masked_label_last(self):
+        assert cfr_features.bucket_categories("hole_suited") == [
+            "Not Suited Hole Cards", "Suited Hole Cards", "N/A",
+        ]
 
     def test_every_bucket_label_output_is_a_valid_category(self):
         values = np.array([0.0, 1 / 3, 2 / 3, 1.0, 0.1, 0.9])
