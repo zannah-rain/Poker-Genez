@@ -64,6 +64,15 @@ def feature_description(key: str) -> str:
     return _SPEC_BY_KEY[key].description
 
 
+def is_maskable(key: str) -> bool:
+    """Whether `key` ever reads as features.MASKED in some situations (see
+    features.FeatureSpec.maskable) -- e.g. a hole-card fact masked past
+    preflop, or a draw-shape read masked at the river specifically. Exactly
+    which situations vary per feature; see feature_description(key) for the
+    precise condition."""
+    return _SPEC_BY_KEY[key].maskable
+
+
 def bucket_label(key: str, value: float) -> str:
     """Human-readable label for one raw normalized feature value -- for a
     `maskable` feature's features.MASKED reading, MASKED_LABEL; otherwise,
@@ -164,6 +173,18 @@ def bucket_labels(key: str, values: np.ndarray) -> np.ndarray:
     if spec.maskable:
         labels = np.where(values == MASKED, MASKED_LABEL, labels)
     return labels
+
+
+def observed_level_count(key: str, values: np.ndarray) -> int:
+    """How many distinct real (non-MASKED) levels `key` actually takes on
+    across `values` -- the size of the implementable lookup table this
+    feature alone would need. Deliberately what's actually OBSERVED, not
+    len(bucket_categories(key))'s full theoretical count: an unobserved
+    value (or, for a `maskable` feature, never being masked at all in this
+    sample) contributes nothing anyone would actually have to memorize --
+    the same principle cfr_explorer.py's own Split By cell-count math uses
+    (see its _observed_categories/_split_by_cell_count)."""
+    return len(set(bucket_labels(key, values)) - {MASKED_LABEL})
 
 
 def unmasked_validity(feature_keys: list[str] | tuple[str, ...], values: np.ndarray) -> np.ndarray:

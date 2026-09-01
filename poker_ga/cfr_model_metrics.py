@@ -5,7 +5,15 @@ checkpoint:
   1. Total SHAP importance per feature (reusing cfr_networks.
      mean_shap_contributions_for_samples, the same metric cfr_explorer.py
      shows interactively) -- lowest-ranked features are candidates to drop
-     from the model's input entirely.
+     from the model's input entirely. Alongside each feature's raw score,
+     also prints how many distinct unmasked levels it actually takes on in
+     the sampled pool (cfr_features.observed_level_count) and whether it's
+     ever masked at all (cfr_features.is_maskable), plus a normalized SHAP
+     score (raw SHAP / levels) -- a feature that only earns its raw
+     importance by spending many levels (e.g. hand_category_norm's 27) is
+     costlier to keep than a 2-level feature with the same raw score, so
+     normalized SHAP is the more useful of the two for prioritizing
+     removal/simplification.
   2. Total pairwise SHAP *interaction* strength per feature (see
      _pairwise_interaction_strength below) -- features with a near-zero
      total across every partner have an effect that's already close to
@@ -49,14 +57,39 @@ DEFAULT_CHECKPOINT_PATH = os.path.join("cfr_runs", "checkpoint_latest")
 DEFAULT_POOL_SIZE = 100_000
 
 
-def _print_importance_table(contributions: list[tuple[str, float]]) -> None:
+def _print_importance_table(
+    contributions: list[tuple[str, float]], pool: np.ndarray, feature_keys: tuple[str, ...],
+) -> list[tuple[str, float, int, bool, float]]:
+    """Prints the importance table (adding, per feature: how many distinct
+    unmasked levels it actually takes on across `pool` -- see
+    cfr_features.observed_level_count --, whether it's ever masked at all,
+    and a normalized SHAP score = raw SHAP / levels) and returns one
+    (key, value, levels, maskable, normalized) row per `contributions`
+    entry, same order. Normalized SHAP is the more useful simplification
+    priority of the two: a feature that only earns its raw SHAP score by
+    spending many levels (e.g. hand_category_norm's 27) is a *costlier*
+    thing to keep than a 2-level feature with the same raw score, since
+    the level count is exactly what a lookup-table-style simplification
+    would have to memorize per feature -- raw SHAP alone doesn't reflect
+    that cost at all."""
     total = sum(value for _, value in contributions) or 1.0
-    print(f"{'Feature':38} {'Mean |SHAP|':>12} {'% of total':>11} {'Cumulative %':>13}")
-    cumulative = 0.0
+    col_by_key = {key: i for i, key in enumerate(feature_keys)}
+    rows = []
     for key, value in contributions:
+        levels = cfr_features.observed_level_count(key, pool[:, col_by_key[key]])
+        maskable = cfr_features.is_maskable(key)
+        rows.append((key, value, levels, maskable, value / max(levels, 1)))
+
+    print(f"{'Feature':38} {'Mean |SHAP|':>12} {'% of total':>11} {'Cumulative %':>13} {'Levels':>7} {'Maskable':>9} {'Norm. SHAP':>11}")
+    cumulative = 0.0
+    for key, value, levels, maskable, normalized in rows:
         share = 100.0 * value / total
         cumulative += share
-        print(f"{key:38} {value:12.5f} {share:10.1f}% {cumulative:12.1f}%")
+        print(
+            f"{key:38} {value:12.5f} {share:10.1f}% {cumulative:12.1f}% {levels:7d} "
+            f"{'Yes' if maskable else 'No':>9} {normalized:11.5f}"
+        )
+    return rows
 
 
 def _print_isolation_candidates(
@@ -146,9 +179,17 @@ def main() -> None:
         nsamples=args.importance_nsamples,
     )
     folded = cfr_features.fold_child_contributions(contributions)
-    _print_importance_table(folded)
+    importance_rows = _print_importance_table(folded, pool, config.feature_keys)
     removal_candidates = [key for key, _ in folded[-5:]]
     print(f"\nWeakest 5 features by total SHAP importance: {', '.join(removal_candidates)}")
+
+    normalized_ranked = sorted(importance_rows, key=lambda row: row[4])
+    normalized_removal_candidates = [key for key, *_ in normalized_ranked[:5]]
+    print(
+        f"Weakest 5 features by normalized SHAP importance (SHAP / observed levels -- "
+        f"the more useful removal/simplification priority, since it also weighs how "
+        f"costly each feature is to keep): {', '.join(normalized_removal_candidates)}"
+    )
 
     print("\n" + "=" * 100)
     print("2) INTERACTION STRENGTH -- total pairwise SHAP interaction effect per feature (lowest = best isolation candidates)")
@@ -172,7 +213,8 @@ def main() -> None:
     print("\n" + "=" * 100)
     print("SUMMARY")
     print("=" * 100)
-    print(f"Candidates to drop entirely (least SHAP importance): {removal_candidates}")
+    print(f"Candidates to drop entirely (least raw SHAP importance): {removal_candidates}")
+    print(f"Candidates to drop entirely (least normalized SHAP importance -- SHAP / observed levels): {normalized_removal_candidates}")
     print(f"Candidates to isolate from all interactions (weakest total interaction): {isolation_candidates}")
     if merge_candidates:
         print("Candidates to merge with their dominant partner(s):")

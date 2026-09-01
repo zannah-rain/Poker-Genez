@@ -233,6 +233,35 @@ class TestUnmaskedValidity:
         ]
 
 
+class TestIsMaskable:
+    def test_true_for_a_maskable_feature(self):
+        assert cfr_features.is_maskable("draw_norm") is True
+
+    def test_false_for_a_non_maskable_feature(self):
+        assert cfr_features.is_maskable("street_norm") is False
+
+
+class TestObservedLevelCount:
+    def test_counts_distinct_labels_actually_present(self):
+        # street_norm has 4 theoretical levels, but only 2 are observed here.
+        values = np.array([0.0, 0.0, 1 / 3])
+        assert cfr_features.observed_level_count("street_norm", values) == 2
+
+    def test_excludes_masked_from_the_count(self):
+        values = np.array([0 / 7, 0 / 7, features.MASKED, features.MASKED])
+        # Only "No Draw" is a real observed level -- the masked rows aren't
+        # a level of their own, they're an absence of one.
+        assert cfr_features.observed_level_count("draw_norm", values) == 1
+
+    def test_zero_when_every_row_is_masked(self):
+        values = np.array([features.MASKED, features.MASKED])
+        assert cfr_features.observed_level_count("draw_norm", values) == 0
+
+    def test_non_maskable_feature_counts_every_distinct_label(self):
+        values = np.array([0.0, 1.0, 1.0, 0.0])
+        assert cfr_features.observed_level_count("is_aggressor_previous_street", values) == 2
+
+
 class TestDisplayFeatureKeys:
     # hole_hand_grid_y_norm is the one remaining `linked_to` relationship in
     # features.py (the 2D Exact Hole Hand grid's second axis, linked to

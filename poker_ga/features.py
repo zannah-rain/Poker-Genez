@@ -654,14 +654,12 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "raises_flop_norm", "Raises Flop",
         "Raises Preflop's own explanation, one street later: 0 until the flop has finished, "
         "then frozen at its final raise count for the rest of the hand (so only ever "
-        "meaningful from the turn onward).",
-        kind="categorical", value_table=_RAISES_VALUES, group="Betting Behaviour Features",
-    ),
-    FeatureSpec(
-        "raises_turn_norm", "Raises Turn",
-        "Raises Preflop's own explanation, two streets later: 0 until the turn has finished, "
-        "then frozen at its final raise count (so only ever meaningful on the river -- "
-        "there's no Raises River, since nothing left in the hand would ever get to see it).",
+        "meaningful from the turn onward). There's no Raises Turn sibling: it would only "
+        "ever be meaningful on the river, where Raises Last Street (raises_last_street_norm) "
+        "-- the turn's own final raise count, at that point -- already gives exactly the "
+        "same reading, so a dedicated feature for it would be pure duplication (Raises "
+        "Flop itself stays genuinely distinct from Raises Last Street on the turn *and* the "
+        "river, so it's kept).",
         kind="categorical", value_table=_RAISES_VALUES, group="Betting Behaviour Features",
     ),
 
@@ -1326,7 +1324,6 @@ def extract_features(sit: Situation) -> np.ndarray:
     raises_last_street_norm = _clip01(sit.num_raises_previous_street / 3.0)
     raises_preflop_norm = min(sit.num_raises_preflop, 3) / 3.0
     raises_flop_norm = min(sit.num_raises_flop, 3) / 3.0
-    raises_turn_norm = min(sit.num_raises_turn, 3) / 3.0
     # Fixed for the whole hand (this player's stack *before* any chips went
     # in), not the live, street-to-street-changing current stack -- that's
     # what Stack-To-Pot Ratio (spr_norm, above) already captures.
@@ -1359,7 +1356,6 @@ def extract_features(sit: Situation) -> np.ndarray:
         "raises_last_street_norm": raises_last_street_norm,
         "raises_preflop_norm": raises_preflop_norm,
         "raises_flop_norm": raises_flop_norm,
-        "raises_turn_norm": raises_turn_norm,
         "stack_depth_norm": stack_depth_norm,
         "opp_vpip_norm": _clip01(sit.opp_vpip),
         "opp_pfr_norm": _clip01(sit.opp_pfr),

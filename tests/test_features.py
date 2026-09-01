@@ -367,10 +367,6 @@ class TestBettingAndPotFeatures:
         values = values_by_key(make_situation(num_raises_flop=1, street=2))
         assert values["raises_flop_norm"] == pytest.approx(1 / 3)
 
-    def test_raises_turn_norm_freezes_turns_final_raise_count(self):
-        values = values_by_key(make_situation(num_raises_turn=3, street=3))
-        assert values["raises_turn_norm"] == 1.0
-
     def test_is_aggressor_previous_street_flag(self):
         assert values_by_key(make_situation(is_aggressor_previous_street=True))["is_aggressor_previous_street"] == 1.0
         assert values_by_key(make_situation(is_aggressor_previous_street=False))["is_aggressor_previous_street"] == 0.0
