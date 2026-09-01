@@ -441,9 +441,9 @@ class TestFlopTexture:
         assert values["oesd_possible_flop"] == 1.0
 
     def test_suit_family_true_regardless_of_hole_card_connection(self):
-        # flop_suit_texture_norm is now purely the flop's own 3-card suit
-        # shape -- no hole-card awareness at all (see TestSuitConnectionIndex
-        # for that dimension).
+        # flop_suit_texture_norm is purely the flop's own 3-card suit shape
+        # -- no hole-card awareness at all (that's draw_norm's own
+        # flush-draw buckets instead).
         board = [Card.from_str("2c"), Card.from_str("7d"), Card.from_str("Kh")]
         no_match = values_by_key(make_situation(hole=[Card.from_str("9s"), Card.from_str("2s")], board=board))
         two_match = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("9d")], board=board))
@@ -451,9 +451,7 @@ class TestFlopTexture:
 
     def test_monotone_hole_card_hit_still_reads_a_made_flush_elsewhere(self):
         board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kc")]
-        one = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("2s")], board=board))
         two = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("4c")], board=board))
-        assert one["suit_connection_index"] == pytest.approx(4 / 5)  # flush draw: 4 cards of one suit
         # Both hole cards + all 3 board cards = a made flush -- King high
         # (the board's own Kc), since that's the flush's own highest card.
         assert two["hand_category_norm"] == pytest.approx(22 / 26)  # King High Flush
@@ -549,48 +547,6 @@ class TestFlopTexture:
         board4 = board3 + [Card.from_str("9d")]  # turn card breaks the monotone look
         turn_values = values_by_key(make_situation(board=board4, street=2))
         assert turn_values["flop_suit_texture_norm"] == flop_values["flop_suit_texture_norm"] == 1.0
-
-
-class TestSuitConnectionIndex:
-    def test_preflop_unsuited_hole_cards(self):
-        values = values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("Kd")], board=[]))
-        assert values["suit_connection_index"] == pytest.approx(1 / 5)
-
-    def test_preflop_suited_hole_cards(self):
-        values = values_by_key(make_situation(hole=[Card.from_str("Ah"), Card.from_str("Kh")], board=[]))
-        assert values["suit_connection_index"] == pytest.approx(2 / 5)
-
-    def test_monotone_flop_alone_reaches_3_even_with_unrelated_hole_cards(self):
-        # Pigeonhole: 5 cards (2 hole + 3 board) split across 4 suits always
-        # gives some suit a count of at least 2 -- here the board's own 3
-        # matching clubs already put it at 3, before the hole cards even
-        # enter into it.
-        board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kc")]
-        values = values_by_key(make_situation(hole=[Card.from_str("9d"), Card.from_str("2s")], board=board))
-        assert values["suit_connection_index"] == pytest.approx(3 / 5)
-
-    def test_one_hole_card_matching_the_flops_suit_reaches_4(self):
-        board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kc")]
-        values = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("2s")], board=board))
-        assert values["suit_connection_index"] == pytest.approx(4 / 5)
-
-    def test_both_hole_cards_matching_a_monotone_flop_is_capped_at_5(self):
-        board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kc")]
-        values = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("4c")], board=board))
-        assert values["suit_connection_index"] == 1.0
-
-    def test_varies_through_streets_unlike_flop_suit_texture_norm(self):
-        hole = [Card.from_str("Ah"), Card.from_str("Kd")]
-        board3 = [Card.from_str("2h"), Card.from_str("7h"), Card.from_str("Qc")]  # two-tone: 2 hearts + Ah = 3
-        flop_values = values_by_key(make_situation(hole=hole, board=board3, street=1))
-        board4 = board3 + [Card.from_str("9h")]  # a 3rd board heart pushes the count to 4
-        turn_values = values_by_key(make_situation(hole=hole, board=board4, street=2))
-
-        assert flop_values["suit_connection_index"] == pytest.approx(3 / 5)
-        assert turn_values["suit_connection_index"] == pytest.approx(4 / 5)
-        # flop_suit_texture_norm stays frozen at the flop's own shape
-        # (two-tone), unaffected by the turn card adding a 3rd heart.
-        assert flop_values["flop_suit_texture_norm"] == turn_values["flop_suit_texture_norm"] == 0.5
 
 
 class TestHandCategoryPairBuckets:
@@ -692,14 +648,12 @@ class TestHandVsBoardHeuristics:
         hole = [Card.from_str("Ah"), Card.from_str("9h")]
         board = [Card.from_str("7h"), Card.from_str("4h"), Card.from_str("2c")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["suit_connection_index"] == pytest.approx(4 / 5)  # flush draw: 4 cards of one suit
         assert values["draw_norm"] == pytest.approx(6 / 7)  # Nuts Flush Draw
 
     def test_flush_draw_without_the_nut_card(self):
         hole = [Card.from_str("Qh"), Card.from_str("9h")]
         board = [Card.from_str("7h"), Card.from_str("4h"), Card.from_str("2c")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["suit_connection_index"] == pytest.approx(4 / 5)  # flush draw: 4 cards of one suit
         assert values["draw_norm"] == pytest.approx(5 / 7)  # Flush Draw (9 outs, no nut card)
 
     def test_open_ended_straight_draw(self):
@@ -749,16 +703,14 @@ class TestHandVsBoardHeuristics:
         hole = [Card.from_str("6h"), Card.from_str("7h")]
         board = [Card.from_str("8h"), Card.from_str("9h"), Card.from_str("2c")]
         values = values_by_key(make_situation(hole=hole, board=board, street=1))
-        assert values["suit_connection_index"] == pytest.approx(4 / 5)  # flush draw: 4 cards of one suit
         assert values["draw_norm"] == 1.0  # Combo Draw -- top of the precedence order
 
 
 class TestDrawFeaturesMaskedAtRiver:
-    """draw_norm/suit_connection_index are both draw-shape reads --
-    meaningless once the river's dealt and no next card is left to
-    complete or miss a draw -- so extract_features masks both to MASKED
-    there, the same convention as hole_hand_grid_x_norm/y_norm outside
-    preflop."""
+    """draw_norm is a draw-shape read -- meaningless once the river's dealt
+    and no next card is left to complete or miss a draw -- so
+    extract_features masks it to MASKED there, the same convention as
+    hole_hand_grid_x_norm/y_norm outside preflop."""
 
     def _river_situation(self):
         # A flop/turn flush-and-straight-draw-heavy hand, still holding a
@@ -776,15 +728,11 @@ class TestDrawFeaturesMaskedAtRiver:
     def test_draw_norm_masked_at_river(self):
         assert values_by_key(self._river_situation())["draw_norm"] == MASKED
 
-    def test_suit_connection_index_masked_at_river(self):
-        assert values_by_key(self._river_situation())["suit_connection_index"] == MASKED
-
     def test_not_masked_on_the_turn(self):
         hole = [Card.from_str("6h"), Card.from_str("7h")]
         board = [Card.from_str("8h"), Card.from_str("9h"), Card.from_str("2c"), Card.from_str("3d")]
         values = values_by_key(make_situation(hole=hole, board=board, street=2))
         assert values["draw_norm"] != MASKED
-        assert values["suit_connection_index"] != MASKED
 
 
 class TestOvercardsFeature:

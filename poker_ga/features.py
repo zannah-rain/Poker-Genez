@@ -433,8 +433,7 @@ _SEAT_ROLE_VALUES = tuple((i / (len(SEAT_ROLES) - 1), _SEAT_ROLE_LABELS[role]) f
 # their lowest-value category before the flop (0 for every child, since
 # nothing has happened yet). flop_suit_texture_norm itself is purely about
 # the flop's own 3 cards (no hole-card awareness at all, unlike the
-# connectivity family) -- see suit_connection_index below for the
-# hole-card-aware, non-frozen version of "how connected am I to these suits."
+# connectivity family).
 _FLOP_SUIT_TEXTURE_VALUES = ((0.0, "Rainbow"), (0.5, "Flush Draw Flop"), (1.0, "Monotone"))
 _FLOP_PAIRING_VALUES = ((0.0, "Unpaired"), (0.5, "Paired"), (1.0, "Tripled"))
 _FLOP_CONNECTIVITY_VALUES = (
@@ -443,18 +442,6 @@ _FLOP_CONNECTIVITY_VALUES = (
 )
 _FLOP_WETNESS_VALUES = ((0.0, "Dry"), (1.0, "Wet"))
 _FLOP_DYNAMISM_VALUES = ((0.0, "Static"), (1.0, "Dynamic"))
-
-# Unlike the flop-texture family above, suit_connection_index is never frozen
-# -- it's recomputed from hole + the *current* board every time
-# extract_features runs, so it keeps updating on the turn and river as more
-# board cards (and so, potentially, more of this player's suit) show up.
-# Pigeonhole guarantees at least 2 once the flop is out (5 cards split across
-# 4 suits), rising to the 5-card cap as a flush comes together; preflop
-# (2 hole cards only) it's just whether they're suited -- 1 if not, 2 if so.
-_SUIT_CONNECTION_VALUES = (
-    (1 / 5, "1 Card (unsuited hole cards, no board yet)"), (2 / 5, "2 Cards (suited, or the flop's pigeonhole floor)"),
-    (3 / 5, "3 Cards"), (4 / 5, "4 Cards (a flush draw)"), (5 / 5, "5+ Cards (a flush made)"),
-)
 
 # "connected_flop" is a family-level aggregate (indices 1+2 of the 3-value
 # family below), so it's declared standalone rather than as a `linked_to`
@@ -711,31 +698,11 @@ FEATURE_SPECS: list[FeatureSpec] = [
         "How suit-coordinated the flop is, purely from its own 3 cards -- Rainbow "
         "(all 3 different suits) < Flush Draw Flop (exactly 2 share a suit) < "
         "Monotone (all 3 share a suit), normalized as family_index / 2. Doesn't "
-        "reflect this player's own hole cards at all -- see suit_connection_index "
-        "for how many cards of a single suit this player personally has going "
-        "(hole + board combined, and not frozen -- it keeps updating on the turn "
-        "and river). Frozen once the flop is dealt (unaffected by the turn/river, "
-        "since the flop's own cards don't change); defaults to 0.0 (Rainbow's "
-        "value) before the flop.",
+        "reflect this player's own hole cards at all -- that's draw_norm's own "
+        "flush-draw buckets instead. Frozen once the flop is dealt (unaffected by "
+        "the turn/river, since the flop's own cards don't change); defaults to 0.0 "
+        "(Rainbow's value) before the flop.",
         kind="categorical", value_table=_FLOP_SUIT_TEXTURE_VALUES, group="Board / Flop Characteristics",
-    ),
-
-    FeatureSpec(
-        "suit_connection_index", "Suit Connection",
-        "The most cards of any single suit among this player's hole cards plus "
-        "the current board (however many board cards are out so far), capped at "
-        "5 and normalized as count / 5. Unlike flop_suit_texture_norm above, this "
-        "is never frozen -- it's recomputed from the *current* board every time, "
-        "so it keeps updating on the turn as more of this player's suit "
-        "potentially shows up. Preflop (2 hole cards only) it's just whether "
-        "they're suited: 1 card if not, 2 if so. Once the flop is out, pigeonhole "
-        "guarantees at least 2 (5 cards split across 4 suits), rising toward the "
-        "5-card cap as a flush comes together. Masked to -1.0 (features.MASKED) "
-        "on the river: by then a made flush is already fully captured by "
-        "hand_category_norm, and 'how many cards of one suit' stops being a "
-        "*draw* signal once there's no next card left to complete one.",
-        kind="categorical", value_table=_SUIT_CONNECTION_VALUES, group="Board / Flop Characteristics",
-        maskable=True,
     ),
 
     FeatureSpec(
@@ -774,8 +741,8 @@ FEATURE_SPECS: list[FeatureSpec] = [
     FeatureSpec(
         "flop_wetness_norm", "Flop Wet vs Dry",
         "How draw-heavy the flop is, purely from its own suit and rank coordination "
-        "(not this player's hole cards -- see suit_connection_index and "
-        "flop_connectivity_norm for the hole-card-aware versions), combined into one "
+        "(not this player's hole cards -- see draw_norm and flop_connectivity_norm "
+        "for the hole-card-aware versions), combined into one "
         "0-4 score: suit family index (0 Rainbow / 1 Flush Draw Flop / 2 Monotone) + 1 "
         "if the flop's ranks are Connected (span <=4) + 1 if an open-ended straight "
         "draw is possible for some hole cards (see oesd_possible_flop) -- then "
@@ -1254,8 +1221,7 @@ def _flop_texture(board: list[Card], hole: list[Card]) -> dict:
     the flop cards nor the hole cards do. Defaults all to 0 (their
     lowest-value category) before the flop is dealt. The suit family here
     is purely the flop's own shape (no hole-card awareness) -- see
-    _suit_connection_features for that, computed separately since it isn't
-    frozen at the flop."""
+    draw_norm for the hole-card-aware, non-frozen version."""
     if len(board) < 3:
         return dict(_NO_FLOP_TEXTURE)
     flop = board[:3]
@@ -1308,19 +1274,6 @@ def _flop_texture(board: list[Card], hole: list[Card]) -> dict:
         "flop_wetness_norm": float(wet),
         "flop_dynamism_norm": float(dynamic),
     }
-
-
-def _suit_connection_features(hole: list[Card], board: list[Card], street: int) -> dict:
-    """suit_connection_index: the most cards of any single suit among hole +
-    the *current* board, capped at 5 -- unlike _flop_texture's suit family,
-    this isn't frozen at the flop, so it's computed fresh from whatever board
-    extract_features was called with (3, 4, or 5 cards -- or 0, preflop).
-    Masked to MASKED on the river (street == 3) -- see this feature's
-    FeatureSpec description."""
-    if street == 3:
-        return {"suit_connection_index": MASKED}
-    count = min(max(Counter(c.suit for c in hole + board).values()), 5)
-    return {"suit_connection_index": count / 5.0}
 
 
 def extract_features(sit: Situation) -> np.ndarray:
@@ -1389,6 +1342,5 @@ def extract_features(sit: Situation) -> np.ndarray:
     values.update(_hand_vs_board_heuristics(sit.hole, sit.board, hand, sit.street))
     values.update(_hole_hand_grid_features(sit.hole, sit.street))
     values.update(_flop_texture(sit.board, sit.hole))
-    values.update(_suit_connection_features(sit.hole, sit.board, sit.street))
 
     return np.array([values[spec.key] for spec in FEATURE_SPECS], dtype=np.float64)
