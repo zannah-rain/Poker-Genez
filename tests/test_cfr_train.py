@@ -9,7 +9,7 @@ import cfr_reservoir
 from cfr_train import DeepCFRConfig, Trainer, run_iteration
 from game import GameConfig
 
-_FEATURE_KEYS = ("hand_category_norm", "street_norm", "call_amount_norm", "raises_preflop_norm")
+_FEATURE_KEYS = ("hand_category_norm", "street_norm", "call_amount_norm", "total_raises_norm")
 
 
 def _tiny_config(**overrides) -> DeepCFRConfig:
@@ -50,13 +50,15 @@ class TestTrainerSaveLoadRoundTrip:
         rng = np.random.default_rng(0)
         run_iteration(trainer, rng, 1, show_progress=False)
         trainer.completed_iterations = 42
+        trainer.generation = 3
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = os.path.join(tmp_dir, "checkpoint")
             trainer.save(path)
-            optimizer_state, completed_iterations = Trainer.load_trainer_state(path)
+            optimizer_state, completed_iterations, generation = Trainer.load_trainer_state(path)
 
         assert completed_iterations == 42
+        assert generation == 3
         assert optimizer_state is not None
         # The reloaded state dict should reconstruct an optimizer with the
         # same momentum/variance buffers as the one that was saved.
@@ -70,9 +72,21 @@ class TestTrainerSaveLoadRoundTrip:
     def test_load_trainer_state_missing_file_returns_none_and_zero(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = os.path.join(tmp_dir, "no_such_checkpoint")
-            optimizer_state, completed_iterations = Trainer.load_trainer_state(path)
+            optimizer_state, completed_iterations, generation = Trainer.load_trainer_state(path)
         assert optimizer_state is None
         assert completed_iterations == 0
+        assert generation == 0
+
+    def test_load_trainer_state_missing_generation_key_falls_back_to_zero(self):
+        # Simulates a trainer-state file saved before `generation` existed
+        # (but after completed_iterations already did) -- must fall back to
+        # 0, the same safe bootstrap a fresh run starts from, not error out.
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = os.path.join(tmp_dir, "checkpoint")
+            torch.save({"optimizer": {}, "completed_iterations": 9}, f"{path}_trainer_state.pt")
+            optimizer_state, completed_iterations, generation = Trainer.load_trainer_state(path)
+        assert completed_iterations == 9
+        assert generation == 0
 
     def test_new_with_initial_optimizer_state_resumes_momentum(self):
         trainer = Trainer.new(_tiny_config(), np.random.default_rng(0))
@@ -82,8 +96,10 @@ class TestTrainerSaveLoadRoundTrip:
         resumed = Trainer.new(
             _tiny_config(), np.random.default_rng(0),
             initial_net=trainer.net, initial_optimizer_state=saved_state, completed_iterations=1,
+            initial_generation=2,
         )
         assert resumed.completed_iterations == 1
+        assert resumed.generation == 2
         resumed_state = resumed.optimizer.state_dict()
         for group_before, group_after in zip(saved_state["state"].values(), resumed_state["state"].values()):
             assert torch.allclose(group_before["exp_avg"], group_after["exp_avg"])
@@ -122,3 +138,20 @@ class TestRunIterationTracksCompletedIterations:
         assert next_iteration == 301
         max_normalized_weight = trainer.reservoir.weights[: trainer.reservoir.size].max() / next_iteration
         assert max_normalized_weight <= 1.0
+
+
+class TestRunIterationForwardsGeneration:
+    def test_reservoir_samples_are_stamped_with_trainers_current_generation(self):
+        trainer = Trainer.new(_tiny_config(), np.random.default_rng(0))
+        trainer.generation = 3
+        run_iteration(trainer, np.random.default_rng(0), 1, show_progress=False)
+        assert trainer.reservoir.size > 0
+        assert np.all(trainer.reservoir.generations[: trainer.reservoir.size] == 3)
+
+    def test_run_iteration_never_advances_generation_itself(self):
+        # Only cfr_main.py's own training loop advances generation, on a
+        # confirmed-improved benchmark check -- run_iteration just forwards
+        # whatever value is already there.
+        trainer = Trainer.new(_tiny_config(), np.random.default_rng(0))
+        run_iteration(trainer, np.random.default_rng(0), 1, show_progress=False)
+        assert trainer.generation == 0

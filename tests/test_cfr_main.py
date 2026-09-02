@@ -6,6 +6,7 @@ import torch
 
 import cfr_networks
 from cfr_main import (
+    _benchmark_pool_member_path,
     _benchmark_pool_weights,
     _load_benchmark_pool,
     _reload_checkpoint,
@@ -15,11 +16,11 @@ from cfr_main import (
     main,
     parse_args,
 )
-from cfr_reservoir import UNKNOWN_ITERATION, ReservoirBuffer
+from cfr_reservoir import UNKNOWN_GENERATION, ReservoirBuffer
 from cfr_train import DeepCFRConfig, Trainer
 from game import GameConfig
 
-_FEATURE_KEYS = "hand_category_norm,street_norm,call_amount_norm,raises_preflop_norm"
+_FEATURE_KEYS = "hand_category_norm,street_norm,call_amount_norm,total_raises_norm"
 
 _TINY_TRAINING_ARGS = [
     "--traversals-per-iteration", "2",
@@ -40,7 +41,7 @@ _TINY_TRAINING_ARGS = [
 class TestReloadCheckpoint:
     def test_no_reload_previous_returns_nothing_to_resume_from(self, tmp_path):
         config = DeepCFRConfig(feature_keys=("street_norm",), hidden_sizes=(8,), table_size=2)
-        net, reservoir, optimizer_state, completed_iterations, out_config = _reload_checkpoint(
+        net, reservoir, optimizer_state, completed_iterations, generation, out_config = _reload_checkpoint(
             str(tmp_path / "checkpoint_latest"), False, config, np.random.default_rng(0),
         )
         assert net is None
@@ -51,7 +52,7 @@ class TestReloadCheckpoint:
 
     def test_no_checkpoint_on_disk_returns_nothing_to_resume_from(self, tmp_path):
         config = DeepCFRConfig(feature_keys=("street_norm",), hidden_sizes=(8,), table_size=2)
-        net, reservoir, optimizer_state, completed_iterations, out_config = _reload_checkpoint(
+        net, reservoir, optimizer_state, completed_iterations, generation, out_config = _reload_checkpoint(
             str(tmp_path / "checkpoint_latest"), True, config, np.random.default_rng(0),
         )
         assert net is None
@@ -67,7 +68,7 @@ class TestReloadCheckpoint:
         checkpoint_path = str(tmp_path / "checkpoint_latest")
         trainer.save(checkpoint_path)
 
-        net, reservoir, optimizer_state, completed_iterations, out_config = _reload_checkpoint(
+        net, reservoir, optimizer_state, completed_iterations, generation, out_config = _reload_checkpoint(
             checkpoint_path, True, DeepCFRConfig(feature_keys=feature_keys, hidden_sizes=(8,), table_size=2),
             np.random.default_rng(0),
         )
@@ -87,7 +88,7 @@ class TestReloadCheckpoint:
         trainer.save(checkpoint_path)
         os.remove(f"{checkpoint_path}_trainer_state.pt")
 
-        net, reservoir, optimizer_state, completed_iterations, out_config = _reload_checkpoint(
+        net, reservoir, optimizer_state, completed_iterations, generation, out_config = _reload_checkpoint(
             checkpoint_path, True, DeepCFRConfig(feature_keys=feature_keys, hidden_sizes=(8,), table_size=2),
             np.random.default_rng(0),
         )
@@ -109,7 +110,7 @@ class TestReloadCheckpoint:
         requested_config = DeepCFRConfig(
             feature_keys=feature_keys, hidden_sizes=(8,), table_size=2, reservoir_capacity=50,
         )
-        net, reservoir, optimizer_state, completed_iterations, out_config = _reload_checkpoint(
+        net, reservoir, optimizer_state, completed_iterations, generation, out_config = _reload_checkpoint(
             checkpoint_path, True, requested_config, np.random.default_rng(0),
         )
         assert reservoir.capacity == 50
@@ -128,7 +129,7 @@ class TestReloadCheckpoint:
         requested_config = DeepCFRConfig(
             feature_keys=feature_keys, hidden_sizes=(8,), table_size=2, reservoir_capacity=10,
         )
-        net, reservoir, optimizer_state, completed_iterations, out_config = _reload_checkpoint(
+        net, reservoir, optimizer_state, completed_iterations, generation, out_config = _reload_checkpoint(
             checkpoint_path, True, requested_config, np.random.default_rng(0),
         )
         assert reservoir.capacity == 50
@@ -147,7 +148,7 @@ class TestResumeContinuesIterationNumbering:
         capsys.readouterr()  # drain the first run's output; only the resumed run's is under test below
         checkpoint_path = os.path.join(out_dir, "checkpoint_latest")
         assert os.path.exists(f"{checkpoint_path}_trainer_state.pt")
-        _, completed_after_first_run = Trainer.load_trainer_state(checkpoint_path)
+        _, completed_after_first_run, _ = Trainer.load_trainer_state(checkpoint_path)
         assert completed_after_first_run == 2
 
         monkeypatch.setattr("sys.argv", [
@@ -158,7 +159,7 @@ class TestResumeContinuesIterationNumbering:
         assert "iter    1 " not in output
         assert "iter    3 " in output
         assert "iter    4 " in output
-        _, completed_after_second_run = Trainer.load_trainer_state(checkpoint_path)
+        _, completed_after_second_run, _ = Trainer.load_trainer_state(checkpoint_path)
         assert completed_after_second_run == 4
 
 
@@ -183,7 +184,7 @@ def _nets_have_equal_weights(a, b) -> bool:
 class TestBenchmarkPoolPersistence:
     """_save_benchmark_pool/_load_benchmark_pool round-trip the rotating
     benchmark pool (see cfr_main.py's own module docstring) -- each member
-    now paired with its own start_iteration -- so a resumed run picks its
+    now paired with its own generation number -- so a resumed run picks its
     pool up exactly where a previous run of the same checkpoint left it,
     rather than silently collapsing back to a single entry -- "a resumed
     run must not differ from one that simply kept running in the same
@@ -215,13 +216,35 @@ class TestBenchmarkPoolPersistence:
         reloaded = _load_benchmark_pool(checkpoint_path)
 
         assert len(reloaded) == 2
-        reloaded_starts = [start for start, _net in reloaded]
-        assert reloaded_starts == [0, 5]
+        reloaded_generations = [generation for generation, _net in reloaded]
+        assert reloaded_generations == [0, 5]
         assert _nets_have_equal_weights(reloaded[0][1], net_a)  # oldest first
         assert _nets_have_equal_weights(reloaded[1][1], net_b)
 
     def test_no_saved_pool_returns_empty_list(self, tmp_path):
         assert _load_benchmark_pool(str(tmp_path / "checkpoint_latest")) == []
+
+    def test_pool_saved_before_generation_tracking_existed_returns_empty_list(self, tmp_path):
+        # Simulates a pool saved by an older version of this module: member
+        # nets on disk, but no `_benchmark_pool_generations.json` sidecar.
+        # Deliberately not a softer fallback that guesses generation numbers
+        # for the old members (e.g. numbering them 0, 1, 2, ... by their own
+        # on-disk order) -- see _load_benchmark_pool's own docstring for why
+        # that risks a silent collision with a freshly-reloaded trainer's
+        # own generation counter (which would also default to 0). Losing
+        # this one pool's history across the format upgrade is the safer
+        # choice; _run_training then reseeds a fresh single-entry pool the
+        # same way it would for a brand new run.
+        config = self._config()
+        rng = np.random.default_rng(0)
+        net = Trainer.new(config, rng).net
+        checkpoint_path = str(tmp_path / "checkpoint_latest")
+        net_config = cfr_networks.AdvantageNetConfig(
+            feature_keys=config.feature_keys, hidden_sizes=config.hidden_sizes, table_size=config.table_size,
+        )
+        cfr_networks.save(net, net_config, _benchmark_pool_member_path(checkpoint_path, 0))
+
+        assert _load_benchmark_pool(checkpoint_path) == []
 
     def test_shrinking_the_pool_removes_stale_members_from_disk(self, tmp_path):
         # A later save with fewer members (e.g. stale members were retired
@@ -277,49 +300,77 @@ class TestBenchmarkPoolPersistence:
         assert len(_load_benchmark_pool(checkpoint_path)) == 3
 
 
-def _make_reservoir(rows: list[tuple[float, float]]) -> ReservoirBuffer:
-    """A ReservoirBuffer holding exactly `rows` (t, iteration) pairs, in
+def _make_reservoir(rows: list[tuple[float, int]]) -> ReservoirBuffer:
+    """A ReservoirBuffer holding exactly `rows` (t, generation) pairs, in
     order -- capacity == len(rows) so Algorithm R never replaces anything,
     keeping insertion order deterministic for these tests."""
     buf = ReservoirBuffer(capacity=max(len(rows), 1), feature_dim=1, num_actions=1, rng=np.random.default_rng(0))
-    for t, iteration in rows:
-        buf.add(np.zeros(1, dtype=np.float32), np.zeros(1, dtype=np.float32), np.array([True]), t, iteration=iteration)
+    for t, generation in rows:
+        buf.add(np.zeros(1, dtype=np.float32), np.zeros(1, dtype=np.float32), np.array([True]), t, generation=generation)
     return buf
 
 
 class TestBenchmarkPoolWeights:
     """_benchmark_pool_weights attributes each currently-held reservoir row
-    to whichever pool member's own [start_i, start_{i+1}) span its raw
-    iteration falls in, weighted by cfr_train._train_step's own Linear-CFR
-    normalization (t / current_iteration) -- see cfr_main.py's own
-    docstring and _benchmark_pool_weights' own docstring."""
+    to whichever pool member's own generation it was stamped with at
+    collection time -- an exact equality match against reservoir.generations,
+    not an inferred iteration range (see cfr_reservoir.py's own docstring
+    for why that distinction matters once a pool member gets retired) --
+    weighted by cfr_train._train_step's own Linear-CFR normalization
+    (t / current_iteration). See cfr_main.py's own docstring and
+    _benchmark_pool_weights' own docstring."""
 
     def test_empty_pool_returns_empty_array(self):
-        reservoir = _make_reservoir([(1.0, 0.0)])
+        reservoir = _make_reservoir([(1.0, 0)])
         assert list(_benchmark_pool_weights([], reservoir, current_iteration=1)) == []
 
     def test_empty_reservoir_returns_all_zero(self):
-        pool = [(0, "net_a"), (5, "net_b")]
+        pool = [(0, "net_a"), (1, "net_b")]
         reservoir = _make_reservoir([])
         assert list(_benchmark_pool_weights(pool, reservoir, current_iteration=10)) == [0.0, 0.0]
 
-    def test_attributes_rows_to_the_member_whose_span_they_fall_in(self):
-        pool = [(0, "net_a"), (10, "net_b"), (20, "net_c")]
+    def test_attributes_rows_by_exact_generation_match(self):
+        pool = [(0, "net_a"), (1, "net_b"), (2, "net_c")]
         reservoir = _make_reservoir([
-            (5.0, 3.0),  # net_a's span: [0, 10)
-            (8.0, 7.0),  # net_a's span
-            (12.0, 15.0),  # net_b's span: [10, 20)
-            (25.0, 25.0),  # net_c's span: [20, inf)
+            (5.0, 0),  # net_a's own generation
+            (8.0, 0),  # net_a's own generation
+            (12.0, 1),  # net_b's own generation
+            (25.0, 2),  # net_c's own generation
         ])
         weights = _benchmark_pool_weights(pool, reservoir, current_iteration=25)
         assert weights[0] == pytest.approx((5.0 + 8.0) / 25.0)
         assert weights[1] == pytest.approx(12.0 / 25.0)
         assert weights[2] == pytest.approx(25.0 / 25.0)
 
-    def test_rows_with_unknown_iteration_are_excluded(self):
+    def test_a_retired_members_rows_are_not_silently_reattributed_to_a_neighbor(self):
+        # The exact bug an exact per-row generation tag fixes: under the
+        # old iteration-*range* inference, retiring a middle pool member
+        # collapsed its own former span into a neighbor's, silently
+        # crediting that neighbor with rows it never actually produced. A
+        # retired member's own generation-tagged rows should instead just
+        # match nothing once it's gone -- excluded, not reattributed.
+        reservoir = _make_reservoir([
+            (5.0, 0),  # generation 0 (net_a)
+            (8.0, 1),  # generation 1 (net_b) -- about to be retired
+            (25.0, 2),  # generation 2 (net_c)
+        ])
+        full_pool = [(0, "net_a"), (1, "net_b"), (2, "net_c")]
+        retired_pool = [(0, "net_a"), (2, "net_c")]  # net_b retired
+
+        full_weights = _benchmark_pool_weights(full_pool, reservoir, current_iteration=25)
+        assert full_weights[1] == pytest.approx(8.0 / 25.0)  # net_b still owns its own rows here
+
+        retired_weights = _benchmark_pool_weights(retired_pool, reservoir, current_iteration=25)
+        # net_a's own weight is unaffected by net_b's retirement -- unlike
+        # the old range-based scheme, where net_b's former span would have
+        # been silently absorbed into net_a's, inflating it.
+        assert retired_weights[0] == pytest.approx(5.0 / 25.0)
+        assert retired_weights[1] == pytest.approx(25.0 / 25.0)
+
+    def test_rows_with_unknown_generation_are_excluded(self):
         pool = [(0, "net_a")]
-        reservoir = _make_reservoir([(5.0, 3.0)])
-        reservoir.iterations[0] = UNKNOWN_ITERATION  # simulate a pre-upgrade row
+        reservoir = _make_reservoir([(5.0, 0)])
+        reservoir.generations[0] = UNKNOWN_GENERATION  # simulate a pre-upgrade row
         weights = _benchmark_pool_weights(pool, reservoir, current_iteration=10)
         assert weights[0] == 0.0
 
@@ -348,27 +399,27 @@ class TestRetireStalePoolMembers:
 
 class TestResolveBenchmarkPool:
     def test_retains_and_normalizes_weights_proportionally(self):
-        pool = [(0, "net_a"), (10, "net_b")]
-        reservoir = _make_reservoir([(5.0, 3.0), (15.0, 12.0)])
+        pool = [(0, "net_a"), (1, "net_b")]
+        reservoir = _make_reservoir([(5.0, 0), (15.0, 1)])
         retained, weights = _resolve_benchmark_pool(pool, reservoir, current_iteration=15, min_weight_fraction=0.01)
         assert retained == pool
         assert list(weights) == pytest.approx([5.0 / 20.0, 15.0 / 20.0])
         assert weights.sum() == pytest.approx(1.0)
 
     def test_falls_back_to_uniform_when_reservoir_has_no_attributable_rows(self):
-        pool = [(0, "net_a"), (10, "net_b"), (20, "net_c")]
+        pool = [(0, "net_a"), (1, "net_b"), (2, "net_c")]
         reservoir = _make_reservoir([])
         retained, weights = _resolve_benchmark_pool(pool, reservoir, current_iteration=25, min_weight_fraction=0.01)
         assert retained == pool
         assert list(weights) == pytest.approx([1 / 3, 1 / 3, 1 / 3])
 
     def test_retirement_shrinks_pool_and_reweights_the_survivors(self):
-        pool = [(0, "net_a"), (10, "net_b"), (20, "net_c")]
+        pool = [(0, "net_a"), (1, "net_b"), (2, "net_c")]
         reservoir = _make_reservoir([
-            (0.1, 3.0),  # a tiny share attributed to net_a once current_iteration is large
-            (15.0, 15.0),  # net_b
-            (25.0, 25.0),  # net_c
+            (0.1, 0),  # a tiny share attributed to net_a once current_iteration is large
+            (15.0, 1),  # net_b
+            (25.0, 2),  # net_c
         ])
         retained, weights = _resolve_benchmark_pool(pool, reservoir, current_iteration=1000, min_weight_fraction=0.01)
-        assert retained == [(10, "net_b"), (20, "net_c")]
+        assert retained == [(1, "net_b"), (2, "net_c")]
         assert list(weights) == pytest.approx([15.0 / 40.0, 25.0 / 40.0])

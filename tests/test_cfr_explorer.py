@@ -475,7 +475,7 @@ def interaction_per_level_checkpoint(_interaction_per_level_checkpoint_path, mon
     return _interaction_per_level_checkpoint_path
 
 
-_MARGINAL_INTERACTION_FEATURE_KEYS = ("street_norm", "hand_category_norm", "is_aggressor_previous_street")
+_MARGINAL_INTERACTION_FEATURE_KEYS = ("street_norm", "hand_category_norm", "flop_wetness_norm")
 
 
 def _make_marginal_interaction_checkpoint(path: str, n: int = 8000, seed: int = 0) -> None:
@@ -485,19 +485,19 @@ def _make_marginal_interaction_checkpoint(path: str, n: int = 8000, seed: int = 
     (this checkpoint's own current Split By, 4 levels) genuinely explains
     action column 0 entirely on its own; hand_category_norm (26 levels)
     genuinely explains action column 1, which street_norm alone can't
-    touch at all; is_aggressor_previous_street (2 levels) explains nothing anywhere -- a
+    touch at all; flop_wetness_norm (2 levels) explains nothing anywhere -- a
     pure no-op feature. So street_norm alone already carries a real,
     substantial baseline, hand_category_norm's own *marginal* gain over
-    that baseline is large, and is_aggressor_previous_street's marginal gain is exactly
+    that baseline is large, and flop_wetness_norm's marginal gain is exactly
     zero. Dividing the old way (joint *total*, which includes street_norm's
-    own already-explained-anyway baseline) by level count made is_aggressor_previous_street
+    own already-explained-anyway baseline) by level count made flop_wetness_norm
     (baseline/2, a big number over a tiny divisor) beat hand_category_norm
     (baseline+real gain, over 26) despite contributing nothing new --
     "Add maximum interaction split" should pick hand_category_norm."""
     feature_dim = len(cfr_features.feature_indices(_MARGINAL_INTERACTION_FEATURE_KEYS))
     street_idx = _MARGINAL_INTERACTION_FEATURE_KEYS.index("street_norm")
     hand_idx = _MARGINAL_INTERACTION_FEATURE_KEYS.index("hand_category_norm")
-    aggressor_idx = _MARGINAL_INTERACTION_FEATURE_KEYS.index("is_aggressor_previous_street")
+    wetness_idx = _MARGINAL_INTERACTION_FEATURE_KEYS.index("flop_wetness_norm")
     rng = np.random.default_rng(seed)
 
     street_choice = rng.integers(0, 4, size=n)
@@ -505,7 +505,7 @@ def _make_marginal_interaction_checkpoint(path: str, n: int = 8000, seed: int = 
     is_flop = street_choice == 1
     hand_raw = rng.random(n).astype(np.float32)
     is_weak_hand = hand_raw < 0.5
-    aggressor = rng.random(n).astype(np.float32)
+    wetness = rng.random(n).astype(np.float32)
 
     signal_street = np.where(is_flop, -20.0, 20.0)
     signal_hand = np.where(is_weak_hand, -20.0, 20.0)
@@ -513,7 +513,7 @@ def _make_marginal_interaction_checkpoint(path: str, n: int = 8000, seed: int = 
     X = np.zeros((n, feature_dim), dtype=np.float32)
     X[:, street_idx] = street
     X[:, hand_idx] = hand_raw
-    X[:, aggressor_idx] = aggressor
+    X[:, wetness_idx] = wetness
     y = np.zeros((n, strategy.NUM_ACTION_CATEGORIES), dtype=np.float32)
     y[:, 0] = signal_street + rng.normal(scale=0.1, size=n)  # fully explained by street_norm alone
     y[:, 1] = signal_hand + rng.normal(scale=0.1, size=n)  # street_norm alone can't touch this
@@ -650,7 +650,7 @@ def cell_count_checkpoint(_cell_count_checkpoint_path, monkeypatch):
     return _cell_count_checkpoint_path
 
 
-_THREE_WAY_FEATURE_KEYS = ("street_norm", "hole_suited", "is_aggressor_flop", "is_aggressor_previous_street")
+_THREE_WAY_FEATURE_KEYS = ("street_norm", "hole_suited", "flop_dynamism_norm", "flop_wetness_norm")
 
 
 def _make_three_way_checkpoint(path: str, rng: np.random.Generator, num_samples: int = 2000) -> None:
@@ -669,8 +669,8 @@ def _make_three_way_checkpoint(path: str, rng: np.random.Generator, num_samples:
     test_interaction_column_differs_per_candidate_with_two_split_by_features).
 
     street_norm and hole_suited get real net input weight (the "already
-    chosen" Split By pair); is_aggressor_flop also gets real weight (a
-    genuinely informative remaining candidate); is_aggressor_previous_street's own weight
+    chosen" Split By pair); flop_dynamism_norm also gets real weight (a
+    genuinely informative remaining candidate); flop_wetness_norm's own weight
     is zeroed out (an uninformative one). Both remaining candidates are
     plain booleans (2 observed levels each, like street_norm/hole_suited
     themselves) specifically so their own 3-way joint partition ends up
@@ -681,16 +681,16 @@ def _make_three_way_checkpoint(path: str, rng: np.random.Generator, num_samples:
     feature_dim = len(cfr_features.feature_indices(_THREE_WAY_FEATURE_KEYS))
     street_idx = _THREE_WAY_FEATURE_KEYS.index("street_norm")
     hole_idx = _THREE_WAY_FEATURE_KEYS.index("hole_suited")
-    aggressor_flop_idx = _THREE_WAY_FEATURE_KEYS.index("is_aggressor_flop")
-    aggressor_idx = _THREE_WAY_FEATURE_KEYS.index("is_aggressor_previous_street")
+    dynamism_idx = _THREE_WAY_FEATURE_KEYS.index("flop_dynamism_norm")
+    wetness_idx = _THREE_WAY_FEATURE_KEYS.index("flop_wetness_norm")
 
     torch.manual_seed(0)  # AdvantageNet's init otherwise draws from torch's unseeded global RNG
     net = cfr_networks.AdvantageNet(input_dim=feature_dim, hidden_sizes=(8, 8))
     with torch.no_grad():
         net.hidden[0].block[0].weight[:, street_idx] *= 12.0
         net.hidden[0].block[0].weight[:, hole_idx] *= 12.0
-        net.hidden[0].block[0].weight[:, aggressor_flop_idx] *= 15.0
-        net.hidden[0].block[0].weight[:, aggressor_idx] = 0.0
+        net.hidden[0].block[0].weight[:, dynamism_idx] *= 15.0
+        net.hidden[0].block[0].weight[:, wetness_idx] = 0.0
     net_config = cfr_networks.AdvantageNetConfig(
         feature_keys=_THREE_WAY_FEATURE_KEYS, hidden_sizes=(8, 8), table_size=3,
     )
@@ -1026,14 +1026,14 @@ class TestSuggestedSubstrategyButtons:
     def test_max_interaction_split_normalizes_the_marginal_gain_not_the_joint_total(
         self, marginal_interaction_checkpoint,
     ):
-        # Regression coverage: is_aggressor_previous_street contributes nothing beyond
+        # Regression coverage: flop_wetness_norm contributes nothing beyond
         # what street_norm (this node's own current Split By) already
         # explains alone, while hand_category_norm genuinely explains a
         # large share street_norm alone can't touch (see
         # _make_marginal_interaction_checkpoint). Dividing the joint
         # *total* (which always also includes street_norm's own
         # already-explained-anyway baseline) by level count let
-        # is_aggressor_previous_street's 2 levels beat hand_category_norm's 26 purely
+        # flop_wetness_norm's 2 levels beat hand_category_norm's 26 purely
         # because that shared baseline is a bigger number than
         # hand_category_norm's own genuine marginal gain -- dividing the
         # marginal gain instead should pick hand_category_norm.
@@ -1582,23 +1582,23 @@ class TestFeatureTable:
         # candidate's own "interaction with current Split By" collapsed to
         # re-measuring the *same* 2-key grouping regardless of which
         # candidate was actually asked about, reading identically for
-        # every row. is_aggressor_flop carries real signal here and
-        # is_aggressor_previous_street doesn't (see _make_three_way_checkpoint) -- their
+        # every row. flop_dynamism_norm carries real signal here and
+        # flop_wetness_norm doesn't (see _make_three_way_checkpoint) -- their
         # own values should differ.
         at = _run_app()
         at.multiselect(key="root::split_by").set_value(["street_norm", "hole_suited"]).run(timeout=60)
         assert not at.exception
 
         table = _feature_table(at)
-        aggressor_flop_value = table[table["Feature"] == cfr_features.feature_label("is_aggressor_flop")].iloc[0][
+        dynamism_value = table[table["Feature"] == cfr_features.feature_label("flop_dynamism_norm")].iloc[0][
             "Interaction with current Split By"
         ]
-        aggressor_value = table[table["Feature"] == cfr_features.feature_label("is_aggressor_previous_street")].iloc[0][
+        wetness_value = table[table["Feature"] == cfr_features.feature_label("flop_wetness_norm")].iloc[0][
             "Interaction with current Split By"
         ]
-        assert aggressor_flop_value != "—"
-        assert aggressor_value != "—"
-        assert aggressor_flop_value != aggressor_value
+        assert dynamism_value != "—"
+        assert wetness_value != "—"
+        assert dynamism_value != wetness_value
 
     def test_includes_exact_hole_hand_when_the_substrategy_is_100_percent_preflop(
         self, all_preflop_hole_hand_grid_checkpoint,
@@ -1618,12 +1618,12 @@ class TestFeatureTable:
         # Regression coverage: the table used to filter Exact Hole Hand out
         # and unconditionally re-append it as the very last row, regardless
         # of its actual importance (see _render_substrategy's table_keys).
-        # Here it has real, strongly-weighted signal and is_aggressor_previous_street has
+        # Here it has real, strongly-weighted signal and flop_wetness_norm has
         # none (see _grid_outranks_other_checkpoint_path), so it should
-        # rank clearly above is_aggressor_previous_street, not below it.
+        # rank clearly above flop_wetness_norm, not below it.
         at = _run_app()
         table = _feature_table(at)
-        assert list(table["Feature"]) == ["Exact Hole Hand", "Last Aggressor - Previous Street"]
+        assert list(table["Feature"]) == ["Exact Hole Hand", "Flop Wet vs Dry"]
 
 
 class TestNavigation:
@@ -1940,16 +1940,16 @@ def all_preflop_hole_hand_grid_checkpoint(_all_preflop_hole_hand_grid_checkpoint
     return _all_preflop_hole_hand_grid_checkpoint_path
 
 
-_GRID_OUTRANKS_OTHER_FEATURE_KEYS = ("hole_hand_grid_x_norm", "hole_hand_grid_y_norm", "is_aggressor_previous_street")
+_GRID_OUTRANKS_OTHER_FEATURE_KEYS = ("hole_hand_grid_x_norm", "hole_hand_grid_y_norm", "flop_wetness_norm")
 
 
 @pytest.fixture(scope="module")
 def _grid_outranks_other_checkpoint_path(tmp_path_factory) -> str:
     """All rows preflop, with Exact Hole Hand's own grid coordinates given
     a big net input weight (real signal, like hand_idx in
-    _make_importance_per_level_checkpoint) and is_aggressor_previous_street's zeroed out
+    _make_importance_per_level_checkpoint) and flop_wetness_norm's zeroed out
     entirely (guaranteed no effect, like hole_idx there) -- so Exact Hole
-    Hand should rank clearly *above* is_aggressor_previous_street in the feature table.
+    Hand should rank clearly *above* flop_wetness_norm in the feature table.
     Regression coverage for the table's own sort: it used to filter Exact
     Hole Hand out and unconditionally re-append it last, regardless of its
     actual importance (see _render_substrategy's table_keys)."""
@@ -1958,14 +1958,14 @@ def _grid_outranks_other_checkpoint_path(tmp_path_factory) -> str:
     feature_dim = len(cfr_features.feature_indices(_GRID_OUTRANKS_OTHER_FEATURE_KEYS))
     x_idx = _GRID_OUTRANKS_OTHER_FEATURE_KEYS.index("hole_hand_grid_x_norm")
     y_idx = _GRID_OUTRANKS_OTHER_FEATURE_KEYS.index("hole_hand_grid_y_norm")
-    aggressor_idx = _GRID_OUTRANKS_OTHER_FEATURE_KEYS.index("is_aggressor_previous_street")
+    wetness_idx = _GRID_OUTRANKS_OTHER_FEATURE_KEYS.index("flop_wetness_norm")
 
     torch.manual_seed(0)  # AdvantageNet's init otherwise draws from torch's unseeded global RNG
     net = cfr_networks.AdvantageNet(input_dim=feature_dim, hidden_sizes=(8, 8))
     with torch.no_grad():
         net.hidden[0].block[0].weight[:, x_idx] *= 20.0
         net.hidden[0].block[0].weight[:, y_idx] *= 20.0
-        net.hidden[0].block[0].weight[:, aggressor_idx] = 0.0
+        net.hidden[0].block[0].weight[:, wetness_idx] = 0.0
     net_config = cfr_networks.AdvantageNetConfig(
         feature_keys=_GRID_OUTRANKS_OTHER_FEATURE_KEYS, hidden_sizes=(8, 8), table_size=3,
     )
@@ -2056,14 +2056,14 @@ def grid_joint_interaction_checkpoint(_grid_joint_interaction_checkpoint_path, m
     return _grid_joint_interaction_checkpoint_path
 
 
-_MAX_SPLIT_EXCLUDES_GRID_FEATURE_KEYS = ("hole_suited", "is_aggressor_previous_street", "hole_hand_grid_x_norm", "hole_hand_grid_y_norm")
+_MAX_SPLIT_EXCLUDES_GRID_FEATURE_KEYS = ("hole_suited", "flop_wetness_norm", "hole_hand_grid_x_norm", "hole_hand_grid_y_norm")
 
 
 @pytest.fixture(scope="module")
 def _max_split_excludes_hole_hand_grid_checkpoint_path(tmp_path_factory) -> str:
     """All rows preflop (Exact Hole Hand's own 100%-preflop Split By
     requirement holds -- see _hole_hand_grid_split_by_available), with two
-    ordinary candidate features (hole_suited, is_aggressor_previous_street) alongside it --
+    ordinary candidate features (hole_suited, flop_wetness_norm) alongside it --
     used to prove "Add maximum interaction split"/"Add maximum importance
     split" never treat Exact Hole Hand as an eligible candidate even when
     it's genuinely available (unlike "Add best second Split By feature"/
@@ -2265,7 +2265,7 @@ class TestExactHoleHand:
         # this button must never treat Exact Hole Hand as an eligible
         # candidate (it would create up to 169 children, one per grid
         # cell -- see _splittable_candidates' own include_hole_hand_grid,
-        # which _add_max_interaction_split doesn't pass). is_aggressor_previous_street is
+        # which _add_max_interaction_split doesn't pass). flop_wetness_norm is
         # the sole legitimate ordinary candidate left once hole_suited is
         # the current Split By pick, so picking it deterministically
         # (rather than Exact Hole Hand, which is also genuinely available
@@ -2278,11 +2278,11 @@ class TestExactHoleHand:
         children = at.session_state["substrategy_children"]["root::"]
         claims = at.session_state["substrategy_claims"]
         claimed_features = {next(iter(claims[f"root::substrategy_{cid}::"])) for cid in children}
-        assert claimed_features == {"is_aggressor_previous_street"}
+        assert claimed_features == {"flop_wetness_norm"}
 
     def test_max_importance_split_never_picks_it(self, max_split_excludes_hole_hand_grid_checkpoint):
         # Same guard, for "Add maximum importance split" -- here with no
-        # Split By chosen yet, so both hole_suited and is_aggressor_previous_street are
+        # Split By chosen yet, so both hole_suited and flop_wetness_norm are
         # legitimate ordinary candidates alongside Exact Hole Hand (also
         # genuinely available -- every row is preflop); the winner must
         # still be one of the two ordinary features, never the grid key.
@@ -2293,7 +2293,7 @@ class TestExactHoleHand:
         children = at.session_state["substrategy_children"]["root::"]
         claims = at.session_state["substrategy_claims"]
         claimed_features = {next(iter(claims[f"root::substrategy_{cid}::"])) for cid in children}
-        assert claimed_features <= {"hole_suited", "is_aggressor_previous_street"}
+        assert claimed_features <= {"hole_suited", "flop_wetness_norm"}
 
 
 _GROUP_RELATIVE_FEATURE_KEYS = ("hole_hand_grid_x_norm", "hole_hand_grid_y_norm", "hole_suited")

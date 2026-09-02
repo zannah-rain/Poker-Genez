@@ -39,7 +39,7 @@ class TestSaveLoadRoundTrip:
     def test_reloaded_net_produces_identical_predictions(self):
         net = AdvantageNet(input_dim=6, hidden_sizes=(16, 16))
         config = AdvantageNetConfig(
-            feature_keys=("hand_category_norm", "street_norm", "is_aggressor_previous_street", "raises_preflop_norm", "call_amount_norm", "spr_norm"),
+            feature_keys=("hand_category_norm", "street_norm", "last_street_aggressor_norm", "total_raises_norm", "call_amount_norm", "spr_norm"),
             hidden_sizes=(16, 16),
             table_size=6,
         )
@@ -169,7 +169,7 @@ class TestMeanShapContributionsForSamples:
     # mean_shap_contributions_for_samples now looks each key up in
     # features.py's catalog (see cfr_features.unmasked_validity) to know
     # whether it needs masked-row-aware stratification.
-    _KEYS = ("hand_category_norm", "street_norm", "spr_norm", "raises_preflop_norm")
+    _KEYS = ("hand_category_norm", "street_norm", "spr_norm", "total_raises_norm")
 
     def test_empty_pool_returns_empty_list(self):
         rng = np.random.default_rng(0)
@@ -353,7 +353,7 @@ class TestMeanShapContributionsForSamplesExplainGroupLabels:
         rng = np.random.default_rng(0)
         net = AdvantageNet(input_dim=4, hidden_sizes=(8,))
         features = _filled_reservoir(capacity=30, feature_dim=4, rng=rng).features
-        keys = ("hand_category_norm", "street_norm", "spr_norm", "raises_preflop_norm")
+        keys = ("hand_category_norm", "street_norm", "spr_norm", "total_raises_norm")
 
         with_explicit_none = dict(mean_shap_contributions_for_samples(
             net, features, features, keys, np.random.default_rng(0),
@@ -369,7 +369,7 @@ class TestMeanShapContributionsForSamplesExplainGroupLabels:
 
 
 class TestPairwiseInteractionStrength:
-    _KEYS = ("hand_category_norm", "street_norm", "spr_norm", "raises_preflop_norm")
+    _KEYS = ("hand_category_norm", "street_norm", "spr_norm", "total_raises_norm")
 
     def _train_net(self, target_fn, n=2000, hidden=(24, 24), steps=800, seed=0):
         rng = np.random.default_rng(seed)
@@ -425,7 +425,7 @@ class TestPairwiseInteractionStrength:
 
 
 class TestInteractionStrengthForFeature:
-    _KEYS = ("hand_category_norm", "street_norm", "spr_norm", "raises_preflop_norm")
+    _KEYS = ("hand_category_norm", "street_norm", "spr_norm", "total_raises_norm")
 
     def test_empty_pool_returns_one_entry_per_other_feature_at_zero(self):
         net = AdvantageNet(input_dim=4, hidden_sizes=(8,))

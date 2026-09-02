@@ -28,9 +28,6 @@ def _make_situation(**overrides):
         num_raises_flop=0,
         num_raises_turn=0,
         is_aggressor_previous_street=False,
-        is_aggressor_preflop=False,
-        is_aggressor_flop=False,
-        is_aggressor_turn=False,
         starting_stack=200.0,
     )
     defaults.update(overrides)
@@ -168,13 +165,14 @@ class TestBucketCategories:
     def test_categorical_order_matches_value_table_not_alphabetical(self):
         assert cfr_features.bucket_categories("street_norm") == ["Preflop", "Flop", "Turn", "River"]
 
-    def test_boolean_order_is_false_then_true(self):
-        # A plain (non-`maskable`) boolean -- unlike hole_suited, which now
-        # appends MASKED_LABEL as a third category (see
-        # test_maskable_feature_appends_masked_label_last below).
-        assert cfr_features.bucket_categories("is_aggressor_previous_street") == [
-            "Not Last Aggressor - Previous Street", "Last Aggressor - Previous Street",
-        ]
+    def test_boolean_order_is_false_then_true(self, monkeypatch):
+        # No real plain (non-`maskable`) boolean feature remains in the
+        # catalog -- hole_suited, the last one, is itself `maskable` now
+        # (see test_maskable_boolean_appends_masked_label_last below) -- so
+        # this needs an injected synthetic spec.
+        spec = features.FeatureSpec("_test_plain_bool", "Test Bool", "", kind="boolean")
+        monkeypatch.setitem(cfr_features._SPEC_BY_KEY, spec.key, spec)
+        assert cfr_features.bucket_categories(spec.key) == ["Not Test Bool", "Test Bool"]
 
     def test_maskable_boolean_appends_masked_label_last(self):
         assert cfr_features.bucket_categories("hole_suited") == [
@@ -257,9 +255,14 @@ class TestObservedLevelCount:
         values = np.array([features.MASKED, features.MASKED])
         assert cfr_features.observed_level_count("draw_norm", values) == 0
 
-    def test_non_maskable_feature_counts_every_distinct_label(self):
+    def test_non_maskable_boolean_counts_every_distinct_label(self, monkeypatch):
+        # No real plain (non-`maskable`) boolean feature remains in the
+        # catalog (see TestBucketCategories.test_boolean_order_is_false_
+        # then_true), so this needs an injected synthetic spec.
+        spec = features.FeatureSpec("_test_plain_bool", "Test Bool", "", kind="boolean")
+        monkeypatch.setitem(cfr_features._SPEC_BY_KEY, spec.key, spec)
         values = np.array([0.0, 1.0, 1.0, 0.0])
-        assert cfr_features.observed_level_count("is_aggressor_previous_street", values) == 2
+        assert cfr_features.observed_level_count(spec.key, values) == 2
 
 
 class TestDisplayFeatureKeys:

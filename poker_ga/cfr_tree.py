@@ -150,8 +150,15 @@ class _TraversalContext:
 
     `net` must expose `.predict(features: np.ndarray) -> np.ndarray` (shape
     (NUM_ACTIONS,), raw regret estimates) -- see cfr_networks.AdvantageNet.
-    `reservoir` must expose `.add(features, regrets, legal_mask, t, iteration=...)` --
+    `reservoir` must expose `.add(features, regrets, legal_mask, t, generation=...)` --
     see cfr_reservoir.ReservoirBuffer.
+
+    `generation`: exactly which benchmark-pool promotion epoch (see
+    cfr_main.py's own module docstring) this whole traversal is running
+    under -- forwarded unchanged to every reservoir.add() call it makes
+    (see cfr_reservoir.py's own docstring for what it's for). Constant for
+    the traversal the same way `t` is; cfr_main.py's own training loop is
+    what actually advances it, once per confirmed-improved benchmark check.
 
     `gto_spots`: a catalog of gto.GTOSpot entries (see that module) whose
     matching decisions are played exactly as their chart says instead of
@@ -168,6 +175,7 @@ class _TraversalContext:
     t: float
     feature_indices: np.ndarray
     num_equity_rollouts: int
+    generation: int = 0
     gto_spots: tuple[gto.GTOSpot, ...] = ()
 
 
@@ -313,9 +321,6 @@ def _build_situation(
         num_raises_flop=(completed_street_raises[1] if len(completed_street_raises) > 1 else 0),
         num_raises_turn=(completed_street_raises[2] if len(completed_street_raises) > 2 else 0),
         is_aggressor_previous_street=(completed_street_aggressors[-1] == i if completed_street_aggressors else False),
-        is_aggressor_preflop=(len(completed_street_aggressors) > 0 and completed_street_aggressors[0] == i),
-        is_aggressor_flop=(len(completed_street_aggressors) > 1 and completed_street_aggressors[1] == i),
-        is_aggressor_turn=(len(completed_street_aggressors) > 2 and completed_street_aggressors[2] == i),
         starting_stack=state.starting_stacks[i],
         big_blind=state.config.big_blind,
         raised_positions=frozenset(seat_role(j, state.button_idx, len(seats)) for j in raiser_seats if j != i),
@@ -339,8 +344,8 @@ def _decision_node(
     `completed_street_raises`) for _start_street once this street ends.
     `completed_street_raises`/`completed_street_aggressors` are constant
     for this whole street: one entry per street *already* completed before
-    this one, feeding the frozen "Raises <street>"/"Last Aggressor
-    <street>" family (see features.Situation's own field docs) --
+    this one, feeding the frozen per-calendar-street num_raises_preflop/
+    flop/turn fields (see features.Situation's own field docs) --
     deliberately not street_aggressor for the *previous*-street reading
     specifically, since whoever raised most recently this street is
     skipped over in the to-act order until either the street ends or
@@ -450,7 +455,7 @@ def _decision_node(
         regret_vec = np.zeros(NUM_ACTIONS, dtype=np.float64)
         regret_vec[legal_idx] = values[legal_idx] - v_node
         ctx.reservoir.add(
-            feats, regret_vec.astype(np.float32), legal_mask, float(ctx.t * path_weight), iteration=ctx.t,
+            feats, regret_vec.astype(np.float32), legal_mask, float(ctx.t * path_weight), generation=ctx.generation,
         )
         return v_node
 
@@ -517,7 +522,7 @@ def traverse_hand(
     feature_indices: np.ndarray, num_equity_rollouts: int = DEFAULT_NUM_EQUITY_ROLLOUTS,
     min_starting_stack_bb: float = DEFAULT_MIN_STARTING_STACK_BB,
     max_starting_stack_bb: float = DEFAULT_MAX_STARTING_STACK_BB,
-    gto_spots: tuple[gto.GTOSpot, ...] = (),
+    gto_spots: tuple[gto.GTOSpot, ...] = (), generation: int = 0,
 ) -> float:
     """Runs one Monte Carlo external-sampling traversal of a full hand from
     a fresh deal, seating `table_size` players around a randomized button --
@@ -536,7 +541,8 @@ def traverse_hand(
     unused here as a result -- it only still applies to real (non-CFR)
     session play (game.py/simulate.py).
 
-    `gto_spots`: see _TraversalContext's own docstring -- forwarded as-is.
+    `gto_spots`/`generation`: see _TraversalContext's own docstring --
+    forwarded as-is.
     """
     stacks = rng.uniform(min_starting_stack_bb, max_starting_stack_bb, size=table_size) * config.big_blind
     seats = [
@@ -570,6 +576,7 @@ def traverse_hand(
     ctx = _TraversalContext(
         traverser=traverser, net=net, reservoir=reservoir, rng=rng, t=t,
         feature_indices=feature_indices, num_equity_rollouts=num_equity_rollouts, gto_spots=gto_spots,
+        generation=generation,
     )
     # path_weight starts at 1.0: nothing has branched yet for this hand --
     # see _decision_node's own docstring for how it evolves from here.

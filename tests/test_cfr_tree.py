@@ -82,7 +82,7 @@ class _DominantRegretNet:
 
 
 class _DiscardingReservoir:
-    def add(self, features, regrets, legal_mask, t, iteration=None):
+    def add(self, features, regrets, legal_mask, t, generation=0):
         pass
 
 
@@ -315,7 +315,7 @@ class _ExplodingReservoir:
     fixed decision isn't learned, so it should never produce a regret
     target."""
 
-    def add(self, features, regrets, legal_mask, t, iteration=None):
+    def add(self, features, regrets, legal_mask, t, generation=0):
         raise AssertionError("reservoir.add() called for a decision a matching gto_spots entry should have fixed")
 
 
@@ -456,7 +456,7 @@ class _RecordingReservoir:
     def __init__(self):
         self.weights = []
 
-    def add(self, features, regrets, legal_mask, t, iteration=None):
+    def add(self, features, regrets, legal_mask, t, generation=0):
         self.weights.append(t)
 
 

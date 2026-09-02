@@ -330,20 +330,21 @@ class _CallPreflopThenRaiseFlopGenome:
         return CHECK_CALL, 0.0
 
 
-class TestFrozenPerStreetRaisesAndAggressorFamily:
-    """num_raises_preflop/flop/turn and is_aggressor_preflop/flop/turn are
-    each pinned to one specific calendar street (unlike num_raises_previous_
-    street/is_aggressor_previous_street, which are always relative to
-    whatever street is current) -- 0/False until that specific street has
-    actually finished, then frozen at its final reading for the rest of the
-    hand, however many streets later a decision happens to be."""
+class TestFrozenPerStreetRaises:
+    """num_raises_preflop/flop/turn are each pinned to one specific calendar
+    street (unlike num_raises_previous_street/is_aggressor_previous_street,
+    which are always relative to whatever street is current) -- 0 until
+    that specific street has actually finished, then frozen at its final
+    reading for the rest of the hand, however many streets later a decision
+    happens to be. Feeds total_raises_norm (see features.py's own
+    extract_features)."""
 
-    def test_preflop_and_flop_aggressor_readings_stay_independent_on_the_turn(self):
+    def test_preflop_and_flop_raise_counts_stay_independently_frozen_on_the_turn(self):
         # Seat 0 opens preflop (its only raise); seat 1 calls preflop, then
-        # raises the flop (its only raise) -- so by the turn, the preflop
-        # and flop "who raised last" readings genuinely disagree, unlike
-        # is_aggressor_previous_street, which can only ever point at one of
-        # them (whichever street is immediately before the current one).
+        # raises the flop (its only raise) -- so by the turn, both
+        # num_raises_preflop and num_raises_flop must each still read their
+        # own street's own final count, regardless of which one most
+        # recently finished or who's deciding.
         preflop_raiser = _RaisePreflopThenCheckCallGenome()
         flop_raiser = _CallPreflopThenRaiseFlopGenome()
         seats = [
@@ -358,14 +359,10 @@ class TestFrozenPerStreetRaisesAndAggressorFamily:
         assert flop_raiser_turn
 
         for s in preflop_raiser_turn:
-            assert s.is_aggressor_preflop is True
-            assert s.is_aggressor_flop is False
             assert s.is_aggressor_previous_street is False  # previous (flop) was seat 1, not seat 0
             assert s.num_raises_preflop == 1
             assert s.num_raises_flop == 1
         for s in flop_raiser_turn:
-            assert s.is_aggressor_preflop is False
-            assert s.is_aggressor_flop is True
             assert s.is_aggressor_previous_street is True
             assert s.num_raises_preflop == 1
             assert s.num_raises_flop == 1
@@ -383,13 +380,11 @@ class TestFrozenPerStreetRaisesAndAggressorFamily:
         preflop_situations += [s for s, _ in flop_raiser.calls if s.street == PREFLOP]
         assert preflop_situations
         assert all(s.num_raises_preflop == 0 for s in preflop_situations)
-        assert all(s.is_aggressor_preflop is False for s in preflop_situations)
 
         flop_situations = [s for s, _ in preflop_raiser.calls if s.street == FLOP]
         flop_situations += [s for s, _ in flop_raiser.calls if s.street == FLOP]
         assert flop_situations
         assert all(s.num_raises_flop == 0 for s in flop_situations)
-        assert all(s.is_aggressor_flop is False for s in flop_situations)
 
 
 class TestComputePayouts:

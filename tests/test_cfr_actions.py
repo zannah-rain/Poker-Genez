@@ -30,9 +30,6 @@ def _make_situation(**overrides):
         num_raises_flop=0,
         num_raises_turn=0,
         is_aggressor_previous_street=False,
-        is_aggressor_preflop=False,
-        is_aggressor_flop=False,
-        is_aggressor_turn=False,
         starting_stack=200.0,
     )
     defaults.update(overrides)

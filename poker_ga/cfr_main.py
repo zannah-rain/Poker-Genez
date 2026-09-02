@@ -9,16 +9,16 @@ on both axes that matter:
 
   - Membership: a pool member is kept for as long as the trainer's own
     reservoir still holds rows collected while it was the active net --
-    tracked via each member's own start_iteration and the reservoir's own
-    per-row `iteration` field (see cfr_reservoir.py's own docstring for why
-    that's a *separate* field from `weights`/t, which cfr_tree.py's own
-    path_weight can shrink well below a row's true iteration). Once a
-    member's own attributable share of the reservoir's current total
-    training weight fades below --benchmark-pool-min-weight-fraction, it's
-    retired -- there's no fixed pool-size cap, because there's no reason to
-    keep (or discard) a snapshot on a schedule when the reservoir itself
-    already says how much it still actually matters to what's being
-    trained right now.
+    tracked via each member's own generation number and the reservoir's own
+    per-row `generation` field, stamped once at collection time (see
+    cfr_reservoir.py's own docstring for why an exact per-row tag, not an
+    inferred iteration range, is what makes this robust to a member in the
+    *middle* of the pool getting retired). Once a member's own attributable
+    share of the reservoir's current total training weight fades below
+    --benchmark-pool-min-weight-fraction, it's retired -- there's no fixed
+    pool-size cap, because there's no reason to keep (or discard) a
+    snapshot on a schedule when the reservoir itself already says how much
+    it still actually matters to what's being trained right now.
   - Selection: each benchmark table draws its opponent from ONE pool
     member (never mixed within a table -- see
     benchmark.run_benchmark_until_resolved's own docstring), with
@@ -164,7 +164,7 @@ def parse_args() -> argparse.Namespace:
         "--benchmark-pool-min-weight-fraction", type=float, default=0.01,
         help="How the benchmark pool of past confirmed-good snapshots is maintained (see "
         "--benchmark-interval): each member's own share of the trainer's own reservoir's current "
-        "total training weight is tracked (see cfr_reservoir.py's own `iterations` field and this "
+        "total training weight is tracked (see cfr_reservoir.py's own `generation` field and this "
         "module's own docstring) -- once a member's own share fades below this fraction, it's "
         "retired. No fixed pool-size cap -- a snapshot stays as long as the reservoir itself still "
         "holds a meaningful amount of the data it produced, however long or short that turns out to "
@@ -177,7 +177,7 @@ def parse_args() -> argparse.Namespace:
         "still actually shapes the current net, not just which eras happen to have survived at all. "
         "Falls back to a uniform draw across the pool whenever every member's own share is 0 (e.g. "
         "right after a fresh start, or immediately after reloading a reservoir saved before "
-        "`iterations` existed -- see cfr_reservoir.UNKNOWN_ITERATION).",
+        "`generation` existed -- see cfr_reservoir.UNKNOWN_GENERATION).",
     )
     p.add_argument(
         "--benchmark-min-tables", type=int, default=500,
@@ -203,7 +203,7 @@ def parse_args() -> argparse.Namespace:
         "improved or regressed.",
     )
     p.add_argument(
-        "--early-stop-patience", type=int, default=3,
+        "--early-stop-patience", type=int, default=6,
         help="Whenever a --benchmark-interval check doesn't show a resolved improvement, the net's "
         "weights (and optimizer state) revert to that checkpoint. If this happens this many times "
         "in a row, training stops early rather than running out --iterations. 0 disables early "
@@ -240,11 +240,11 @@ def _benchmark_players(
     ]
 
 
-# One (start_iteration, net) pair per pool member, oldest first --
-# start_iteration is the outer training iteration at which that member was
-# promoted (cloned from trainer.net right after a confirmed-improved
-# benchmark check), so it also marks the end of the *previous* member's own
-# span and the start of this one's -- see _benchmark_pool_weights.
+# One (generation, net) pair per pool member, oldest first -- generation is
+# the exact cfr_train.Trainer.generation value (and, index-for-index, the
+# cfr_reservoir.ReservoirBuffer.generations tag on every row collected)
+# while that member was the active net, assigned once at promotion time and
+# never recomputed -- see _benchmark_pool_weights.
 BenchmarkPool = list[tuple[int, cfr_networks.AdvantageNet]]
 
 
@@ -252,8 +252,8 @@ def _benchmark_pool_member_path(checkpoint_path: str, i: int) -> str:
     return f"{checkpoint_path}_benchmark_pool_{i}"
 
 
-def _benchmark_pool_starts_path(checkpoint_path: str) -> str:
-    return f"{checkpoint_path}_benchmark_pool_starts.json"
+def _benchmark_pool_generations_path(checkpoint_path: str) -> str:
+    return f"{checkpoint_path}_benchmark_pool_generations.json"
 
 
 def _save_benchmark_pool(
@@ -261,19 +261,19 @@ def _save_benchmark_pool(
 ) -> None:
     """Writes each benchmark_pool member's own weights (oldest first) to
     <checkpoint_path>_benchmark_pool_<i>.pt/.json, plus their own
-    start_iterations together as one small JSON list
-    (<checkpoint_path>_benchmark_pool_starts.json, index-aligned with the
-    numbered members), alongside every trainer.save(checkpoint_path) call,
-    so a resumed run's pool picks up exactly where this one left off
-    instead of silently losing its own start_iteration attribution -- a
-    resumed run must not differ from one that simply kept running in the
-    same process (see _load_benchmark_pool). Removes any stale member left
-    over from a previous, larger pool (e.g. more members have since been
-    retired -- see _retire_stale_pool_members)."""
-    for i, (_start, net) in enumerate(benchmark_pool):
+    generation numbers together as one small JSON list
+    (<checkpoint_path>_benchmark_pool_generations.json, index-aligned with
+    the numbered members), alongside every trainer.save(checkpoint_path)
+    call, so a resumed run's pool picks up exactly where this one left off
+    instead of silently losing its own generation attribution -- a resumed
+    run must not differ from one that simply kept running in the same
+    process (see _load_benchmark_pool). Removes any stale member left over
+    from a previous, larger pool (e.g. more members have since been retired
+    -- see _retire_stale_pool_members)."""
+    for i, (_generation, net) in enumerate(benchmark_pool):
         cfr_networks.save(net, net_config, _benchmark_pool_member_path(checkpoint_path, i))
-    with open(_benchmark_pool_starts_path(checkpoint_path), "w", encoding="utf-8") as f:
-        json.dump([start for start, _net in benchmark_pool], f)
+    with open(_benchmark_pool_generations_path(checkpoint_path), "w", encoding="utf-8") as f:
+        json.dump([generation for generation, _net in benchmark_pool], f)
     i = len(benchmark_pool)
     while os.path.exists(f"{_benchmark_pool_member_path(checkpoint_path, i)}.pt"):
         os.remove(f"{_benchmark_pool_member_path(checkpoint_path, i)}.pt")
@@ -284,15 +284,21 @@ def _save_benchmark_pool(
 def _load_benchmark_pool(checkpoint_path: str) -> BenchmarkPool:
     """Reloads whatever benchmark pool _save_benchmark_pool last wrote for
     this checkpoint (oldest first), or [] if none exists -- a fresh run,
-    --no-reload-previous, or a checkpoint saved before this existed all
-    fall back to [] the same way (see _run_training, which then seeds a
-    fresh single-entry pool exactly as it would for a brand new run). A
-    pool saved before start_iteration tracking existed (nets on disk, but
-    no `_benchmark_pool_starts.json`) falls back to treating every member
-    as if it started at iteration 0 -- attribution against the reservoir
-    will be wrong until the pool naturally reshapes itself around
-    freshly-tracked rows (see cfr_reservoir.UNKNOWN_ITERATION for the same
-    graceful-degradation spirit applied to individual reservoir rows)."""
+    --no-reload-previous, a checkpoint saved before this existed, or a pool
+    saved before generation tracking existed (nets on disk, but no
+    `_benchmark_pool_generations.json`) all fall back to [] the same way
+    (see _run_training, which then seeds a fresh single-entry pool exactly
+    as it would for a brand new run). That last case is deliberately not a
+    softer fallback (e.g. numbering the old members 0, 1, 2, ... by their
+    own on-disk order): unlike an iteration number, a generation number
+    drives an *exact* equality match against the reservoir's own per-row
+    tag (see _benchmark_pool_weights), and cfr_train.Trainer.generation
+    itself would also independently default to 0 for a trainer-state file
+    from the same era -- a guessed renumbering could collide with that
+    freshly-started counter and silently misattribute rows, which is worse
+    than just losing this one pool's history across the format upgrade
+    (see cfr_reservoir.UNKNOWN_GENERATION for the same don't-guess spirit
+    applied to individual reservoir rows)."""
     pool_nets = []
     i = 0
     while os.path.exists(f"{_benchmark_pool_member_path(checkpoint_path, i)}.pt"):
@@ -301,13 +307,12 @@ def _load_benchmark_pool(checkpoint_path: str) -> BenchmarkPool:
         i += 1
     if not pool_nets:
         return []
-    starts_path = _benchmark_pool_starts_path(checkpoint_path)
-    if os.path.exists(starts_path):
-        with open(starts_path, encoding="utf-8") as f:
-            starts = json.load(f)
-    else:
-        starts = [0] * len(pool_nets)
-    return list(zip(starts, pool_nets))
+    generations_path = _benchmark_pool_generations_path(checkpoint_path)
+    if not os.path.exists(generations_path):
+        return []
+    with open(generations_path, encoding="utf-8") as f:
+        generations = json.load(f)
+    return list(zip(generations, pool_nets))
 
 
 def _benchmark_pool_weights(
@@ -315,17 +320,15 @@ def _benchmark_pool_weights(
 ) -> np.ndarray:
     """One weight per benchmark_pool member (same order), proportional to
     how much of the reservoir's own currently-held rows can be attributed
-    to the span of iterations that member was the active net for -- see
-    this module's own docstring. Member i "owns" every currently-held row
-    whose own raw collection iteration (reservoir.iterations -- *not*
-    reservoir.weights/t, which cfr_tree.py's own path_weight can shrink
-    well below a row's true iteration -- see cfr_reservoir.py's own
-    docstring) falls in [start_i, start_{i+1}) (or [start_last, +inf) for
-    the most recent member); each such row's own contribution is exactly
-    the Linear-CFR loss weight cfr_train._train_step would give it right
-    now (row's own raw t / current_iteration, matching _train_step's own
-    normalization exactly), summed. A row whose own iteration is
-    cfr_reservoir.UNKNOWN_ITERATION (reservoir saved before that field
+    to that member's own generation -- see this module's own docstring.
+    Member i "owns" every currently-held row whose own stamped generation
+    (reservoir.generations, set once at collection time -- see
+    cfr_reservoir.py's own docstring) exactly equals that member's own
+    generation number; each such row's own contribution is exactly the
+    Linear-CFR loss weight cfr_train._train_step would give it right now
+    (row's own raw t / current_iteration, matching _train_step's own
+    normalization exactly), summed. A row whose own generation is
+    cfr_reservoir.UNKNOWN_GENERATION (reservoir saved before that field
     existed) contributes to no member -- there's nothing honest to
     attribute it to -- so right after upgrading an existing run, every
     weight reads low (possibly all 0) until enough freshly-tracked rows
@@ -335,13 +338,11 @@ def _benchmark_pool_weights(
     out = np.zeros(len(benchmark_pool))
     if not benchmark_pool or reservoir.size == 0:
         return out
-    iterations = reservoir.iterations[: reservoir.size]
+    generations = reservoir.generations[: reservoir.size]
     row_weight = reservoir.weights[: reservoir.size] / max(current_iteration, 1)
-    known = iterations != cfr_reservoir.UNKNOWN_ITERATION
-    starts = [start for start, _net in benchmark_pool]
-    for i, start in enumerate(starts):
-        hi = starts[i + 1] if i + 1 < len(starts) else np.inf
-        mask = known & (iterations >= start) & (iterations < hi)
+    known = generations != cfr_reservoir.UNKNOWN_GENERATION
+    for i, (member_generation, _net) in enumerate(benchmark_pool):
+        mask = known & (generations == member_generation)
         out[i] = float(row_weight[mask].sum())
     return out
 
@@ -396,39 +397,39 @@ def _resolve_benchmark_pool(
 def _reload_checkpoint(
     checkpoint_path: str, reload_previous: bool, config: DeepCFRConfig, rng: np.random.Generator,
 ) -> tuple[
-    cfr_networks.AdvantageNet | None, cfr_reservoir.ReservoirBuffer | None, dict | None, int, DeepCFRConfig,
+    cfr_networks.AdvantageNet | None, cfr_reservoir.ReservoirBuffer | None, dict | None, int, int, DeepCFRConfig,
 ]:
     """Returns (net_to_resume_from_or_None, reservoir_to_resume_from_or_None,
-    optimizer_state_to_resume_from_or_None, completed_iterations, config),
-    where `config` has been updated in place to match the reloaded net's
-    own architecture if one was found -- a saved net's input/hidden layer
-    shapes can't change after the fact, so the checkpoint's own
+    optimizer_state_to_resume_from_or_None, completed_iterations, generation,
+    config), where `config` has been updated in place to match the reloaded
+    net's own architecture if one was found -- a saved net's input/hidden
+    layer shapes can't change after the fact, so the checkpoint's own
     feature_keys/hidden_sizes/table_size always win over whatever
     --feature-keys/--hidden-sizes/--table-size were passed on the command
     line. The reservoir (Trainer.save's `<path>.npz`) and optimizer
-    state/completed_iterations (Trainer.save's `<path>_trainer_state.pt`)
-    are reloaded alongside the net whenever they exist -- see Trainer.save's
-    docstring for why all three are always written together -- but a net
-    checkpoint from before one of them was added won't have it, so each is
-    allowed to come back None/0 (a fresh empty reservoir, a fresh optimizer,
-    t=0) without treating it as an error. completed_iterations is always
-    part of the training loop's iteration numbering (0 whenever no trainer
-    state was found), never left dangling, since a mismatch between it and
-    the reloaded reservoir's own stored `t` values is exactly the bug that
-    caused training loss to spike after a resume -- see Trainer's
-    docstring."""
+    state/completed_iterations/generation (Trainer.save's
+    `<path>_trainer_state.pt`) are reloaded alongside the net whenever they
+    exist -- see Trainer.save's docstring for why all four are always
+    written together -- but a net checkpoint from before one of them was
+    added won't have it, so each is allowed to come back None/0 (a fresh
+    empty reservoir, a fresh optimizer, t=0, generation 0) without treating
+    it as an error. completed_iterations is always part of the training
+    loop's iteration numbering (0 whenever no trainer state was found),
+    never left dangling, since a mismatch between it and the reloaded
+    reservoir's own stored `t` values is exactly the bug that caused
+    training loss to spike after a resume -- see Trainer's docstring."""
     if not reload_previous:
         print("--no-reload-previous passed; starting from a fresh random net and reservoir.")
-        return None, None, None, 0, config
+        return None, None, None, 0, 0, config
     if not (os.path.exists(f"{checkpoint_path}.pt") and os.path.exists(f"{checkpoint_path}.json")):
         print(f"No previous checkpoint found at {checkpoint_path}; starting from scratch.")
-        return None, None, None, 0, config
+        return None, None, None, 0, 0, config
 
     try:
         net, loaded_config = cfr_networks.load(checkpoint_path)
     except Exception as exc:
         print(f"Warning: could not reload checkpoint from {checkpoint_path} ({exc}); starting from scratch.")
-        return None, None, None, 0, config
+        return None, None, None, 0, 0, config
 
     print(
         f"Reloaded checkpoint from {checkpoint_path} "
@@ -481,8 +482,9 @@ def _reload_checkpoint(
 
     optimizer_state = None
     completed_iterations = 0
+    generation = 0
     try:
-        optimizer_state, completed_iterations = Trainer.load_trainer_state(checkpoint_path)
+        optimizer_state, completed_iterations, generation = Trainer.load_trainer_state(checkpoint_path)
     except Exception as exc:
         print(
             f"Warning: could not reload optimizer/iteration state from {checkpoint_path} ({exc}); "
@@ -491,14 +493,17 @@ def _reload_checkpoint(
         )
     else:
         if optimizer_state is not None:
-            print(f"Reloaded optimizer state and iteration count ({completed_iterations}) from {checkpoint_path}.")
+            print(
+                f"Reloaded optimizer state, iteration count ({completed_iterations}), and generation "
+                f"({generation}) from {checkpoint_path}."
+            )
         else:
             print(
                 f"No optimizer/iteration state found at {checkpoint_path} (checkpoint predates it); "
                 "resuming with a fresh optimizer at iteration 0."
             )
 
-    return net, reservoir, optimizer_state, completed_iterations, config
+    return net, reservoir, optimizer_state, completed_iterations, generation, config
 
 
 def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_workers: int, executor: Executor | None) -> None:
@@ -537,12 +542,13 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
 
     os.makedirs(args.out_dir, exist_ok=True)
     checkpoint_path = os.path.join(args.out_dir, "checkpoint_latest")
-    initial_net, initial_reservoir, initial_optimizer_state, completed_iterations, config = _reload_checkpoint(
-        checkpoint_path, args.reload_previous, config, rng,
+    initial_net, initial_reservoir, initial_optimizer_state, completed_iterations, generation, config = (
+        _reload_checkpoint(checkpoint_path, args.reload_previous, config, rng)
     )
     trainer = Trainer.new(
         config, rng, initial_net=initial_net, initial_reservoir=initial_reservoir,
         initial_optimizer_state=initial_optimizer_state, completed_iterations=completed_iterations,
+        initial_generation=generation,
     )
 
     # The --benchmark-interval pool: reloaded from wherever a previous run
@@ -554,10 +560,12 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
     # entry -- a resumed run must not differ from one that simply kept
     # running in the same process. Falls back to a single-entry pool
     # holding whatever net this run's iteration loop below is about to start
-    # from (freshly random, or reloaded -- including trainer.completed_iterations
-    # iterations of prior training, since that's carried forward too -- see
-    # _reload_checkpoint) whenever nothing was reloaded (a fresh run,
-    # --no-reload-previous, or a checkpoint saved before this pool existed).
+    # from, tagged with trainer.generation as reloaded (freshly random and
+    # generation 0, or reloaded -- including however many iterations of
+    # prior training and whichever generation it was already on, since both
+    # are carried forward too -- see _reload_checkpoint) whenever nothing
+    # was reloaded (a fresh run, --no-reload-previous, or a checkpoint saved
+    # before this pool -- or its own generation tracking -- existed).
     # Gains one more entry each time a check shows improvement, and loses
     # whichever ones have faded below --benchmark-pool-min-weight-fraction
     # of the reservoir's own current attributable weight (see this module's
@@ -569,7 +577,7 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
             if benchmark_pool:
                 print(f"Reloaded a {len(benchmark_pool)}-entry benchmark pool from {checkpoint_path}.")
         if not benchmark_pool:
-            benchmark_pool = [(trainer.completed_iterations, cfr_networks.clone(trainer.net))]
+            benchmark_pool = [(trainer.generation, cfr_networks.clone(trainer.net))]
 
     consecutive_non_improvements = 0
 
@@ -603,7 +611,7 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
                     anchor, config.feature_keys, f"checkpoint_{i}",
                     id_offset=-100 * (i + 1), gto_spots=config.gto_spots,
                 )
-                for i, (_start, anchor) in enumerate(benchmark_pool)
+                for i, (_generation, anchor) in enumerate(benchmark_pool)
             ]
             outcome = run_benchmark_until_resolved(
                 current_players, checkpoint_pools, game_config, rng,
@@ -628,7 +636,8 @@ def _run_training(args: argparse.Namespace, rng: np.random.Generator, num_worker
             )
             if outcome.improved:
                 consecutive_non_improvements = 0
-                benchmark_pool.append((iteration, cfr_networks.clone(trainer.net)))
+                trainer.generation += 1
+                benchmark_pool.append((trainer.generation, cfr_networks.clone(trainer.net)))
             else:
                 consecutive_non_improvements += 1
                 patience_label = args.early_stop_patience if args.early_stop_patience > 0 else "unlimited"

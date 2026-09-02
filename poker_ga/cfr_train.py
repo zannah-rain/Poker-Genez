@@ -95,7 +95,18 @@ class Trainer:
     smaller number than the samples were collected under -- inflating old
     samples' weights by up to that old-scale/1 ratio and spiking the
     reported loss -- so a resume must carry this forward and keep counting
-    from it, not restart at 1."""
+    from it, not restart at 1.
+
+    generation is exactly which benchmark-pool promotion epoch (see
+    cfr_main.py's own module docstring) is currently being trained --
+    0 before any promotion, then incremented by exactly 1 each time
+    cfr_main.py's own training loop confirms an improved benchmark check
+    and promotes the net. run_iteration forwards it unchanged to every
+    reservoir sample collected under it (cfr_reservoir.ReservoirBuffer.add's
+    own `generation`) -- cfr_main.py is the only thing that ever advances
+    it; run_iteration itself just threads whatever value is already here
+    through, the same passive role it plays for `t` versus
+    completed_iterations."""
 
     config: DeepCFRConfig
     net: cfr_networks.AdvantageNet
@@ -103,6 +114,7 @@ class Trainer:
     reservoir: cfr_reservoir.ReservoirBuffer
     feature_indices: np.ndarray
     completed_iterations: int = 0
+    generation: int = 0
 
     @classmethod
     def new(
@@ -111,6 +123,7 @@ class Trainer:
         initial_reservoir: Optional[cfr_reservoir.ReservoirBuffer] = None,
         initial_optimizer_state: Optional[dict] = None,
         completed_iterations: int = 0,
+        initial_generation: int = 0,
     ) -> "Trainer":
         feature_indices = cfr_features.feature_indices(config.feature_keys)
         net = initial_net if initial_net is not None else cfr_networks.AdvantageNet(
@@ -124,7 +137,7 @@ class Trainer:
         )
         return cls(
             config=config, net=net, optimizer=optimizer, reservoir=reservoir, feature_indices=feature_indices,
-            completed_iterations=completed_iterations,
+            completed_iterations=completed_iterations, generation=initial_generation,
         )
 
     def net_config(self) -> cfr_networks.AdvantageNetConfig:
@@ -136,31 +149,41 @@ class Trainer:
     def save(self, path: str) -> None:
         """Saves the net (cfr_networks.save, `<path>.pt`/`.json`), its
         reservoir (cfr_reservoir.ReservoirBuffer.save, `<path>.npz`), and
-        its optimizer state + completed_iterations (`<path>_trainer_state.pt`)
-        together as one call -- the three should never drift out of sync
-        (see load_trainer_state / completed_iterations' own docstring for
-        why leaving either of the latter two behind corrupts a resumed
-        run's loss weighting), so there's deliberately no way to save a
-        subset."""
+        its optimizer state + completed_iterations + generation
+        (`<path>_trainer_state.pt`) together as one call -- these should
+        never drift out of sync (see load_trainer_state / completed_
+        iterations' own docstring for why leaving any of the latter three
+        behind corrupts a resumed run's loss weighting/benchmark-pool
+        attribution), so there's deliberately no way to save a subset."""
         cfr_networks.save(self.net, self.net_config(), path)
         self.reservoir.save(path)
         torch.save(
-            {"optimizer": self.optimizer.state_dict(), "completed_iterations": self.completed_iterations},
+            {
+                "optimizer": self.optimizer.state_dict(),
+                "completed_iterations": self.completed_iterations,
+                "generation": self.generation,
+            },
             _trainer_state_path(path),
         )
 
     @staticmethod
-    def load_trainer_state(path: str) -> tuple[Optional[dict], int]:
-        """(optimizer_state_dict, completed_iterations) saved alongside
-        `path` by Trainer.save, or (None, 0) if `<path>_trainer_state.pt`
-        doesn't exist -- e.g. a net checkpoint saved before this was added,
-        which is allowed to come back to a fresh optimizer/t=0 rather than
-        treated as an error, the same way a missing reservoir file is."""
+    def load_trainer_state(path: str) -> tuple[Optional[dict], int, int]:
+        """(optimizer_state_dict, completed_iterations, generation) saved
+        alongside `path` by Trainer.save, or (None, 0, 0) if
+        `<path>_trainer_state.pt` doesn't exist -- e.g. a net checkpoint
+        saved before this was added, which is allowed to come back to a
+        fresh optimizer/t=0/generation=0 rather than treated as an error,
+        the same way a missing reservoir file is. A state file saved before
+        `generation` existed (but after completed_iterations already did)
+        also falls back to generation 0 the same way -- genuinely unknown,
+        but 0 is the same safe, self-consistent bootstrap a fresh run would
+        start from (see cfr_main.py's own _load_benchmark_pool for the
+        matching fallback on the benchmark-pool side)."""
         state_path = _trainer_state_path(path)
         if not os.path.exists(state_path):
-            return None, 0
+            return None, 0, 0
         state = torch.load(state_path, map_location="cpu")
-        return state["optimizer"], int(state["completed_iterations"])
+        return state["optimizer"], int(state["completed_iterations"]), int(state.get("generation", 0))
 
     def revert_to(self, checkpoint_net: cfr_networks.AdvantageNet) -> None:
         """Discards the current net weights and optimizer state, replacing
@@ -236,7 +259,10 @@ def run_iteration(trainer: Trainer, rng: np.random.Generator, iteration: int, sh
     there corrupts the reservoir's recency weighting. This sets
     trainer.completed_iterations = iteration at the end, so a caller that
     resumed from a reload and keeps calling this in sequence doesn't have
-    to track it separately."""
+    to track it separately. Every traversal's reservoir samples are also
+    stamped with trainer.generation as-is (see Trainer's own docstring) --
+    this function never advances it itself; only cfr_main.py's own
+    training loop does, on a confirmed-improved benchmark check."""
     config = trainer.config
     for _ in tqdm(
         range(config.traversals_per_iteration), desc=f"iter {iteration} traversals",
@@ -247,6 +273,7 @@ def run_iteration(trainer: Trainer, rng: np.random.Generator, iteration: int, sh
             float(iteration), trainer.feature_indices, num_equity_rollouts=config.num_equity_rollouts,
             min_starting_stack_bb=config.min_starting_stack_bb,
             max_starting_stack_bb=config.max_starting_stack_bb, gto_spots=config.gto_spots,
+            generation=trainer.generation,
         )
 
     trainer.net.train()

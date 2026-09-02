@@ -130,8 +130,8 @@ def betting_round(
     per street *already* completed before this one (index 0 = preflop, 1 =
     flop, 2 = turn -- always exactly `street` entries long, since this
     street itself isn't in there yet), feeding every Situation this round
-    builds with the frozen "Raises <street>"/"Last Aggressor <street>"
-    family (see features.Situation's own field docs) -- each stays 0/False
+    builds with the frozen per-calendar-street num_raises_preflop/flop/turn
+    fields (see features.Situation's own field docs) -- each stays 0
     until its own street has actually finished, then keeps that final
     reading for every later street, including a skipped one (see
     play_hand, which appends a (0, None) placeholder for a street where
@@ -198,9 +198,6 @@ def betting_round(
             num_raises_flop=num_raises_flop,
             num_raises_turn=num_raises_turn,
             is_aggressor_previous_street=(completed_street_aggressors[-1] == i if completed_street_aggressors else False),
-            is_aggressor_preflop=(len(completed_street_aggressors) > 0 and completed_street_aggressors[0] == i),
-            is_aggressor_flop=(len(completed_street_aggressors) > 1 and completed_street_aggressors[1] == i),
-            is_aggressor_turn=(len(completed_street_aggressors) > 2 and completed_street_aggressors[2] == i),
             starting_stack=starting_stack,
             big_blind=min_bet,
             raised_positions=frozenset(

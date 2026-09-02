@@ -369,20 +369,21 @@ _DRAW_VALUES = (
     (6 / 7, "Nuts Flush Draw (9 Outs)"),
     (7 / 7, "Combo Draw (Flush + Straight)"),
 )
-# Shared by the whole "how many raises" family (num_raises_norm and every
-# num_raises_previous_street/preflop/flop/turn sibling below) -- deliberately
-# worded generically ("No raises", not "No raises yet this street") since
-# the same table backs both the live current-street reading and every
-# frozen-once-that-street-ended one, and a person reading e.g. "Raises
-# Preflop: 3 or more raises (clipped)" on the river shouldn't have to
-# mentally substitute in whichever street that particular feature is
-# actually about.
-_RAISES_VALUES = (
-    (0.0, "No raises"),
-    (1 / 3, "1 raise"),
-    (2 / 3, "2 raises"),
-    (1.0, "3 or more raises (clipped) -- by this point it's mostly a shove-or-not decision"),
+# total_raises_norm: every raise across the whole hand so far (every
+# completed street's own final count, plus the current street's own live
+# count), capped at 5 -- past that point, exactly how many more re-raises
+# it's technically been stops changing the strategy much either way.
+_TOTAL_RAISES_VALUES = (
+    (0 / 5, "0 raises"), (1 / 5, "1 raise"), (2 / 5, "2 raises"), (3 / 5, "3 raises"),
+    (4 / 5, "4 raises"), (5 / 5, "5 or more raises (clipped)"),
 )
+# last_street_aggressor_norm: what happened on the *previous* street,
+# collapsed to the 3 states that matter -- Quiet (nobody raised: the street
+# just checked/called through) < Caller (someone else raised and this
+# player wasn't the one who made the last raise) < Last Aggressor (this
+# player made the previous street's own last raise). Always Quiet preflop,
+# since there's no previous street.
+_LAST_STREET_AGGRESSOR_VALUES = ((0.0, "Quiet"), (0.5, "Caller"), (1.0, "Last Aggressor"))
 _STACK_DEPTH_VALUES = (
     (0.0, "Very short stack (~0bb)"),
     (0.25, "Short stack (~50bb)"),
@@ -441,7 +442,6 @@ _SEAT_ROLE_VALUES = tuple((i / (len(SEAT_ROLES) - 1), _SEAT_ROLE_LABELS[role]) f
 # Flop-texture features describe the flop (board[:3]) -- still frozen once
 # the flop is dealt, since it doesn't change on the turn/river. Both default
 # to their lowest-value category before the flop (nothing has happened yet).
-_FLOP_SUIT_TEXTURE_VALUES = ((0.0, "Rainbow"), (0.5, "Flush Draw Flop"), (1.0, "Monotone"))
 _FLOP_WETNESS_VALUES = ((0.0, "Dry"), (1.0, "Wet"))
 _FLOP_DYNAMISM_VALUES = ((0.0, "Static"), (1.0, "Dynamic"))
 
@@ -608,54 +608,32 @@ FEATURE_SPECS: list[FeatureSpec] = [
     FeatureSpec(
         "num_active_norm", "Players Still In Hand",
         "Number of players who have not folded yet this hand, capped at 4 and divided by "
-        "4 -- capped rather than higher since, similar to num_raises_norm, the exact "
+        "4 -- capped rather than higher since, similar to total_raises_norm, the exact "
         "count stops mattering much for strategy once a pot is already 4+ ways.",
         kind="categorical", value_table=_ACTIVE_PLAYERS_VALUES, group="Table & Game State Features",
     ),
 
     FeatureSpec(
-        "num_raises_norm", "Raises This Street",
-        "Number of bets/raises made so far on the current street, divided by 3 and clipped "
-        "to 0-1 -- capped at 3 rather than higher, since by the time a street has seen 3 "
-        "raises the remaining decision is essentially just shove-or-not regardless of "
-        "exactly how many more re-raises it's technically been. Live -- resets to 0 at the "
-        "start of every street, unlike the frozen, one-street-late Raises Last Street below "
-        "(or Raises Preflop/Flop/Turn, each pinned to one specific calendar street -- see "
-        "their own descriptions).",
-        kind="categorical", value_table=_RAISES_VALUES, group="Betting Behaviour Features",
+        "total_raises_norm", "Total Raises",
+        "Every bet/raise across the whole hand so far, added up across every street -- "
+        "each completed street's own final count, plus the current street's own live "
+        "count -- capped at 5 and normalized as count / 5. Replaces the old per-street "
+        "Raises This Street/Raises Last Street/Raises Preflop/Raises Flop family with "
+        "one running total: exactly *which* street each raise happened on matters far "
+        "less than how many the hand has seen altogether by this point.",
+        kind="categorical", value_table=_TOTAL_RAISES_VALUES, group="Betting Behaviour Features",
     ),
     FeatureSpec(
-        "raises_last_street_norm", "Raises Last Street",
-        "Raises This Street's own reading, carried forward one street late: how many "
-        "bets/raises the *previous* street ended with (0 preflop, since there's no previous "
-        "street), normalized the same way. Frozen for the rest of the current street once "
-        "read -- it only advances again when the next street starts. Pairs with Last "
-        "Aggressor - Previous Street below the same way Raises This Street pairs with "
-        "wanting to know *who* made those raises.",
-        kind="categorical", value_table=_RAISES_VALUES, group="Betting Behaviour Features",
-    ),
-
-    FeatureSpec(
-        "raises_preflop_norm", "Raises Preflop",
-        "How many raises preflop ended with, normalized the same way as Raises This Street -- "
-        "but pinned to preflop specifically rather than whichever street is current: 0 until "
-        "preflop has actually finished (never the live in-progress preflop count -- see "
-        "Raises This Street for that), then frozen at that final count for the rest of the "
-        "hand, however many streets later a decision happens to be. The generalized, "
-        "every-street version of what used to be a preflop-only 'Pot Type' feature.",
-        kind="categorical", value_table=_RAISES_VALUES, group="Betting Behaviour Features",
-    ),
-    FeatureSpec(
-        "raises_flop_norm", "Raises Flop",
-        "Raises Preflop's own explanation, one street later: 0 until the flop has finished, "
-        "then frozen at its final raise count for the rest of the hand (so only ever "
-        "meaningful from the turn onward). There's no Raises Turn sibling: it would only "
-        "ever be meaningful on the river, where Raises Last Street (raises_last_street_norm) "
-        "-- the turn's own final raise count, at that point -- already gives exactly the "
-        "same reading, so a dedicated feature for it would be pure duplication (Raises "
-        "Flop itself stays genuinely distinct from Raises Last Street on the turn *and* the "
-        "river, so it's kept).",
-        kind="categorical", value_table=_RAISES_VALUES, group="Betting Behaviour Features",
+        "last_street_aggressor_norm", "Last Street Aggressor Info",
+        "What happened on the *previous* street (0 preflop, since there's no previous "
+        "street -- always reads as Quiet then), collapsed to the 3 states that matter: "
+        "Quiet (nobody raised -- the street just checked/called through) < Caller "
+        "(someone raised, but this player wasn't the one who made the last raise) < "
+        "Last Aggressor (this player made the previous street's own last raise). "
+        "Replaces the old separate Last Aggressor - Previous Street boolean (whether it "
+        "was me) and part of Raises Last Street (whether there was any raise at all) "
+        "with the one combined read that's actually decision-relevant here.",
+        kind="categorical", value_table=_LAST_STREET_AGGRESSOR_VALUES, group="Betting Behaviour Features",
     ),
 
     FeatureSpec(
@@ -676,65 +654,18 @@ FEATURE_SPECS: list[FeatureSpec] = [
         group="Hole Card Characteristics", maskable=True,
     ),
     FeatureSpec(
-        "is_aggressor_previous_street", "Last Aggressor - Previous Street",
-        "1 if this player made the most recent bet/raise on the *previous* street, else 0 "
-        "(always 0 preflop, since there's no previous street). Not the current street: a "
-        "player who just raised is skipped over until either the street ends or someone "
-        "else re-raises, at which point they're no longer that street's own aggressor -- "
-        "so at the moment any decision is actually made, 'I raised this street' is always "
-        "false, making the previous street the only *relative* version of this that's ever "
-        "useful (see Last Aggressor Preflop/Flop/Turn below for the *specific-calendar-"
-        "street* versions, e.g. 'did I open this pot', that stay meaningful for the rest of "
-        "the hand rather than just one street).",
-        group="Betting Behaviour Features",
-    ),
-    FeatureSpec(
-        "is_aggressor_preflop", "Last Aggressor Preflop",
-        "1 if this player made the last bet/raise preflop, else 0 -- 0 until preflop has "
-        "actually finished, then frozen at that reading for the rest of the hand. Unlike "
-        "Last Aggressor - Previous Street, this doesn't reset as later streets pass: it keeps "
-        "answering 'did I open this pot' all the way to the river.",
-        group="Betting Behaviour Features",
-    ),
-    FeatureSpec(
-        "is_aggressor_flop", "Last Aggressor Flop",
-        "Last Aggressor Preflop's own explanation, one street later: 0 until the flop has "
-        "finished, then frozen at whether this player made the flop's last raise (so only "
-        "ever meaningful from the turn onward). There's no Last Aggressor Turn sibling: it "
-        "would only ever be meaningful on the river, where Last Aggressor - Previous Street "
-        "(is_aggressor_previous_street) -- whether this player made the turn's last raise, "
-        "at that point -- already gives exactly the same reading, so a dedicated feature "
-        "for it would be pure duplication (Last Aggressor Flop itself stays genuinely "
-        "distinct from Last Aggressor - Previous Street on the turn *and* the river, so "
-        "it's kept).",
-        group="Betting Behaviour Features",
-    ),
-
-    FeatureSpec(
-        "flop_suit_texture_norm", "Flop Suit Texture",
-        "How suit-coordinated the flop is, purely from its own 3 cards -- Rainbow "
-        "(all 3 different suits) < Flush Draw Flop (exactly 2 share a suit) < "
-        "Monotone (all 3 share a suit), normalized as family_index / 2. Doesn't "
-        "reflect this player's own hole cards at all -- that's draw_norm's own "
-        "flush-draw buckets instead. Frozen once the flop is dealt (unaffected by "
-        "the turn/river, since the flop's own cards don't change); defaults to 0.0 "
-        "(Rainbow's value) before the flop.",
-        kind="categorical", value_table=_FLOP_SUIT_TEXTURE_VALUES, group="Board / Flop Characteristics",
-    ),
-
-    FeatureSpec(
         "flop_wetness_norm", "Flop Wet vs Dry",
         "How draw-heavy the flop is, purely from its own suit and rank coordination "
         "(not this player's hole cards -- see draw_norm for the hole-card-aware "
-        "version), combined into one 0-4 score: suit family index (0 Rainbow / 1 "
-        "Flush Draw Flop / 2 Monotone, see Flop Suit Texture) + 1 if the flop's 3 "
-        "ranks (Ace counted as high or low, whichever is closer) span 4 or less + 1 "
-        "if they're all different ranks and span 3 or less (tight enough that an "
-        "open-ended straight draw is possible for some hole cards) -- then "
-        "thresholded at >=2: Wet (1.0) at or above the threshold, Dry (0.0) below it. "
-        "A monotone flop is always Wet on suits alone; a rainbow, disconnected flop is "
-        "always Dry. Frozen once the flop is dealt; defaults to 0.0 (Dry's value) "
-        "before the flop.",
+        "version), combined into one 0-4 score: suit family index (0 if the flop's 3 "
+        "cards are all different suits / 1 if exactly 2 share a suit / 2 if all 3 "
+        "share a suit) + 1 if the flop's 3 ranks (Ace counted as high or low, "
+        "whichever is closer) span 4 or less + 1 if they're all different ranks and "
+        "span 3 or less (tight enough that an open-ended straight draw is possible "
+        "for some hole cards) -- then thresholded at >=2: Wet (1.0) at or above the "
+        "threshold, Dry (0.0) below it. A monotone flop is always Wet on suits alone; "
+        "a rainbow, disconnected flop is always Dry. Frozen once the flop is dealt; "
+        "defaults to 0.0 (Dry's value) before the flop.",
         kind="categorical", value_table=_FLOP_WETNESS_VALUES, group="Board / Flop Characteristics",
     ),
 
@@ -895,24 +826,18 @@ class Situation:
     num_raises_preflop: int
     num_raises_flop: int
     num_raises_turn: int
-    # is_aggressor_previous_street/_preflop/_flop/_turn mirror the
-    # num_raises_* family above exactly, one street late (frozen the same
-    # way, same "previous vs one specific calendar street" split) -- did I
-    # make the last bet/raise on that (now-finished) street? Deliberately
-    # never "this [current] street": whoever's still deciding on the
-    # current street can never themselves be its own last aggressor --
-    # raising takes you out of the to-act order until either the street
+    # Did I make the last bet/raise on the *previous* (now-finished) street?
+    # Frozen the same way as num_raises_previous_street, one street late.
+    # Deliberately never "this [current] street": whoever's still deciding
+    # on the current street can never themselves be its own last aggressor
+    # -- raising takes you out of the to-act order until either the street
     # ends or someone else re-raises (see game.betting_round), and a
     # re-raise immediately replaces you as the current street's aggressor --
-    # so that reading would be a structurally-always-False feature. Every
-    # street that's actually finished has no such conflict, so each is a
-    # real, useful read (e.g. is_aggressor_previous_street for "am I
-    # continuation betting"; is_aggressor_preflop for "did I open this pot,
-    # no matter how many streets ago").
+    # so that reading would be a structurally-always-False feature. Feeds
+    # last_street_aggressor_norm (see extract_features) -- combined with
+    # num_raises_previous_street, to also distinguish "nobody raised last
+    # street at all" from "someone else did".
     is_aggressor_previous_street: bool
-    is_aggressor_preflop: bool
-    is_aggressor_flop: bool
-    is_aggressor_turn: bool
     starting_stack: float
     big_blind: float = 2.0  # lets stack depth be expressed in actual BB
     # Starting positions (seating.SEAT_ROLES) of every *other* seat that has
@@ -1190,7 +1115,6 @@ def _hole_hand_grid_features(hole: list[Card], street: int) -> dict:
 
 
 _NO_FLOP_TEXTURE = {
-    "flop_suit_texture_norm": 0.0,
     "flop_wetness_norm": 0.0,
     "flop_dynamism_norm": 0.0,
 }
@@ -1235,7 +1159,6 @@ def _flop_texture(board: list[Card]) -> dict:
     dynamic = unpaired and (wet_score + high_card_adjustment) >= 2
 
     return {
-        "flop_suit_texture_norm": suit_index / 2.0,
         "flop_wetness_norm": float(wet),
         "flop_dynamism_norm": float(dynamic),
     }
@@ -1261,10 +1184,17 @@ def extract_features(sit: Situation) -> np.ndarray:
         if sit.num_seats_this_street > 1:
             position_norm = sit.position / (sit.num_seats_this_street - 1)
     num_active_norm = min(sit.num_active, 4) / 4.0
-    num_raises_norm = _clip01(sit.num_raises_this_street / 3.0)
-    raises_last_street_norm = _clip01(sit.num_raises_previous_street / 3.0)
-    raises_preflop_norm = min(sit.num_raises_preflop, 3) / 3.0
-    raises_flop_norm = min(sit.num_raises_flop, 3) / 3.0
+    total_raises = (
+        sit.num_raises_preflop + sit.num_raises_flop + sit.num_raises_turn + sit.num_raises_this_street
+    )
+    total_raises_norm = min(total_raises, 5) / 5.0
+    if sit.num_raises_previous_street == 0:
+        last_street_aggressor_bucket = 0  # Quiet
+    elif sit.is_aggressor_previous_street:
+        last_street_aggressor_bucket = 2  # Last Aggressor
+    else:
+        last_street_aggressor_bucket = 1  # Caller
+    last_street_aggressor_norm = last_street_aggressor_bucket / 2.0
     # Fixed for the whole hand (this player's stack *before* any chips went
     # in), not the live, street-to-street-changing current stack -- that's
     # what Stack-To-Pot Ratio (spr_norm, above) already captures.
@@ -1284,18 +1214,13 @@ def extract_features(sit: Situation) -> np.ndarray:
         "hole_connectivity": hole_connectivity,
         "hole_hand_category_norm": (hole_category / 11.0) if sit.street == 0 else MASKED,
         "street_norm": sit.street / 3.0,
-        "is_aggressor_previous_street": float(sit.is_aggressor_previous_street),
-        "is_aggressor_preflop": float(sit.is_aggressor_preflop),
-        "is_aggressor_flop": float(sit.is_aggressor_flop),
         "call_amount_norm": call_amount_norm,
         "spr_norm": spr_norm,
         "position_norm": position_norm,
         "starting_position_norm": (role_index / (len(SEAT_ROLES) - 1)) if sit.street == 0 else MASKED,
         "num_active_norm": num_active_norm,
-        "num_raises_norm": num_raises_norm,
-        "raises_last_street_norm": raises_last_street_norm,
-        "raises_preflop_norm": raises_preflop_norm,
-        "raises_flop_norm": raises_flop_norm,
+        "total_raises_norm": total_raises_norm,
+        "last_street_aggressor_norm": last_street_aggressor_norm,
         "stack_depth_norm": stack_depth_norm,
         "opp_vpip_norm": _clip01(sit.opp_vpip),
         "opp_pfr_norm": _clip01(sit.opp_pfr),

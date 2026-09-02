@@ -31,9 +31,6 @@ def make_situation(**overrides) -> Situation:
         num_raises_flop=0,
         num_raises_turn=0,
         is_aggressor_previous_street=False,
-        is_aggressor_preflop=False,
-        is_aggressor_flop=False,
-        is_aggressor_turn=False,
         starting_stack=200.0,
         big_blind=2.0,
     )
@@ -383,43 +380,41 @@ class TestBettingAndPotFeatures:
         values = values_by_key(make_situation(pot=10.0, effective_stack=1000.0))
         assert values["spr_norm"] == 1.0
 
-    def test_num_raises_norm_clips_at_3(self):
-        values = values_by_key(make_situation(num_raises_this_street=10))
-        assert values["num_raises_norm"] == 1.0
+    def test_total_raises_norm_sums_every_completed_street_plus_the_live_current_one(self):
+        # 1 preflop + 1 flop (both completed/frozen) + 1 live on the turn = 3.
+        values = values_by_key(make_situation(
+            street=2, num_raises_preflop=1, num_raises_flop=1, num_raises_turn=0, num_raises_this_street=1,
+        ))
+        assert values["total_raises_norm"] == pytest.approx(3 / 5)
 
-    def test_raises_last_street_norm_reflects_the_previous_streets_final_count(self):
-        values = values_by_key(make_situation(num_raises_previous_street=2, num_raises_this_street=0, street=1))
-        assert values["raises_last_street_norm"] == pytest.approx(2 / 3)
+    def test_total_raises_norm_preflop_only_counts_the_live_current_street(self):
+        # Preflop itself is never "completed" while it's still the current
+        # street, so only num_raises_this_street (the live count) counts.
+        values = values_by_key(make_situation(street=0, num_raises_this_street=2))
+        assert values["total_raises_norm"] == pytest.approx(2 / 5)
 
-    def test_raises_last_street_norm_clips_at_3(self):
-        values = values_by_key(make_situation(num_raises_previous_street=10))
-        assert values["raises_last_street_norm"] == 1.0
+    def test_total_raises_norm_caps_at_5(self):
+        values = values_by_key(make_situation(
+            street=3, num_raises_preflop=3, num_raises_flop=2, num_raises_turn=1, num_raises_this_street=2,
+        ))
+        assert values["total_raises_norm"] == 1.0
 
-    def test_raises_preflop_norm_freezes_preflop_raise_count(self):
-        # Frozen at whatever preflop's own final count was, regardless of
-        # what's happening on the *current* street (num_raises_this_street).
-        values = values_by_key(make_situation(num_raises_preflop=2, num_raises_this_street=0, street=1))
-        assert values["raises_preflop_norm"] == pytest.approx(2 / 3)
+    def test_last_street_aggressor_norm_quiet_when_previous_street_had_no_raises(self):
+        values = values_by_key(make_situation(num_raises_previous_street=0, is_aggressor_previous_street=False))
+        assert values["last_street_aggressor_norm"] == 0.0
 
-    def test_raises_preflop_norm_clips_at_3_raises(self):
-        values = values_by_key(make_situation(num_raises_preflop=10))
-        assert values["raises_preflop_norm"] == 1.0
+    def test_last_street_aggressor_norm_defaults_to_quiet_preflop(self):
+        # No previous street at all preflop -- reads the same as Quiet.
+        values = values_by_key(make_situation(street=0))
+        assert values["last_street_aggressor_norm"] == 0.0
 
-    def test_raises_flop_norm_freezes_flops_final_raise_count(self):
-        values = values_by_key(make_situation(num_raises_flop=1, street=2))
-        assert values["raises_flop_norm"] == pytest.approx(1 / 3)
+    def test_last_street_aggressor_norm_caller_when_someone_else_raised(self):
+        values = values_by_key(make_situation(num_raises_previous_street=1, is_aggressor_previous_street=False))
+        assert values["last_street_aggressor_norm"] == pytest.approx(0.5)
 
-    def test_is_aggressor_previous_street_flag(self):
-        assert values_by_key(make_situation(is_aggressor_previous_street=True))["is_aggressor_previous_street"] == 1.0
-        assert values_by_key(make_situation(is_aggressor_previous_street=False))["is_aggressor_previous_street"] == 0.0
-
-    def test_is_aggressor_preflop_flag_stays_readable_past_the_flop(self):
-        values = values_by_key(make_situation(is_aggressor_preflop=True, street=2))
-        assert values["is_aggressor_preflop"] == 1.0
-
-    def test_is_aggressor_flop_flag(self):
-        values = values_by_key(make_situation(is_aggressor_flop=True, street=2))
-        assert values["is_aggressor_flop"] == 1.0
+    def test_last_street_aggressor_norm_last_aggressor_when_this_player_raised(self):
+        values = values_by_key(make_situation(num_raises_previous_street=1, is_aggressor_previous_street=True))
+        assert values["last_street_aggressor_norm"] == 1.0
 
 
 class TestStackAndSeatFeatures:
@@ -467,32 +462,8 @@ class TestStackAndSeatFeatures:
 class TestFlopTexture:
     def test_preflop_defaults_are_all_zero(self):
         values = values_by_key(make_situation(board=[]))
-        for key in ["flop_suit_texture_norm", "flop_wetness_norm", "flop_dynamism_norm"]:
+        for key in ["flop_wetness_norm", "flop_dynamism_norm"]:
             assert values[key] == 0.0
-
-    def test_monotone_flop(self):
-        board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kc")]
-        values = values_by_key(make_situation(board=board, street=1))
-        assert values["flop_suit_texture_norm"] == 1.0
-
-    def test_two_tone_flop(self):
-        board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kh")]
-        values = values_by_key(make_situation(board=board, street=1))
-        assert values["flop_suit_texture_norm"] == pytest.approx(0.5)
-
-    def test_rainbow_flop(self):
-        board = [Card.from_str("2c"), Card.from_str("7d"), Card.from_str("Kh")]
-        values = values_by_key(make_situation(board=board, street=1))
-        assert values["flop_suit_texture_norm"] == 0.0
-
-    def test_suit_family_true_regardless_of_hole_card_connection(self):
-        # flop_suit_texture_norm is purely the flop's own 3-card suit shape
-        # -- no hole-card awareness at all (that's draw_norm's own
-        # flush-draw buckets instead).
-        board = [Card.from_str("2c"), Card.from_str("7d"), Card.from_str("Kh")]
-        no_match = values_by_key(make_situation(hole=[Card.from_str("9s"), Card.from_str("2s")], board=board))
-        two_match = values_by_key(make_situation(hole=[Card.from_str("9c"), Card.from_str("9d")], board=board))
-        assert no_match["flop_suit_texture_norm"] == two_match["flop_suit_texture_norm"] == 0.0
 
     def test_monotone_hole_card_hit_still_reads_a_made_flush_elsewhere(self):
         board = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kc")]
@@ -573,13 +544,6 @@ class TestFlopTexture:
         turn_values = values_by_key(make_situation(board=board4, street=2))
         assert turn_values["flop_wetness_norm"] == flop_values["flop_wetness_norm"] == 1.0
         assert turn_values["flop_dynamism_norm"] == flop_values["flop_dynamism_norm"] == 1.0
-
-    def test_flop_texture_frozen_on_turn_and_river(self):
-        board3 = [Card.from_str("2c"), Card.from_str("7c"), Card.from_str("Kc")]  # monotone
-        flop_values = values_by_key(make_situation(board=board3, street=1))
-        board4 = board3 + [Card.from_str("9d")]  # turn card breaks the monotone look
-        turn_values = values_by_key(make_situation(board=board4, street=2))
-        assert turn_values["flop_suit_texture_norm"] == flop_values["flop_suit_texture_norm"] == 1.0
 
 
 class TestHandCategoryPairBuckets:
